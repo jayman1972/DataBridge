@@ -128,7 +128,8 @@ class BLPAPIClient(BloombergClientBase):
                             if _debug:
                                 print(f"[BLPAPI] securityData: {num_securities} security/ies")
                             for i in range(num_securities):
-                                securityData = securityDataArray.getValueAsElement(i)
+                                # Use getValue(i) - securityData items are HistoricalDataTable, not Element
+                                securityData = securityDataArray.getValue(i)
                                 # Check for security error
                                 if securityData.hasElement("securityError"):
                                     err = securityData.getElement("securityError")
@@ -147,7 +148,8 @@ class BLPAPIClient(BloombergClientBase):
                                     if _debug:
                                         print(f"[BLPAPI] fieldData: {num_rows} row(s)")
                                     for j in range(num_rows):
-                                        fieldData = fieldDataArray.getValueAsElement(j)
+                                        # Use getValue(j) - fieldData items may not be plain Element
+                                        fieldData = fieldDataArray.getValue(j)
                                         record = {"date": None}
                                         
                                         # Extract date

@@ -115,21 +115,16 @@ class BLPAPIClient(BloombergClientBase):
             session.sendRequest(request)
             
             records = []
-            event_count = 0
             while True:
                 event = session.nextEvent(500)
-                event_count += 1
                 
                 if event.eventType() in (blpapi.Event.RESPONSE, blpapi.Event.PARTIAL_RESPONSE):
                     for msg in event:
                         if msg.hasElement("securityData"):
                             securityDataArray = msg.getElement("securityData")
-                            num_securities = securityDataArray.numValues()
                             if _debug:
-                                print(f"[BLPAPI] securityData: {num_securities} security/ies")
-                            for i in range(num_securities):
-                                # Use getValue(i) - securityData items are HistoricalDataTable, not Element
-                                securityData = securityDataArray.getValue(i)
+                                print(f"[BLPAPI] securityData: iterating with .values()")
+                            for securityData in securityDataArray.values():
                                 # Check for security error
                                 if securityData.hasElement("securityError"):
                                     err = securityData.getElement("securityError")
@@ -138,21 +133,16 @@ class BLPAPIClient(BloombergClientBase):
                                         f"{err.getElementAsString('message')}"
                                     )
                                 
-                                sec_name = securityData.getElementAsString("security") if securityData.hasElement("security") else "?"
                                 if _debug:
-                                    print(f"[BLPAPI] security={sec_name!r} hasFieldData={securityData.hasElement('fieldData')} hasFieldExceptions={securityData.hasElement('fieldExceptions')}")
+                                    sec_name = securityData.getElementAsString("security") if securityData.hasElement("security") else "?"
+                                    print(f"[BLPAPI] security={sec_name!r} hasFieldData={securityData.hasElement('fieldData')}")
                                 
                                 if securityData.hasElement("fieldData"):
                                     fieldDataArray = securityData.getElement("fieldData")
-                                    num_rows = fieldDataArray.numValues()
                                     if _debug:
-                                        print(f"[BLPAPI] fieldData: {num_rows} row(s)")
-                                    for j in range(num_rows):
-                                        # Use getValue(j) - fieldData items may not be plain Element
-                                        fieldData = fieldDataArray.getValue(j)
+                                        print(f"[BLPAPI] fieldData: iterating with .values()")
+                                    for fieldData in fieldDataArray.values():
                                         record = {"date": None}
-                                        
-                                        # Extract date
                                         if fieldData.hasElement("date"):
                                             date_elem = fieldData.getElement("date")
                                             if date_elem.isNull():
@@ -162,15 +152,12 @@ class BLPAPIClient(BloombergClientBase):
                                                 record["date"] = date_val.toDatetime().strftime("%Y-%m-%d")
                                             else:
                                                 record["date"] = str(date_val)
-                                        
-                                        # Extract field values
                                         for field in fields:
                                             if fieldData.hasElement(field):
                                                 field_elem = fieldData.getElement(field)
                                                 if not field_elem.isNull():
                                                     value = field_elem.getValue()
                                                     record[field] = value
-                                        
                                         if record["date"]:
                                             records.append(record)
                                 elif _debug:

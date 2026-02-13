@@ -75,8 +75,12 @@ class BLPAPIClient(BloombergClientBase):
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Fetch historical data using blpapi"""
-        import os
+        """Fetch historical data using blpapi.
+
+        HistoricalDataRequest returns securityData as a single HistoricalDataTable
+        (not an array). Use it directly; iterate only over fieldData with
+        numValues()/getValue(i).
+        """
         _debug = os.environ.get("DATA_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
         if _debug:
             print(f"[BLPAPI HistoricalDataRequest] ticker={ticker!r} fields={fields} start_date={start_date!r} end_date={end_date!r}")
@@ -88,14 +92,14 @@ class BLPAPIClient(BloombergClientBase):
         try:
             refDataService = session.getService(self.service)
             request = refDataService.createRequest("HistoricalDataRequest")
-            
-            # Set security
-            request.getElement("securities").appendValue(ticker)
-            
+
+            # Set security (match old bloomberg_service: append)
+            request.append("securities", ticker)
+
             # Set fields
             for field in fields:
-                request.getElement("fields").appendValue(field)
-            
+                request.append("fields", field)
+
             # Set date range (Bloomberg API expects YYYYMMDD format)
             if start_date:
                 start_date_bbg = start_date.replace("-", "")
@@ -103,73 +107,98 @@ class BLPAPIClient(BloombergClientBase):
             if end_date:
                 end_date_bbg = end_date.replace("-", "")
                 request.set("endDate", end_date_bbg)
-            
-            # Set periodicity (daily)
-            request.set("periodicityAdjustment", "ACTUAL")
+
+            # Set periodicity (daily) - match old: no periodicityAdjustment
             request.set("periodicitySelection", "DAILY")
-            
+
             if _debug:
                 print(f"[BLPAPI] Request: securities=[{ticker}] fields={fields} startDate={start_date_bbg if start_date else None} endDate={end_date_bbg if end_date else None}")
-            
-            # Send request
+
             session.sendRequest(request)
-            
+
             records = []
             while True:
                 event = session.nextEvent(500)
-                
+
                 if event.eventType() in (blpapi.Event.RESPONSE, blpapi.Event.PARTIAL_RESPONSE):
                     for msg in event:
                         if msg.hasElement("securityData"):
-                            securityDataArray = msg.getElement("securityData")
-                            if _debug:
-                                print(f"[BLPAPI] securityData: iterating with .values()")
-                            for securityData in securityDataArray.values():
-                                # Check for security error
-                                if securityData.hasElement("securityError"):
-                                    err = securityData.getElement("securityError")
-                                    raise Exception(
-                                        f"Security error: {err.getElementAsString('category')} - "
-                                        f"{err.getElementAsString('message')}"
-                                    )
-                                
+                            # HistoricalDataRequest: securityData is single element, not array
+                            securityData = msg.getElement("securityData")
+
+                            # Check for security error (can exist even with fieldData)
+                            if securityData.hasElement("securityError"):
+                                err = securityData.getElement("securityError")
+                                raise Exception(
+                                    f"Security error: {err.getElementAsString('category')} - "
+                                    f"{err.getElementAsString('message')}"
+                                )
+
+                            if securityData.hasElement("fieldData"):
+                                fieldData = securityData.getElement("fieldData")
                                 if _debug:
-                                    sec_name = securityData.getElementAsString("security") if securityData.hasElement("security") else "?"
-                                    print(f"[BLPAPI] security={sec_name!r} hasFieldData={securityData.hasElement('fieldData')}")
-                                
-                                if securityData.hasElement("fieldData"):
-                                    fieldDataArray = securityData.getElement("fieldData")
-                                    if _debug:
-                                        print(f"[BLPAPI] fieldData: iterating with .values()")
-                                    for fieldData in fieldDataArray.values():
-                                        record = {"date": None}
-                                        if fieldData.hasElement("date"):
-                                            date_elem = fieldData.getElement("date")
-                                            if date_elem.isNull():
-                                                continue
-                                            date_val = date_elem.getValue()
-                                            if isinstance(date_val, blpapi.Datetime):
-                                                record["date"] = date_val.toDatetime().strftime("%Y-%m-%d")
-                                            else:
-                                                record["date"] = str(date_val)
-                                        for field in fields:
-                                            if fieldData.hasElement(field):
-                                                field_elem = fieldData.getElement(field)
-                                                if not field_elem.isNull():
-                                                    value = field_elem.getValue()
-                                                    record[field] = value
-                                        if record["date"]:
+                                    print(f"[BLPAPI] fieldData: numValues={fieldData.numValues()}")
+
+                                if fieldData.numValues() > 0:
+                                    for i in range(fieldData.numValues()):
+                                        dataPoint = fieldData.getValue(i)
+                                        date_obj = dataPoint.getElementAsDatetime("date")
+                                        date_str = date_obj.strftime("%Y-%m-%d") if hasattr(date_obj, "strftime") else str(date_obj)
+
+                                        record: Dict[str, Any] = {"date": date_str}
+
+                                        # Map PX_* to *_price for edge function compatibility
+                                        if dataPoint.hasElement("PX_OPEN"):
+                                            record["open_price"] = dataPoint.getElementAsFloat("PX_OPEN")
+                                        if dataPoint.hasElement("PX_HIGH"):
+                                            record["high_price"] = dataPoint.getElementAsFloat("PX_HIGH")
+                                        if dataPoint.hasElement("PX_LOW"):
+                                            record["low_price"] = dataPoint.getElementAsFloat("PX_LOW")
+                                        if dataPoint.hasElement("PX_OFFICIAL_CLOSE"):
+                                            record["close_price"] = dataPoint.getElementAsFloat("PX_OFFICIAL_CLOSE")
+                                            record["adjusted_close"] = record["close_price"]
+                                        elif dataPoint.hasElement("PX_LAST"):
+                                            record["close_price"] = dataPoint.getElementAsFloat("PX_LAST")
+                                            record["adjusted_close"] = record["close_price"]
+                                        if dataPoint.hasElement("PX_VOLUME"):
+                                            record["volume"] = dataPoint.getElementAsInteger("PX_VOLUME")
+
+                                        # Extract all requested fields generically
+                                        for requested_field in fields:
+                                            if dataPoint.hasElement(requested_field):
+                                                try:
+                                                    record[requested_field] = dataPoint.getElementAsFloat(requested_field)
+                                                except Exception:
+                                                    try:
+                                                        record[requested_field] = dataPoint.getElementAsString(requested_field)
+                                                    except Exception:
+                                                        if _debug:
+                                                            print(f"[BLPAPI] Could not extract field {requested_field}")
+
+                                        if "close_price" in record or len(record) > 1:
                                             records.append(record)
                                 elif _debug:
-                                    print(f"[BLPAPI] No fieldData element - response may be empty for this security")
-                
+                                    print(f"[BLPAPI] No fieldData values - response empty")
+                            elif _debug:
+                                print(f"[BLPAPI] No fieldData element")
+
+                            # Log field exceptions (can exist alongside fieldData)
+                            if securityData.hasElement("fieldExceptions"):
+                                fieldExceptions = securityData.getElement("fieldExceptions")
+                                for j in range(fieldExceptions.numValues()):
+                                    fe = fieldExceptions.getValue(j)
+                                    errInfo = fe.getElement("errorInfo")
+                                    errMsg = errInfo.getElementAsString("message")
+                                    if _debug:
+                                        print(f"[BLPAPI] fieldException: {errMsg}")
+
                 if event.eventType() == blpapi.Event.RESPONSE:
                     break
-            
+
             if _debug:
                 print(f"[BLPAPI] Response: {len(records)} records for {ticker!r}")
             return records
-        
+
         finally:
             session.stop()
     

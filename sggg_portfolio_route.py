@@ -101,20 +101,14 @@ def sggg_portfolio():
                     if (fund_nav and fund_nav != 0 and exposure is not None)
                     else None
                 )
-                sec_type = _str(row[4])
-                bbg = _str(row[6])
-                company_sym = _str(row[2])
-                # Options always use Bloomberg for quotes; if BBG_TICKER is null, use company_symbol
-                if (sec_type or "").upper() in ("EQUITYOPTION", "OPTION") and not bbg and company_sym:
-                    bbg = company_sym
                 positions.append({
                     "strategy": _str(row[0]),
                     "trade_group": _str(row[1]),
-                    "company_symbol": company_sym,
+                    "company_symbol": _str(row[2]),
                     "description": _str(row[3]),
-                    "security_type": sec_type,
+                    "security_type": _str(row[4]),
                     "currency": _str(row[5]),
-                    "bbg_ticker": bbg or _str(row[6]),
+                    "bbg_ticker": _str(row[6]),
                     "sector": _str(row[7]),
                     "country": _str(row[8]),
                     "long_short": _str(row[9]),

@@ -204,7 +204,7 @@ def _is_us_market_hours() -> bool:
 def bloomberg_quotes():
     """
     Fetch price for given Bloomberg tickers (options etc).
-    During US market hours (9:30am-4:00pm EST): uses mid (PX_BID+PX_ASK)/2 when available.
+    During US market hours (9:30am-4:00pm EST): uses PX_MID when available.
     Outside market hours: uses PX_OFFICIAL_CLOSE when available.
     Fallback: PX_LAST.
     Body: { "tickers": ["TICKER1 Equity", "TICKER2 Equity"] }
@@ -224,7 +224,7 @@ def bloomberg_quotes():
             return jsonify({}), 200
 
         in_market_hours = _is_us_market_hours()
-        fields = ["PX_LAST", "PX_BID", "PX_ASK", "PX_OFFICIAL_CLOSE"]
+        fields = ["PX_LAST", "PX_MID", "PX_OFFICIAL_CLOSE"]
         print("[bloomberg/quotes] US market hours:", in_market_hours, "| Sending to Bloomberg - tickers:", tickers, "fields:", fields)
         reference_data = bloomberg_client.get_reference_data(
             tickers=tickers,
@@ -241,13 +241,7 @@ def bloomberg_quotes():
 
             val = None
             if in_market_hours:
-                bid = data_row.get("PX_BID")
-                ask = data_row.get("PX_ASK")
-                if bid is not None and ask is not None:
-                    try:
-                        val = (float(bid) + float(ask)) / 2
-                    except (ValueError, TypeError):
-                        pass
+                val = data_row.get("PX_MID")
             if val is None:
                 val = data_row.get("PX_OFFICIAL_CLOSE") if not in_market_hours else None
             if val is None:

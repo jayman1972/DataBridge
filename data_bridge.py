@@ -12,7 +12,7 @@ import sys
 import json
 import traceback
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dt_time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from flask import Flask, request, jsonify
@@ -22,6 +22,7 @@ from flask_cors import CORS
 try:
     from zoneinfo import ZoneInfo
     HAS_ZONEINFO = True
+    HAS_PYTZ = False
 except ImportError:
     # Fallback for Python < 3.9: use pytz if available
     try:
@@ -184,11 +185,28 @@ def health():
     }), status_code
 
 
+def _is_us_market_hours() -> bool:
+    """True if current time is 9:30am-4:00pm Eastern (US market hours)."""
+    try:
+        if HAS_ZONEINFO:
+            eastern = ZoneInfo("America/New_York")
+        elif HAS_PYTZ:
+            eastern = pytz.timezone("America/New_York")
+        else:
+            return False
+        now = datetime.now(eastern).time()
+        return dt_time(9, 30) <= now <= dt_time(16, 0)
+    except Exception:
+        return False
+
+
 @app.route("/bloomberg/quotes", methods=["POST"])
 def bloomberg_quotes():
     """
-    Fetch PX_LAST (last price) for given Bloomberg tickers.
-    Used by portfolio for options positions (Yahoo doesn't support options).
+    Fetch price for given Bloomberg tickers (options etc).
+    During US market hours (9:30am-4:00pm EST): uses mid (PX_BID+PX_ASK)/2 when available.
+    Outside market hours: uses PX_OFFICIAL_CLOSE when available.
+    Fallback: PX_LAST.
     Body: { "tickers": ["TICKER1 Equity", "TICKER2 Equity"] }
     Returns: { "TICKER1 Equity": 1.23, "TICKER2 Equity": 4.56 }
     """
@@ -205,24 +223,43 @@ def bloomberg_quotes():
             print("[bloomberg/quotes] No tickers - returning empty")
             return jsonify({}), 200
 
-        print("[bloomberg/quotes] Sending to Bloomberg API - tickers:", tickers, "fields: ['PX_LAST']")
+        in_market_hours = _is_us_market_hours()
+        fields = ["PX_LAST", "PX_BID", "PX_ASK", "PX_OFFICIAL_CLOSE"]
+        print("[bloomberg/quotes] US market hours:", in_market_hours, "| Sending to Bloomberg - tickers:", tickers, "fields:", fields)
         reference_data = bloomberg_client.get_reference_data(
             tickers=tickers,
-            fields=["PX_LAST"]
+            fields=fields
         )
         print("[bloomberg/quotes] Bloomberg response keys:", list(reference_data.keys()) if reference_data else [])
+
         result = {}
         for ticker, data_row in reference_data.items():
-            if isinstance(data_row, dict) and "error" not in data_row and "PX_LAST" in data_row:
-                val = data_row["PX_LAST"]
-                if val is not None:
+            if not isinstance(data_row, dict) or "error" in data_row:
+                if isinstance(data_row, dict) and "error" in data_row:
+                    print(f"[bloomberg/quotes] Bloomberg error for {ticker}: {data_row.get('error')}")
+                continue
+
+            val = None
+            if in_market_hours:
+                bid = data_row.get("PX_BID")
+                ask = data_row.get("PX_ASK")
+                if bid is not None and ask is not None:
                     try:
-                        result[ticker] = float(val)
+                        val = (float(bid) + float(ask)) / 2
                     except (ValueError, TypeError):
                         pass
-            elif isinstance(data_row, dict) and "error" in data_row:
-                print(f"[bloomberg/quotes] Bloomberg error for {ticker}: {data_row.get('error')}")
-        print("[bloomberg/quotes] Returning", len(result), "prices:", dict(result))
+            if val is None:
+                val = data_row.get("PX_OFFICIAL_CLOSE") if not in_market_hours else None
+            if val is None:
+                val = data_row.get("PX_LAST")
+
+            if val is not None:
+                try:
+                    result[ticker] = float(val)
+                except (ValueError, TypeError):
+                    pass
+
+        print("[bloomberg/quotes] Returning", len(result), "prices (mode:", "mid" if in_market_hours else "official_close", "):", dict(result))
         return jsonify(result), 200
     except Exception as e:
         print("[bloomberg/quotes] Exception:", str(e))

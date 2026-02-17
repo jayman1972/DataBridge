@@ -198,12 +198,19 @@ def bloomberg_quotes():
         if not isinstance(tickers, list):
             tickers = []
         tickers = [str(t).strip() for t in tickers if t]
+
+        # Explicit logging for portfolio options debugging
+        print("[bloomberg/quotes] Request received. Tickers:", tickers)
         if not tickers:
+            print("[bloomberg/quotes] No tickers - returning empty")
             return jsonify({}), 200
+
+        print("[bloomberg/quotes] Sending to Bloomberg API - tickers:", tickers, "fields: ['PX_LAST']")
         reference_data = bloomberg_client.get_reference_data(
             tickers=tickers,
             fields=["PX_LAST"]
         )
+        print("[bloomberg/quotes] Bloomberg response keys:", list(reference_data.keys()) if reference_data else [])
         result = {}
         for ticker, data_row in reference_data.items():
             if isinstance(data_row, dict) and "error" not in data_row and "PX_LAST" in data_row:
@@ -213,8 +220,12 @@ def bloomberg_quotes():
                         result[ticker] = float(val)
                     except (ValueError, TypeError):
                         pass
+            elif isinstance(data_row, dict) and "error" in data_row:
+                print(f"[bloomberg/quotes] Bloomberg error for {ticker}: {data_row.get('error')}")
+        print("[bloomberg/quotes] Returning", len(result), "prices:", dict(result))
         return jsonify(result), 200
     except Exception as e:
+        print("[bloomberg/quotes] Exception:", str(e))
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 

@@ -55,6 +55,10 @@ PORT=5000
 | `POST /clarifi/process` | market-dashboard update |
 | `POST /ehp/process` | market-dashboard update |
 
+## Documentation
+
+- [SGGG API Fields](docs/SGGG_API_FIELDS.md) – Valid fields for the PSC/SGGG position API (for `/sggg/portfolio` and related queries)
+
 ## Requirements
 
 - Python 3.9+

@@ -960,7 +960,8 @@ def _parse_date(value):
 
 
 # ---------------------------------------------------------------------------
-# /quotes - wealth-scope compatibility (same as /bloomberg/quotes for symbols)
+# /quotes - wealth-scope compatibility (same format as old bloomberg bridge)
+# Returns last_price, open_price, high_price, low_price, volume, etc. for edge function
 # ---------------------------------------------------------------------------
 @app.route("/quotes", methods=["POST"])
 def quotes():
@@ -973,11 +974,35 @@ def quotes():
         symbols = [str(s).strip() for s in symbols if s]
         if not symbols:
             return jsonify({"quotes": {}, "errors": []}), 200
-        reference_data = bloomberg_client.get_reference_data(tickers=symbols, fields=["PX_LAST", "PX_BID", "PX_ASK", "CRNCY", "NAME"])
+        fields = [
+            "PX_LAST", "PX_BID", "PX_ASK", "PREV_CLOSE_VAL", "VOLUME",
+            "PX_OPEN", "PX_HIGH", "PX_LOW", "CHG_PCT_1D", "CHG_NET_1D",
+            "CRNCY", "NAME", "ID_EXCH_SYMBOL"
+        ]
+        reference_data = bloomberg_client.get_reference_data(tickers=symbols, fields=fields)
         quotes_result = {}
         for ticker, row in reference_data.items():
-            if "error" not in row:
-                quotes_result[ticker] = {k: v for k, v in row.items() if v is not None}
+            if "error" in row:
+                continue
+            # Map PX_* to wealth-scope/edge-function expected format (matches old bloomberg bridge)
+            current_price = row.get("PX_LAST") or row.get("PX_BID")
+            quote = {
+                "symbol": ticker,
+                "last_price": current_price,
+                "bid": row.get("PX_BID"),
+                "ask": row.get("PX_ASK"),
+                "close_price": row.get("PREV_CLOSE_VAL"),
+                "volume": row.get("VOLUME"),
+                "open_price": row.get("PX_OPEN"),
+                "high_price": row.get("PX_HIGH"),
+                "low_price": row.get("PX_LOW"),
+                "change_percent": row.get("CHG_PCT_1D"),
+                "change_amount": row.get("CHG_NET_1D"),
+                "currency": row.get("CRNCY"),
+                "name": row.get("NAME"),
+                "exchange": row.get("ID_EXCH_SYMBOL"),
+            }
+            quotes_result[ticker] = {k: v for k, v in quote.items() if v is not None}
         return jsonify({"quotes": quotes_result, "errors": []}), 200
     except Exception as e:
         traceback.print_exc()

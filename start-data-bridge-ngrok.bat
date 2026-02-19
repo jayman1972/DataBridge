@@ -8,9 +8,11 @@ echo ========================================
 echo.
 echo This service provides:
 echo   - /health - Health check
-echo   - /bloomberg-update - Bloomberg data fetch
+echo   - /quotes - Bloomberg live quotes (wealth-scope Refresh Market Prices)
+echo   - /historical - Bloomberg historical data (wealth-scope Update Historical Prices)
+echo   - /bloomberg-update - Bloomberg data fetch (market-dashboard)
+echo   - /economic-calendar - Economic calendar (market-dashboard)
 echo   - /sggg/portfolio - SGGG/PSC portfolio (requires OpenVPN + DSN=PSC_VIEWER)
-echo   - /economic-calendar - Economic calendar
 echo.
 
 REM Change to the script directory (projects\DataBridge)

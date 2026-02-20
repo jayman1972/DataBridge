@@ -12,7 +12,7 @@ import sys
 import json
 import traceback
 import time
-from datetime import datetime, timedelta, timezone, time as dt_time
+from datetime import datetime, timedelta, timezone, time as dt_time, date as date_type
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from flask import Flask, request, jsonify
@@ -502,6 +502,9 @@ def historical():
         if not symbols or not fields:
             return jsonify({"error": "symbols and fields are required"}), 400
 
+        # Full request log
+        print(f"[DataBridge historical] REQUEST (full): symbols={symbols} fields={fields} start_date={start_date!r} end_date={end_date!r}")
+
         # US Flash PMI: no override (RELEASE_STAGE_OVERRIDE=P fails in BDH). Use BDP + BDH from Edge Function.
         historical_data = {}
         errors = []
@@ -510,6 +513,7 @@ def historical():
             variants = _get_canadian_ticker_variants(normalized)
             records = []
             last_error = None
+            print(f"[DataBridge historical] REQUEST ticker={ticker!r} variants={variants} fields={fields} start_date={start_date!r} end_date={end_date!r}")
             for ticker_to_try in variants:
                 try:
                     records = bloomberg_client.get_historical_data(
@@ -519,18 +523,15 @@ def historical():
                         end_date=end_date,
                     )
                     if records:
-                        print(f"[DataBridge historical] {ticker}: {len(records)} records (ticker '{ticker_to_try}')")
+                        print(f"[DataBridge historical] RESPONSE ticker={ticker!r} record_count={len(records)} records={_log_serialize(records)}")
                         break
                 except Exception as e:
                     last_error = e
-                    print(f"[DataBridge historical] {ticker}: '{ticker_to_try}' failed - {e}")
+                    print(f"[DataBridge historical] RESPONSE ticker={ticker_to_try!r} exception={e!r}")
             if not records and last_error:
                 errors.append(f"{ticker}: {str(last_error)}")
             if not records:
-                print(
-                    f"[DataBridge historical] {ticker}: 0 records from Bloomberg (tried: {variants}). "
-                    f"Request: start_date={start_date!r} end_date={end_date!r} fields={fields}"
-                )
+                print(f"[DataBridge historical] RESPONSE ticker={ticker!r} record_count=0 last_error={last_error!r} (tried variants: {variants})")
             historical_data[ticker] = records  # Key by original ticker for caller
         return jsonify({"historical_data": historical_data, "errors": errors}), 200
     except Exception as e:
@@ -548,7 +549,9 @@ def reference():
         if not symbols or not fields:
             return jsonify({"error": "symbols and fields are required"}), 400
 
+        print(f"[DataBridge reference] REQUEST (full): symbols={symbols} fields={fields}")
         ref_data = bloomberg_client.get_reference_data(tickers=symbols, fields=fields)
+        print(f"[DataBridge reference] RESPONSE (full from Bloomberg): {json.dumps(_log_serialize(ref_data), default=str, indent=2)}")
         # Update expects reference_data[ticker] = [row] (array of rows)
         reference_data = {}
         errors = []
@@ -783,15 +786,14 @@ def economic_calendar():
                 "calendar_data": []
             }), 400
         
-        # Debug: log exact request for troubleshooting
-        print(f"[economic-calendar] REQUEST: tickers_count={len(tickers)} tickers={tickers[:30]}{'...' if len(tickers) > 30 else ''}")
-        
         # Date range: today to today + 365 days
         today = datetime.now().date()
         end_date = today + timedelta(days=365)
         today_str = today.strftime("%Y%m%d")
         end_date_str = end_date.strftime("%Y%m%d")
-        
+
+        # Full request log
+        print(f"[economic-calendar] REQUEST (full): tickers_count={len(tickers)} date_range=[{today_str}, {end_date_str}] tickers={tickers}")
         print(f"Fetching economic calendar data from {today_str} to {end_date_str}")
         
         # Bloomberg fields needed (based on Excel formulas)
@@ -809,6 +811,7 @@ def economic_calendar():
             "PREV_TRADING_DT_REALTIME",  # Last report date
             "PRIOR_OBSERVATION_DATE",    # Prior observation date
         ]
+        print(f"[economic-calendar] REQUEST fields={fields}")
         
         # For future dates, we need to use ECO_FUTURE_RELEASE_DATE
         # For current/past dates, we use the regular fields
@@ -822,7 +825,7 @@ def economic_calendar():
             batch_tickers = tickers[i:i+BATCH_SIZE]
             batch_num = i // BATCH_SIZE + 1
             print(f"Processing batch {batch_num} ({len(batch_tickers)} tickers)...")
-            print(f"[economic-calendar] BATCH {batch_num} REQUEST: tickers={batch_tickers[:5]}{'...' if len(batch_tickers) > 5 else ''} fields={fields}")
+            print(f"[economic-calendar] BATCH {batch_num} REQUEST (full): tickers={batch_tickers} fields={fields}")
             
             try:
                 # Fetch reference data for this batch
@@ -830,14 +833,8 @@ def economic_calendar():
                     tickers=batch_tickers,
                     fields=fields
                 )
-                # Debug: log what Bloomberg returned for this batch
-                for t, row in reference_data.items():
-                    status = "error" if "error" in row else "ok"
-                    eco_dt = row.get("ECO_RELEASE_DT") if isinstance(row, dict) else None
-                    print(f"[economic-calendar] BATCH {batch_num} RESPONSE: ticker={t} status={status} ECO_RELEASE_DT={eco_dt!r} keys={list(row.keys())[:8] if isinstance(row, dict) else 'n/a'}")
-                if batch_tickers and batch_tickers[0] in reference_data:
-                    sample = reference_data[batch_tickers[0]]
-                    print(f"[economic-calendar] BATCH {batch_num} SAMPLE (first ticker): {sample}")
+                # Full response from Bloomberg (serialized for console)
+                print(f"[economic-calendar] BATCH {batch_num} RESPONSE (full from Bloomberg): {json.dumps(_log_serialize(reference_data), default=str, indent=2)}")
                 
                 # Process each ticker's data
                 for ticker, data in reference_data.items():
@@ -854,15 +851,18 @@ def economic_calendar():
                     is_future_release = False  # Track if we got the date from ECO_FUTURE_RELEASE_DATE
                     
                     # First, try ECO_RELEASE_DT (current/past release)
+                    # BLPAPI returns datetime.date for ECO_RELEASE_DT, not datetime
                     if "ECO_RELEASE_DT" in data:
                         release_dt = data["ECO_RELEASE_DT"]
                         if release_dt:
                             if isinstance(release_dt, datetime):
                                 release_date = release_dt.date()
+                            elif isinstance(release_dt, date_type):
+                                release_date = release_dt
                             elif isinstance(release_dt, str):
                                 try:
                                     release_date = datetime.strptime(release_dt[:8], "%Y%m%d").date()
-                                except:
+                                except Exception:
                                     pass
                             
                             # If ECO_RELEASE_DT is today or in the past, use it (not a future event)
@@ -883,6 +883,8 @@ def economic_calendar():
                                     # Convert Bloomberg date to Python date
                                     if isinstance(future_date, datetime):
                                         future_release_date = future_date.date()
+                                    elif isinstance(future_date, date_type):
+                                        future_release_date = future_date
                                     elif isinstance(future_date, str):
                                         # Try parsing various formats
                                         try:
@@ -910,16 +912,14 @@ def economic_calendar():
                     if "ECO_RELEASE_TIME" in data and data["ECO_RELEASE_TIME"]:
                         release_time = str(data["ECO_RELEASE_TIME"])
                     
-                    # Determine if this is a future event (check both date AND time)
-                    # If we got the date from ECO_FUTURE_RELEASE_DATE, it's definitely a future event
-                    # Otherwise, check if release_date > today OR (release_date == today AND release_time hasn't passed)
+                    # Future event only when release_date is strictly after today. For today or past, set actual from PX_LAST.
                     is_future_event = False
-                    if is_future_release:
+                    if is_future_release and release_date and release_date > today:
                         is_future_event = True
-                    elif release_date:
-                        if release_date > today:
-                            is_future_event = True
-                        elif release_date == today and release_time:
+                    elif release_date and release_date > today:
+                        is_future_event = True
+                    # Removed time-of-day check for today: it caused actual to be null when server timezone was before release time.
+                    if False and release_date == today and release_time:
                             # For today's events, check if the release time has passed
                             # Bloomberg ECO_RELEASE_TIME is in Eastern Time (EST/EDT)
                             # Parse release_time (format: "HH:MM:SS" or "08:30:00")
@@ -1007,6 +1007,8 @@ def economic_calendar():
                 traceback.print_exc()
         
         print(f"Fetched {len(events)} economic calendar events")
+        if len(events) == 0:
+            print(f"[economic-calendar] ZERO EVENTS: date filter today={today!r} end_date={end_date!r} (events only included when today <= release_date <= end_date and release_date was set from ECO_RELEASE_DT)")
         
         # Return calendar_data to match Edge Function expectations
         # Also include events for backward compatibility
@@ -1049,13 +1051,30 @@ def _parse_date(value):
     try:
         if isinstance(value, datetime):
             return value.date().strftime("%Y-%m-%d")
+        if isinstance(value, date_type):
+            return value.strftime("%Y-%m-%d")
         elif isinstance(value, str):
             # Try parsing various formats
             if len(value) >= 8:
                 return datetime.strptime(value[:8], "%Y%m%d").date().strftime("%Y-%m-%d")
-    except:
+    except Exception:
         pass
     return None
+
+
+def _log_serialize(obj):
+    """Convert obj to a JSON-friendly form for console logging (dates/times to string)."""
+    if obj is None:
+        return None
+    if isinstance(obj, (date_type, datetime)):
+        return obj.isoformat() if hasattr(obj, "isoformat") else str(obj)
+    if isinstance(obj, dt_time):
+        return obj.strftime("%H:%M:%S") if hasattr(obj, "strftime") else str(obj)
+    if isinstance(obj, dict):
+        return {k: _log_serialize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_log_serialize(v) for v in obj]
+    return obj
 
 
 # ---------------------------------------------------------------------------

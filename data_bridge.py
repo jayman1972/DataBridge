@@ -80,6 +80,8 @@ if not SUPABASE_URL or not SUPABASE_KEY:
                             os.environ["SGGG_DIAMOND_PASSWORD"] = value
                         elif key == "SGGG_DIAMOND_FUND_ID":
                             os.environ["SGGG_DIAMOND_FUND_ID"] = value
+                        elif key == "SGGG_DIAMOND_FUND_IDS":
+                            os.environ["SGGG_DIAMOND_FUND_IDS"] = value
         except Exception as e:
             print(f"Error reading config file {config_file}: {e}")
 
@@ -94,7 +96,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
                     if '=' in line and not line.startswith('#'):
                         k, v = line.split('=', 1)
                         k, v = k.strip(), v.strip()
-                        if k in ("SGGG_DIAMOND_USERNAME", "SGGG_DIAMOND_PASSWORD", "SGGG_DIAMOND_FUND_ID") and v:
+                        if k in ("SGGG_DIAMOND_USERNAME", "SGGG_DIAMOND_PASSWORD", "SGGG_DIAMOND_FUND_ID", "SGGG_DIAMOND_FUND_IDS") and v:
                             os.environ[k] = v
         except Exception as e:
             print(f"Error reading SGGG config from {_cfg}: {e}")
@@ -694,31 +696,59 @@ def sggg_portfolio():
         }), 500
 
 
+def _get_diamond_fund_ids():
+    """Return list of fund IDs from env. SGGG_DIAMOND_FUND_IDS (comma-separated) or SGGG_DIAMOND_FUND_ID (single)."""
+    ids_str = os.environ.get("SGGG_DIAMOND_FUND_IDS", "").strip()
+    if ids_str:
+        return [x.strip() for x in ids_str.split(",") if x.strip()]
+    single = os.environ.get("SGGG_DIAMOND_FUND_ID", "").strip()
+    if single:
+        return [single]
+    return []
+
+
+def _get_default_fund_id():
+    """Return first fund ID for single-request endpoints."""
+    ids = _get_diamond_fund_ids()
+    return ids[0] if ids else None
+
+
 # ---------------------------------------------------------------------------
 # SGGG Diamond API endpoints (runs in parallel with PSC/ODBC)
-# Requires: SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD, SGGG_DIAMOND_FUND_ID in env
+# Requires: SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD
+# Fund IDs: SGGG_DIAMOND_FUND_IDS (comma-separated) or SGGG_DIAMOND_FUND_ID (single)
 # ---------------------------------------------------------------------------
 @app.route("/sggg/diamond/portfolio", methods=["GET", "POST"])
 def sggg_diamond_portfolio():
     """
     Get finalized portfolio from SGGG Diamond API.
-    Body or query: fund_id (optional, uses SGGG_DIAMOND_FUND_ID if not provided), valuation_date (yyyy-mm-dd)
+    Body or query: fund_id (optional), all=true (fetch all configured funds), valuation_date (yyyy-mm-dd)
     """
     try:
         client = get_diamond_client()
         if not client:
-            return jsonify({"error": "Diamond API not configured. Set SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD, SGGG_DIAMOND_FUND_ID."}), 503
+            return jsonify({"error": "Diamond API not configured. Set SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD, SGGG_DIAMOND_FUND_IDS."}), 503
         data = request.get_json(silent=True) or {}
-        fund_id = request.args.get("fund_id") or data.get("fund_id") or os.environ.get("SGGG_DIAMOND_FUND_ID")
+        fund_id = request.args.get("fund_id") or data.get("fund_id")
+        fetch_all = request.args.get("all", "").lower() in ("1", "true", "yes") or data.get("all") is True
         valuation_date = request.args.get("date") or request.args.get("valuation_date") or data.get("date") or data.get("valuation_date")
         if not valuation_date:
             valuation_date = datetime.now().strftime("%Y-%m-%d")
         else:
             valuation_date = valuation_date.replace("-", "")[:8]
             valuation_date = f"{valuation_date[:4]}-{valuation_date[4:6]}-{valuation_date[6:8]}"
-        if not fund_id:
-            return jsonify({"error": "fund_id required (or set SGGG_DIAMOND_FUND_ID)"}), 400
-        result = client.get_portfolio(fund_id=fund_id, valuation_date=valuation_date)
+        fund_ids = _get_diamond_fund_ids() if fetch_all else ([fund_id] if fund_id else [_get_default_fund_id()])
+        if not fund_ids or not fund_ids[0]:
+            return jsonify({"error": "fund_id required, or set SGGG_DIAMOND_FUND_IDS (comma-separated) and use all=true"}), 400
+        if fetch_all and len(fund_ids) > 1:
+            results = {}
+            for fid in fund_ids:
+                try:
+                    results[fid] = client.get_portfolio(fund_id=fid, valuation_date=valuation_date)
+                except Exception as e:
+                    results[fid] = {"error": str(e)}
+            return jsonify({"funds": results, "valuation_date": valuation_date})
+        result = client.get_portfolio(fund_id=fund_ids[0], valuation_date=valuation_date)
         return jsonify(result)
     except Exception as e:
         traceback.print_exc()
@@ -729,20 +759,32 @@ def sggg_diamond_portfolio():
 def sggg_diamond_trades():
     """
     Get portfolio trades from SGGG Diamond API.
-    Body or query: fund_id (required or SGGG_DIAMOND_FUND_ID), start_date, end_date (yyyy-mm-dd, max 1 month range)
+    Body or query: fund_id (optional), all=true (fetch all), start_date, end_date (yyyy-mm-dd, max 1 month range)
     """
     try:
         client = get_diamond_client()
         if not client:
             return jsonify({"error": "Diamond API not configured. Set SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD."}), 503
         data = request.get_json(silent=True) or {}
-        fund_id = request.args.get("fund_id") or data.get("fund_id") or os.environ.get("SGGG_DIAMOND_FUND_ID")
+        fund_id = request.args.get("fund_id") or data.get("fund_id")
+        fetch_all = request.args.get("all", "").lower() in ("1", "true", "yes") or data.get("all") is True
         start_date = request.args.get("start_date") or data.get("start_date")
         end_date = request.args.get("end_date") or data.get("end_date")
-        if not fund_id:
-            return jsonify({"error": "fund_id required (or set SGGG_DIAMOND_FUND_ID)"}), 400
+        fund_ids = _get_diamond_fund_ids() if fetch_all else ([fund_id] if fund_id else [_get_default_fund_id()])
+        if not fund_ids or not fund_ids[0]:
+            return jsonify({"error": "fund_id required, or set SGGG_DIAMOND_FUND_IDS and use all=true"}), 400
+        if fetch_all and len(fund_ids) > 1:
+            results = {}
+            for fid in fund_ids:
+                try:
+                    results[fid] = client.get_portfolio_trades(
+                        fund_parent_id=fid, start_date=start_date, end_date=end_date
+                    )
+                except Exception as e:
+                    results[fid] = {"error": str(e)}
+            return jsonify({"funds": results})
         result = client.get_portfolio_trades(
-            fund_parent_id=fund_id,
+            fund_parent_id=fund_ids[0],
             start_date=start_date,
             end_date=end_date,
         )

@@ -12,13 +12,17 @@ The Diamond API provides programmatic access to SGGG fund data (GetPortfolio, Ge
 
 Add to `bloomberg-service.env` (same file as Supabase config):
 
+**Multiple funds** (comma-separated GUIDs from your EHF GUID.xlsx):
+
 ```
 SGGG_DIAMOND_USERNAME=API@EHPARTNERS.COM
 SGGG_DIAMOND_PASSWORD=your_password_here
-SGGG_DIAMOND_FUND_ID=your-fund-guid-here
+SGGG_DIAMOND_FUND_IDS=41355000-2023-32D5-BE01-0D00F620EC17,41355000-2022-BE02-B837-30C5D308A72B,41355000-797A-D7EB-77E7-4EA9A6BB8D1C
 ```
 
-Get Fund ID(s) from the EHF GUID.xlsx file or from SGGG-FSI during onboarding.
+- Use **GUID** column from your fund table (one GUID per fund)
+- Fund Class (BOCA, T0A, etc.) is not used for the Diamond API—it needs the parent fund GUID
+- First GUID in the list is used as default when `fund_id` is not specified in a request
 
 ## Endpoints
 
@@ -29,19 +33,28 @@ Get Fund ID(s) from the EHF GUID.xlsx file or from SGGG-FSI during onboarding.
 
 ### Get Portfolio
 
-- **fund_id** (optional): Override `SGGG_DIAMOND_FUND_ID`
+- **fund_id** (optional): Override default (first from `SGGG_DIAMOND_FUND_IDS`)
+- **all**: `true` to fetch all configured funds
 - **date** or **valuation_date**: `yyyy-mm-dd` (default: today)
 
-Example:
+Example (single fund):
 ```bash
 curl -X POST "http://localhost:5000/sggg/diamond/portfolio" \
   -H "Content-Type: application/json" \
-  -d '{"valuation_date": "2025-02-12"}'
+  -d "{\"valuation_date\": \"2025-02-12\"}"
+```
+
+Example (all funds):
+```bash
+curl -X POST "http://localhost:5000/sggg/diamond/portfolio" \
+  -H "Content-Type: application/json" \
+  -d "{\"valuation_date\": \"2025-02-12\", \"all\": true}"
 ```
 
 ### Get Portfolio Trades
 
-- **fund_id**: Required or `SGGG_DIAMOND_FUND_ID`
+- **fund_id** (optional): Override default
+- **all**: `true` to fetch all configured funds
 - **start_date**, **end_date**: `yyyy-mm-dd` (date range max 1 month)
 
 Example:

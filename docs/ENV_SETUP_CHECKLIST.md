@@ -14,7 +14,7 @@ Create or edit: `market-dashboard\bloomberg-service.env` (or `DataBridge\bloombe
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase Dashboard → Project Settings → API → service_role key |
 | `SGGG_DIAMOND_USERNAME` | From SGGG-FSI (e.g. API@EHPARTNERS.COM) |
 | `SGGG_DIAMOND_PASSWORD` | From SGGG-FSI |
-| `SGGG_DIAMOND_FUND_ID` | From EHF GUID.xlsx or SGGG-FSI |
+| `SGGG_DIAMOND_FUND_IDS` | Comma-separated GUIDs from EHF GUID.xlsx (GUID column) |
 
 ## Optional
 
@@ -30,7 +30,7 @@ SUPABASE_URL=https://aphjduxfgsrqswonmgyb.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<from Supabase Dashboard>
 SGGG_DIAMOND_USERNAME=API@EHPARTNERS.COM
 SGGG_DIAMOND_PASSWORD=<from SGGG-FSI>
-SGGG_DIAMOND_FUND_ID=<from EHF GUID.xlsx>
+SGGG_DIAMOND_FUND_IDS=guid1,guid2,guid3
 ```
 
 ## Ways to transfer to home PC

@@ -16,7 +16,9 @@ class BloombergClientBase(ABC):
         ticker: str,
         fields: List[str],
         start_date: Optional[str] = None,
-        end_date: Optional[str] = None
+        end_date: Optional[str] = None,
+        periodicity: Optional[str] = None,
+        overrides: Optional[Dict[str, str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Fetch historical data for a ticker.

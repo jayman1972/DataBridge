@@ -73,17 +73,20 @@ class BLPAPIClient(BloombergClientBase):
         ticker: str,
         fields: List[str],
         start_date: Optional[str] = None,
-        end_date: Optional[str] = None
+        end_date: Optional[str] = None,
+        periodicity: Optional[str] = None,
+        overrides: Optional[Dict[str, str]] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch historical data using blpapi.
 
         HistoricalDataRequest returns securityData as a single HistoricalDataTable
-        (not an array). Use it directly; iterate only over fieldData with
-        numValues()/getValue(i).
+        (not an array). Use it directly; iterate over fieldData with numValues()/getValue(i).
+        periodicity: DAILY (default). overrides: e.g. {"RELEASE_STAGE_OVERRIDE": "P"} for prelim-only (PMI).
         """
+        periodicity = (periodicity or "DAILY").upper()
         _debug = os.environ.get("DATA_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
         if _debug:
-            print(f"[BLPAPI HistoricalDataRequest] ticker={ticker!r} fields={fields} start_date={start_date!r} end_date={end_date!r}")
+            print(f"[BLPAPI HistoricalDataRequest] ticker={ticker!r} fields={fields} start_date={start_date!r} end_date={end_date!r} periodicity={periodicity} overrides={overrides}")
 
         session = self._create_session()
         if not session:
@@ -108,11 +111,18 @@ class BLPAPIClient(BloombergClientBase):
                 end_date_bbg = end_date.replace("-", "")
                 request.set("endDate", end_date_bbg)
 
-            # Set periodicity (daily) - match old: no periodicityAdjustment
-            request.set("periodicitySelection", "DAILY")
+            request.set("periodicitySelection", periodicity)
+
+            # Optional overrides (e.g. RELEASE_STAGE_OVERRIDE=P for preliminary-only PMI)
+            if overrides:
+                overrides_el = request.getElement("overrides")
+                for field_id, value in overrides.items():
+                    ov = overrides_el.appendElement()
+                    ov.setElement("fieldId", field_id)
+                    ov.setElement("value", str(value))
 
             if _debug:
-                print(f"[BLPAPI] Request: securities=[{ticker}] fields={fields} startDate={start_date_bbg if start_date else None} endDate={end_date_bbg if end_date else None}")
+                print(f"[BLPAPI] Request: securities=[{ticker}] fields={fields} periodicity={periodicity} startDate={start_date_bbg if start_date else None} endDate={end_date_bbg if end_date else None}")
 
             session.sendRequest(request)
 
@@ -207,7 +217,10 @@ class BLPAPIClient(BloombergClientBase):
         tickers: List[str],
         fields: List[str]
     ) -> Dict[str, Dict[str, Any]]:
-        """Fetch reference/EOD data using blpapi"""
+        """Fetch reference/EOD data using blpapi (BDP)"""
+        _debug = os.environ.get("DATA_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
+        if _debug:
+            print(f"[BLPAPI ReferenceDataRequest] securities={tickers} fields={fields}")
         session = self._create_session()
         if not session:
             raise Exception("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")

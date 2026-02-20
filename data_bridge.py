@@ -502,6 +502,7 @@ def historical():
         if not symbols or not fields:
             return jsonify({"error": "symbols and fields are required"}), 400
 
+        # US Flash PMI: no override (RELEASE_STAGE_OVERRIDE=P fails in BDH). Use BDP + BDH from Edge Function.
         historical_data = {}
         errors = []
         for ticker in symbols:
@@ -515,7 +516,7 @@ def historical():
                         ticker=ticker_to_try,
                         fields=fields,
                         start_date=start_date,
-                        end_date=end_date
+                        end_date=end_date,
                     )
                     if records:
                         print(f"[DataBridge historical] {ticker}: {len(records)} records (ticker '{ticker_to_try}')")
@@ -525,8 +526,11 @@ def historical():
                     print(f"[DataBridge historical] {ticker}: '{ticker_to_try}' failed - {e}")
             if not records and last_error:
                 errors.append(f"{ticker}: {str(last_error)}")
-            elif not records:
-                print(f"[DataBridge historical] {ticker}: 0 records from Bloomberg (tried: {variants})")
+            if not records:
+                print(
+                    f"[DataBridge historical] {ticker}: 0 records from Bloomberg (tried: {variants}). "
+                    f"Request: start_date={start_date!r} end_date={end_date!r} fields={fields}"
+                )
             historical_data[ticker] = records  # Key by original ticker for caller
         return jsonify({"historical_data": historical_data, "errors": errors}), 200
     except Exception as e:
@@ -779,6 +783,9 @@ def economic_calendar():
                 "calendar_data": []
             }), 400
         
+        # Debug: log exact request for troubleshooting
+        print(f"[economic-calendar] REQUEST: tickers_count={len(tickers)} tickers={tickers[:30]}{'...' if len(tickers) > 30 else ''}")
+        
         # Date range: today to today + 365 days
         today = datetime.now().date()
         end_date = today + timedelta(days=365)
@@ -813,7 +820,9 @@ def economic_calendar():
         BATCH_SIZE = 50
         for i in range(0, len(tickers), BATCH_SIZE):
             batch_tickers = tickers[i:i+BATCH_SIZE]
-            print(f"Processing batch {i//BATCH_SIZE + 1} ({len(batch_tickers)} tickers)...")
+            batch_num = i // BATCH_SIZE + 1
+            print(f"Processing batch {batch_num} ({len(batch_tickers)} tickers)...")
+            print(f"[economic-calendar] BATCH {batch_num} REQUEST: tickers={batch_tickers[:5]}{'...' if len(batch_tickers) > 5 else ''} fields={fields}")
             
             try:
                 # Fetch reference data for this batch
@@ -821,6 +830,14 @@ def economic_calendar():
                     tickers=batch_tickers,
                     fields=fields
                 )
+                # Debug: log what Bloomberg returned for this batch
+                for t, row in reference_data.items():
+                    status = "error" if "error" in row else "ok"
+                    eco_dt = row.get("ECO_RELEASE_DT") if isinstance(row, dict) else None
+                    print(f"[economic-calendar] BATCH {batch_num} RESPONSE: ticker={t} status={status} ECO_RELEASE_DT={eco_dt!r} keys={list(row.keys())[:8] if isinstance(row, dict) else 'n/a'}")
+                if batch_tickers and batch_tickers[0] in reference_data:
+                    sample = reference_data[batch_tickers[0]]
+                    print(f"[economic-calendar] BATCH {batch_num} SAMPLE (first ticker): {sample}")
                 
                 # Process each ticker's data
                 for ticker, data in reference_data.items():

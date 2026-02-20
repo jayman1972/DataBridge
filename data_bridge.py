@@ -38,6 +38,7 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 
 from bloomberg import get_bloomberg_client, BloombergClientType
+from sggg.diamond_client import get_diamond_client
 
 from supabase import create_client, Client
 
@@ -73,8 +74,31 @@ if not SUPABASE_URL or not SUPABASE_KEY:
                             SUPABASE_URL = value
                         elif key == "SUPABASE_SERVICE_ROLE_KEY":
                             SUPABASE_KEY = value
+                        elif key == "SGGG_DIAMOND_USERNAME":
+                            os.environ["SGGG_DIAMOND_USERNAME"] = value
+                        elif key == "SGGG_DIAMOND_PASSWORD":
+                            os.environ["SGGG_DIAMOND_PASSWORD"] = value
+                        elif key == "SGGG_DIAMOND_FUND_ID":
+                            os.environ["SGGG_DIAMOND_FUND_ID"] = value
         except Exception as e:
             print(f"Error reading config file {config_file}: {e}")
+
+# Load SGGG Diamond API config (optional) from same config file
+for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "market-dashboard"))]:
+    _cfg = os.path.join(_config_dir, "bloomberg-service.env")
+    if os.path.exists(_cfg):
+        try:
+            with open(_cfg, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if '=' in line and not line.startswith('#'):
+                        k, v = line.split('=', 1)
+                        k, v = k.strip(), v.strip()
+                        if k in ("SGGG_DIAMOND_USERNAME", "SGGG_DIAMOND_PASSWORD", "SGGG_DIAMOND_FUND_ID") and v:
+                            os.environ[k] = v
+        except Exception as e:
+            print(f"Error reading SGGG config from {_cfg}: {e}")
+        break
 
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
@@ -661,6 +685,64 @@ def sggg_portfolio():
             "usd_cad_rate": None,
             "positions": []
         }), 500
+
+
+# ---------------------------------------------------------------------------
+# SGGG Diamond API endpoints (runs in parallel with PSC/ODBC)
+# Requires: SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD, SGGG_DIAMOND_FUND_ID in env
+# ---------------------------------------------------------------------------
+@app.route("/sggg/diamond/portfolio", methods=["GET", "POST"])
+def sggg_diamond_portfolio():
+    """
+    Get finalized portfolio from SGGG Diamond API.
+    Body or query: fund_id (optional, uses SGGG_DIAMOND_FUND_ID if not provided), valuation_date (yyyy-mm-dd)
+    """
+    try:
+        client = get_diamond_client()
+        if not client:
+            return jsonify({"error": "Diamond API not configured. Set SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD, SGGG_DIAMOND_FUND_ID."}), 503
+        data = request.get_json(silent=True) or {}
+        fund_id = request.args.get("fund_id") or data.get("fund_id") or os.environ.get("SGGG_DIAMOND_FUND_ID")
+        valuation_date = request.args.get("date") or request.args.get("valuation_date") or data.get("date") or data.get("valuation_date")
+        if not valuation_date:
+            valuation_date = datetime.now().strftime("%Y-%m-%d")
+        else:
+            valuation_date = valuation_date.replace("-", "")[:8]
+            valuation_date = f"{valuation_date[:4]}-{valuation_date[4:6]}-{valuation_date[6:8]}"
+        if not fund_id:
+            return jsonify({"error": "fund_id required (or set SGGG_DIAMOND_FUND_ID)"}), 400
+        result = client.get_portfolio(fund_id=fund_id, valuation_date=valuation_date)
+        return jsonify(result)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/sggg/diamond/trades", methods=["GET", "POST"])
+def sggg_diamond_trades():
+    """
+    Get portfolio trades from SGGG Diamond API.
+    Body or query: fund_id (required or SGGG_DIAMOND_FUND_ID), start_date, end_date (yyyy-mm-dd, max 1 month range)
+    """
+    try:
+        client = get_diamond_client()
+        if not client:
+            return jsonify({"error": "Diamond API not configured. Set SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD."}), 503
+        data = request.get_json(silent=True) or {}
+        fund_id = request.args.get("fund_id") or data.get("fund_id") or os.environ.get("SGGG_DIAMOND_FUND_ID")
+        start_date = request.args.get("start_date") or data.get("start_date")
+        end_date = request.args.get("end_date") or data.get("end_date")
+        if not fund_id:
+            return jsonify({"error": "fund_id required (or set SGGG_DIAMOND_FUND_ID)"}), 400
+        result = client.get_portfolio_trades(
+            fund_parent_id=fund_id,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return jsonify(result)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/economic-calendar", methods=["POST"])

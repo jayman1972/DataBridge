@@ -572,6 +572,45 @@ def reference():
 
 
 # ---------------------------------------------------------------------------
+# SGGG / PSC connection test (for IP whitelist / OpenVPN checks)
+# ---------------------------------------------------------------------------
+@app.route("/sggg/health", methods=["GET"])
+def sggg_health():
+    """
+    Test connectivity to SGGG PSC (ODBC DSN=PSC_VIEWER).
+    Returns 200 { "status": "ok", "message": "..." } or 503 with error details.
+    """
+    try:
+        import pyodbc
+    except ImportError:
+        return jsonify({
+            "status": "error",
+            "message": "pyodbc not installed. pip install pyodbc and configure ODBC DSN=PSC_VIEWER.",
+        }), 503
+    conn = None
+    try:
+        conn = pyodbc.connect("DSN=PSC_VIEWER")
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+        return jsonify({
+            "status": "ok",
+            "message": "SGGG PSC connection successful (DSN=PSC_VIEWER).",
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+        }), 503
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # SGGG / PSC portfolio endpoint (tunneled from Supabase like Bloomberg)
 # Requires: OpenVPN connected so PSC is reachable; pyodbc + ODBC DSN=PSC_VIEWER
 # ---------------------------------------------------------------------------
@@ -718,6 +757,19 @@ def _get_default_fund_id():
 # Requires: SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD
 # Fund IDs: SGGG_DIAMOND_FUND_IDS (comma-separated) or SGGG_DIAMOND_FUND_ID (single)
 # ---------------------------------------------------------------------------
+@app.route("/sggg/diamond/health", methods=["GET"])
+def sggg_diamond_health():
+    """Test SGGG Diamond API (HTTP) connection: login to api.sgggfsi.com."""
+    try:
+        client = get_diamond_client()
+        if not client:
+            return jsonify({"ok": False, "error": "Diamond API not configured. Set SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD."}), 503
+        client._ensure_auth()
+        return jsonify({"ok": True, "connection": "diamond_api", "base_url": "https://api.sgggfsi.com/api/v1"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/sggg/diamond/portfolio", methods=["GET", "POST"])
 def sggg_diamond_portfolio():
     """

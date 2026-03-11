@@ -61,8 +61,12 @@ class DiamondAPIClient:
     ) -> Any:
         auth = self._ensure_auth()
         url = f"{self.base_url}/{path.lstrip('/')}"
+        # Diamond docs: send `Authorization: AuthKey <token>`.
+        # API error text mentions "Missing AuthKey", so also include
+        # a direct `AuthKey` header for maximum compatibility.
         headers = {
-            "Authorization": auth,
+            "Authorization": f"AuthKey {auth}",
+            "AuthKey": auth,
             "Content-Type": "application/json",
         }
         resp = requests.post(url, json=payload, headers=headers, timeout=120)

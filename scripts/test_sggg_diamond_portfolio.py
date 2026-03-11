@@ -53,8 +53,8 @@ def main():
     )
     parser.add_argument(
         "--username",
-        help="Override SGGG_DIAMOND_USERNAME (avoid committing secrets to files).",
-        default="",
+        help="Override SGGG_DIAMOND_USERNAME. Default matches support example.",
+        default="API@EHPARTNERS.COM",
     )
     parser.add_argument(
         "--password",

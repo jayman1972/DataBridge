@@ -6,6 +6,17 @@ param([string]$NgrokPath = "")
 
 $ErrorActionPreference = "Continue"
 
+# Resolve Supabase CLI once, and fall back gracefully if not available
+$SupabaseCmd = $null
+if ($env:SUPABASE_CMD) {
+    $SupabaseCmd = $env:SUPABASE_CMD
+} else {
+    $cmd = Get-Command supabase -ErrorAction SilentlyContinue
+    if ($cmd) {
+        $SupabaseCmd = $cmd.Source
+    }
+}
+
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Starting ngrok tunnel..." -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
@@ -55,12 +66,16 @@ function Update-SupabaseSecret {
         Write-Host "WARNING: $ProjectName not found at $ProjectDir" -ForegroundColor Yellow
         return $false
     }
+    if (-not $SupabaseCmd) {
+        Write-Host "Supabase CLI not found in this session. Skipping update for $ProjectName." -ForegroundColor Yellow
+        return $false
+    }
     Push-Location $ProjectDir
     try {
         Write-Host "Updating Supabase secret for $ProjectName..." -ForegroundColor Yellow
-        $linkResult = supabase link --project-ref $ProjectRef 2>&1
-        supabase secrets set "DATA_BRIDGE_URL=$Url" 2>&1
-        supabase secrets set "BLOOMBERG_BRIDGE_URL=$Url" 2>&1
+        & $SupabaseCmd link --project-ref $ProjectRef 2>&1
+        & $SupabaseCmd secrets set "DATA_BRIDGE_URL=$Url" 2>&1
+        & $SupabaseCmd secrets set "BLOOMBERG_BRIDGE_URL=$Url" 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  [OK] $ProjectName" -ForegroundColor Green
             return $true

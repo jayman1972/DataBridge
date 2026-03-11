@@ -112,6 +112,11 @@ echo SGGG requirements: OpenVPN connected, ODBC DSN=PSC_VIEWER, pyodbc installed
 echo ========================================
 echo.
 
+REM Force Clarifi/EHP directory explicitly so it does not depend on the
+REM Windows account the service runs under.
+set "CLARIFI_DIR=C:\Users\jmann\OneDrive\Desktop\EHP_Files\DailyExports from Clarifi\"
+echo Using CLARIFI_DIR=%CLARIFI_DIR%
+
 REM Check if Data Bridge is already running (idempotent)
 set "BRIDGE_PID="
 for /f "tokens=1-5" %%A in ('netstat -ano ^| findstr /R /C":%PORT% " ^| findstr LISTENING') do (
@@ -147,5 +152,7 @@ if not exist "%NGROK_CMD%" (
 
 echo Starting ngrok tunnel...
 cd /d "%~dp0"
+REM Use Supabase CLI from Scoop if present (scheduled/minimal sessions often don't have Scoop on PATH)
+if exist "%USERPROFILE%\scoop\shims\supabase.exe" set "SUPABASE_CMD=%USERPROFILE%\scoop\shims\supabase.exe"
 powershell -ExecutionPolicy Bypass -File "start-tunnel-ngrok.ps1" -NgrokPath "%NGROK_CMD%"
 pause

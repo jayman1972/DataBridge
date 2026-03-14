@@ -13,6 +13,7 @@ echo   - /historical - Bloomberg historical data (wealth-scope Update Historical
 echo   - /bloomberg-update - Bloomberg data fetch (market-dashboard)
 echo   - /economic-calendar - Economic calendar (market-dashboard)
 echo   - /sggg/portfolio - SGGG/PSC portfolio (requires OpenVPN + DSN=PSC_VIEWER)
+echo   - IBKR Client Portal API (if Gateway dir set; Data Bridge calls localhost:5001)
 echo.
 
 REM Change to the script directory (projects\DataBridge)
@@ -112,9 +113,23 @@ echo SGGG requirements: OpenVPN connected, ODBC DSN=PSC_VIEWER, pyodbc installed
 echo ========================================
 echo.
 
+REM Optional: Start IBKR Client Portal Gateway (must use port 5001 in root\conf.yaml; Data Bridge uses 5000)
+if not defined IBKR_GATEWAY_DIR set "IBKR_GATEWAY_DIR=%~dp0IBRK"
+if exist "%IBKR_GATEWAY_DIR%\bin\run.bat" (
+    echo Starting IBKR Client Portal Gateway from %IBKR_GATEWAY_DIR%...
+    start "IBKR Client Portal Gateway" cmd /k "cd /d ""%IBKR_GATEWAY_DIR%"" && bin\run.bat root\conf.yaml"
+    timeout /t 3 /nobreak >nul
+    echo Opening IBKR Gateway login in browser...
+    start "" "https://localhost:5001"
+) else (
+    echo IBKR Gateway not found at %IBKR_GATEWAY_DIR% - skipping. Set IBKR_GATEWAY_DIR or use DataBridge\IBRK.
+)
+
+echo.
+
 REM Force Clarifi/EHP directory explicitly so it does not depend on the
 REM Windows account the service runs under.
-set "CLARIFI_DIR=C:\Users\jmann\OneDrive\Desktop\EHP_Files\DailyExports from Clarifi\"
+set "CLARIFI_DIR=%USERPROFILE%\OneDrive\Desktop\EHP_Files\DailyExports from Clarifi\"
 echo Using CLARIFI_DIR=%CLARIFI_DIR%
 
 REM Check if Data Bridge is already running (idempotent)

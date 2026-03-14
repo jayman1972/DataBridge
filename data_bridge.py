@@ -12,11 +12,16 @@ import sys
 import json
 import traceback
 import time
+import threading
 from datetime import datetime, timedelta, timezone, time as dt_time, date as date_type
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import requests
+
+# Suppress SSL warning for IBKR Gateway self-signed cert (localhost:5001)
+requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 # Try to import zoneinfo for timezone handling (Python 3.9+)
 try:
@@ -104,6 +109,9 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
+
+# IBKR Client Portal Gateway (tickle keeps session alive; must use port 5001 vs Data Bridge 5000)
+IBKR_GATEWAY_URL = os.getenv("IBKR_GATEWAY_URL", "https://localhost:5001")
 
 # Clarifi/EHP directory (for /clarifi/process and /ehp/process)
 USERNAME = os.getenv("USERNAME") or os.getenv("USER") or "user"
@@ -1306,6 +1314,25 @@ def ehp_process():
     return jsonify(result), 200
 
 
+def _ibkr_tickle_loop() -> None:
+    """Background thread: POST /tickle to IBKR Gateway every 60s to keep session alive."""
+    while True:
+        time.sleep(60)
+        try:
+            r = requests.post(
+                f"{IBKR_GATEWAY_URL.rstrip('/')}/v1/api/tickle",
+                json={},
+                timeout=5,
+                verify=False,
+            )
+            if os.environ.get("DATA_BRIDGE_DEBUG") and r.status_code == 200:
+                print("[IBKR] tickle OK")
+        except requests.exceptions.RequestException:
+            pass  # Gateway not running or not logged in; ignore
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     try:
         print("=" * 60)
@@ -1324,7 +1351,11 @@ if __name__ == "__main__":
         print("=" * 60)
     except:
         pass
-    
+
+    # Keep IBKR Gateway session alive (tickle every 60s)
+    _tickle_thread = threading.Thread(target=_ibkr_tickle_loop, daemon=True)
+    _tickle_thread.start()
+
     try:
         app.run(host="127.0.0.1", port=SERVICE_PORT, debug=False, use_reloader=False)
     except Exception as e:

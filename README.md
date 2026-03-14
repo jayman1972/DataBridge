@@ -59,12 +59,23 @@ PORT=5000
 
 - [SGGG API Fields](docs/SGGG_API_FIELDS.md) – Valid fields for the PSC/SGGG position API (for `/sggg/portfolio` and related queries)
 
+## IBKR Client Portal Gateway (optional)
+
+To use the IBKR retail API (portfolio, market data, orders) through the Data Bridge:
+
+1. Download the [Client Portal API Gateway](https://www.interactivebrokers.com/campus/ibkr-api-page/cpapi-v1/) (Java) and unzip it.
+2. Place it in this repo as `IBRK`, or set `IBKR_GATEWAY_DIR` to its path.
+3. Edit `root/conf.yaml` in the Gateway folder: set **`listenPort: 5001`** (Data Bridge uses 5000).
+4. Run `start-data-bridge-ngrok.bat`; it will start the Gateway in a new window, then the Data Bridge and ngrok.
+5. Log in once per day at https://localhost:5001 in your browser. The Data Bridge can then call `https://localhost:5001/v1/api/...` to talk to IBKR and push data to Supabase.
+
 ## Requirements
 
 - Python 3.9+
 - Bloomberg Terminal (running & logged in) for Bloomberg endpoints
 - OpenVPN + ODBC DSN=PSC_VIEWER for SGGG portfolio
 - ngrok (in folder or PATH) for tunneling
+- Java (for IBKR Gateway, if using)
 
 ## After Testing
 

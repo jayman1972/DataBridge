@@ -111,7 +111,12 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 
 # IBKR Client Portal Gateway (tickle keeps session alive; must use port 5001 vs Data Bridge 5000)
-IBKR_GATEWAY_URL = os.getenv("IBKR_GATEWAY_URL", "https://localhost:5001")
+IBKR_GATEWAY_URL = os.getenv("IBKR_GATEWAY_URL", "https://localhost:5001").rstrip("/")
+_ibkr_session = requests.Session()
+_ibkr_session.verify = False
+_ibkr_rate_lock = threading.Lock()
+_ibkr_last_request_time = 0.0
+_ibkr_history_semaphore = threading.Semaphore(5)  # max 5 concurrent history requests
 
 # Clarifi/EHP directory (for /clarifi/process and /ehp/process)
 USERNAME = os.getenv("USERNAME") or os.getenv("USER") or "user"
@@ -1314,6 +1319,113 @@ def ehp_process():
     return jsonify(result), 200
 
 
+def _ibkr_request(
+    method: str,
+    path: str,
+    params: Optional[Dict[str, str]] = None,
+    json_body: Optional[Dict[str, Any]] = None,
+    timeout: int = 15,
+) -> tuple[Optional[requests.Response], Optional[Dict[str, Any]]]:
+    """Call IBKR Gateway with 10 req/s rate limit. Returns (response, None) or (None, error_dict)."""
+    global _ibkr_last_request_time
+    with _ibkr_rate_lock:
+        now = time.monotonic()
+        elapsed = now - _ibkr_last_request_time
+        if elapsed < 0.1:
+            time.sleep(0.1 - elapsed)
+        _ibkr_last_request_time = time.monotonic()
+    try:
+        url = f"{IBKR_GATEWAY_URL}{path}" if path.startswith("/") else f"{IBKR_GATEWAY_URL}/{path}"
+        if method.upper() == "GET":
+            r = _ibkr_session.get(url, params=params, timeout=timeout)
+        else:
+            r = _ibkr_session.post(url, json=json_body or {}, params=params, timeout=timeout)
+        return (r, None)
+    except requests.exceptions.RequestException as e:
+        return (None, {"error": "IBKR Gateway unreachable", "detail": str(e)})
+    except Exception as e:
+        return (None, {"error": "IBKR request failed", "detail": str(e)})
+
+
+@app.route("/ibkr/auth-status", methods=["GET"])
+def ibkr_auth_status():
+    """Proxy to IBKR Gateway auth status (POST /iserver/auth/status)."""
+    r, err = _ibkr_request("POST", "/v1/api/iserver/auth/status", json_body={}, timeout=10)
+    if err:
+        return jsonify(err), 502
+    try:
+        data = r.json()
+    except Exception:
+        data = {"error": "Invalid response from Gateway"}
+    return jsonify(data), r.status_code
+
+
+@app.route("/ibkr/snapshot", methods=["GET"])
+def ibkr_snapshot():
+    """Proxy to IBKR Gateway market data snapshot. Query: conids (required), fields (required)."""
+    conids = request.args.get("conids")
+    fields = request.args.get("fields")
+    if not conids or not fields:
+        return jsonify({"error": "conids and fields are required"}), 400
+    params = {"conids": conids, "fields": fields}
+    r, err = _ibkr_request("GET", "/v1/api/iserver/marketdata/snapshot", params=params, timeout=15)
+    if err:
+        return jsonify(err), 502
+    try:
+        data = r.json()
+    except Exception:
+        data = r.text if r.text else {"error": "Invalid response from Gateway"}
+    return (jsonify(data) if isinstance(data, dict) or isinstance(data, list) else jsonify({"raw": data})), r.status_code
+
+
+@app.route("/ibkr/history", methods=["GET"])
+def ibkr_history():
+    """Proxy to IBKR Gateway historical market data. Query: conid, period, bar (required); exchange, startTime, outsideRth, source (optional). Max 5 concurrent."""
+    conid = request.args.get("conid")
+    period = request.args.get("period")
+    bar = request.args.get("bar")
+    if not conid or not period or not bar:
+        return jsonify({"error": "conid, period, and bar are required"}), 400
+    params = {"conid": conid, "period": period, "bar": bar}
+    for key in ("exchange", "startTime", "outsideRth", "source"):
+        val = request.args.get(key)
+        if val is not None:
+            params[key] = val
+    _ibkr_history_semaphore.acquire()
+    try:
+        r, err = _ibkr_request("GET", "/v1/api/iserver/marketdata/history", params=params, timeout=30)
+        if err:
+            return jsonify(err), 502
+        try:
+            data = r.json()
+        except Exception:
+            data = r.text if r.text else {"error": "Invalid response from Gateway"}
+        return (jsonify(data) if isinstance(data, dict) or isinstance(data, list) else jsonify({"raw": data})), r.status_code
+    finally:
+        _ibkr_history_semaphore.release()
+
+
+@app.route("/ibkr/search", methods=["GET"])
+def ibkr_search():
+    """Proxy to IBKR Gateway symbol search. Query: symbol (required); name, secType (optional)."""
+    symbol = request.args.get("symbol")
+    if not symbol:
+        return jsonify({"error": "symbol is required"}), 400
+    params = {"symbol": symbol}
+    for key in ("name", "secType"):
+        val = request.args.get(key)
+        if val is not None:
+            params[key] = val
+    r, err = _ibkr_request("GET", "/v1/api/iserver/secdef/search", params=params, timeout=10)
+    if err:
+        return jsonify(err), 502
+    try:
+        data = r.json()
+    except Exception:
+        data = r.text if r.text else {"error": "Invalid response from Gateway"}
+    return (jsonify(data) if isinstance(data, dict) or isinstance(data, list) else jsonify({"raw": data})), r.status_code
+
+
 def _ibkr_tickle_loop() -> None:
     """Background thread: POST /tickle to IBKR Gateway every 60s to keep session alive."""
     while True:
@@ -1344,8 +1456,9 @@ if __name__ == "__main__":
         print(f"Listening on http://127.0.0.1:{SERVICE_PORT}")
         print()
         print("Endpoints: /health, /bloomberg-update, /bloomberg/quotes, /quotes, /historical, /historical-debug, /reference,")
-        print("  /economic-calendar, /clarifi/process, /clarifi/list, /ehp/process, /sggg/portfolio")
-        print("SGGG requires: OpenVPN + DSN=PSC_VIEWER + pyodbc")
+        print("  /economic-calendar, /clarifi/process, /clarifi/list, /ehp/process, /sggg/portfolio,")
+        print("  /ibkr/auth-status, /ibkr/snapshot, /ibkr/history, /ibkr/search")
+        print("SGGG requires: OpenVPN + DSN=PSC_VIEWER + pyodbc. IBKR requires Gateway on port 5001 + browser login.")
         print()
         print("Service is running. Press Ctrl+C to stop.")
         print("=" * 60)

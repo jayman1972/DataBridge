@@ -69,6 +69,15 @@ To use the IBKR retail API (portfolio, market data, orders) through the Data Bri
 4. Run `start-data-bridge-ngrok.bat`; it will start the Gateway in a new window, then the Data Bridge and ngrok.
 5. Log in once per day at https://localhost:5001 in your browser. The Data Bridge can then call `https://localhost:5001/v1/api/...` to talk to IBKR and push data to Supabase.
 
+**Proxy routes** (Data Bridge forwards to the Gateway with rate limiting):
+
+- `GET /ibkr/auth-status` – session/auth status
+- `GET /ibkr/snapshot?conids=...&fields=...` – market data snapshot
+- `GET /ibkr/history?conid=...&period=...&bar=...` – historical bars (optional: `exchange`, `startTime`, `outsideRth`, `source`)
+- `GET /ibkr/search?symbol=...` – symbol search (optional: `name`, `secType`)
+
+Rate limits: 10 requests/second global; max 5 concurrent requests for `/ibkr/history`. Override Gateway URL with `IBKR_GATEWAY_URL` if needed.
+
 ## Requirements
 
 - Python 3.9+

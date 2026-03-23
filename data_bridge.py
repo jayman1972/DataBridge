@@ -17,7 +17,7 @@ import threading
 from datetime import datetime, timedelta, timezone, time as dt_time, date as date_type
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import requests
 
@@ -110,6 +110,8 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
+# Bump when debugging deploy mismatches (curl /health to confirm running build)
+DATA_BRIDGE_BUILD = "2026-03-23-economic-calendar-json"
 
 # IBKR Client Portal Gateway (tickle keeps session alive; must use port 5001 vs Data Bridge 5000)
 IBKR_GATEWAY_URL = os.getenv("IBKR_GATEWAY_URL", "https://localhost:5001").rstrip("/")
@@ -165,7 +167,23 @@ BLOOMBERG_MAPPINGS = [
 ]
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}) 
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+
+def _json_response(payload: dict, status: int = 200) -> Response:
+    """JSON response that never raises on odd types (Flask jsonify can still fail on some values)."""
+    return Response(
+        json.dumps(payload, default=str, ensure_ascii=False),
+        status=status,
+        mimetype="application/json; charset=utf-8",
+    )
+
+
+def _json_scalar_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
 
 @app.after_request
 def add_cors_headers(response):
@@ -232,6 +250,7 @@ def health():
     return jsonify({
         "status": "ok" if is_available else "unavailable",
         "service": "data-bridge",
+        "build": DATA_BRIDGE_BUILD,
         "bloomberg": client_info
     }), status_code
 
@@ -878,7 +897,7 @@ def economic_calendar():
     Uses BDP (Bloomberg Data Point) to get current/future release data.
     """
     try:
-        data = request.get_json() or {}
+        data = request.get_json(silent=True, force=True) or {}
         # Get tickers from request body if provided, otherwise load from database
         tickers = data.get("tickers", [])
         
@@ -899,11 +918,14 @@ def economic_calendar():
                     print(f"Loaded {len(tickers)} tickers from file")
         
         if not tickers:
-            return jsonify({
-                "success": False,
-                "error": "No tickers provided and no tickers configured. Please provide tickers in request body or import economic_calendar_tickers.sql",
-                "calendar_data": []
-            }), 400
+            return _json_response(
+                {
+                    "success": False,
+                    "error": "No tickers provided and no tickers configured. Please provide tickers in request body or import economic_calendar_tickers.sql",
+                    "calendar_data": [],
+                },
+                400,
+            )
         
         # Date range: today to today + 365 days
         today = datetime.now().date()
@@ -989,7 +1011,11 @@ def economic_calendar():
                                 release_date = release_dt
                             elif isinstance(release_dt, str):
                                 try:
-                                    release_date = datetime.strptime(release_dt[:8], "%Y%m%d").date()
+                                    s = release_dt.strip()
+                                    if len(s) >= 10 and s[4] == "-":
+                                        release_date = datetime.strptime(s[:10], "%Y-%m-%d").date()
+                                    elif len(s) >= 8:
+                                        release_date = datetime.strptime(s[:8], "%Y%m%d").date()
                                 except Exception:
                                     pass
                             
@@ -1014,10 +1040,19 @@ def economic_calendar():
                                     elif isinstance(future_date, date_type):
                                         future_release_date = future_date
                                     elif isinstance(future_date, str):
-                                        # Try parsing various formats
                                         try:
-                                            future_release_date = datetime.strptime(future_date[:8], "%Y%m%d").date()
-                                        except:
+                                            s = future_date.strip()
+                                            if len(s) >= 10 and s[4] == "-":
+                                                future_release_date = datetime.strptime(
+                                                    s[:10], "%Y-%m-%d"
+                                                ).date()
+                                            elif len(s) >= 8:
+                                                future_release_date = datetime.strptime(
+                                                    s[:8], "%Y%m%d"
+                                                ).date()
+                                            else:
+                                                future_release_date = None
+                                        except Exception:
                                             future_release_date = None
                                     
                                     # Only use future date if we don't have a current release date
@@ -1107,14 +1142,14 @@ def economic_calendar():
                     if not is_future_event:
                         actual_value = _safe_float(data.get("PX_LAST"))
                     
-                    # Build event record
+                    # Build event record (plain str/float/None only — safe for JSON)
                     event = {
-                        "ticker": ticker,
-                        "country": data.get("REGION_OR_COUNTRY", ""),
-                        "event": data.get("SECURITY_DES", ""),
+                        "ticker": str(ticker),
+                        "country": _json_scalar_str(data.get("REGION_OR_COUNTRY")),
+                        "event": _json_scalar_str(data.get("SECURITY_DES")),
                         "release_date": release_date.strftime("%Y-%m-%d") if release_date else None,
                         "release_time": release_time,
-                        "period": data.get("OBSERVATION_PERIOD", ""),
+                        "period": _json_scalar_str(data.get("OBSERVATION_PERIOD")),
                         "survey_median": _safe_float(data.get("RT_BN_SURVEY_MEDIAN")),
                         "actual": actual_value,  # NULL for future events, PX_LAST for past/current
                         "prior": _safe_float(data.get("PREV_CLOSE_VAL")),
@@ -1140,26 +1175,26 @@ def economic_calendar():
         
         # Return calendar_data to match Edge Function expectations
         # Also include events for backward compatibility
-        return jsonify({
-            "success": True,
-            "calendar_data": events,  # Primary field expected by Edge Function
-            "events": events,  # Backward compatibility
-            "count": len(events),
-            "errors": errors,
-            "date_range": {
-                "from": today_str,
-                "to": end_date_str
+        return _json_response(
+            {
+                "success": True,
+                "service": "DataBridge",
+                "calendar_data": events,
+                "events": events,
+                "count": len(events),
+                "errors": errors,
+                "date_range": {"from": today_str, "to": end_date_str},
             }
-        })
-        
+        )
+
     except Exception as e:
         error_msg = f"Economic calendar error: {str(e)}"
         print(f"[FAIL] {error_msg}")
         traceback.print_exc()
-        return jsonify({
-            "success": False,
-            "error": error_msg
-        }), 500
+        return _json_response(
+            {"success": False, "service": "DataBridge", "error": error_msg, "calendar_data": []},
+            500,
+        )
 
 
 def _safe_float(value):

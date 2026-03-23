@@ -293,13 +293,15 @@ class BLPAPIClient(BloombergClientBase):
                 if event.eventType() in (blpapi.Event.RESPONSE, blpapi.Event.PARTIAL_RESPONSE):
                     for msg in event:
                         if msg.hasElement("securityData"):
-                            securityDataArray = msg.getElement("securityData")
-                            for securityData in securityDataArray.values():
-                                ticker = securityData.getElementAsString("security")
+                            security_data_array = msg.getElement("securityData")
+                            # Use indexed access (documented BLPAPI pattern); .values() is unreliable across builds
+                            for idx in range(security_data_array.numValues()):
+                                security_data = security_data_array.getValueAsElement(idx)
+                                ticker = security_data.getElementAsString("security")
                                 
                                 # Check for security error
-                                if securityData.hasElement("securityError"):
-                                    err = securityData.getElement("securityError")
+                                if security_data.hasElement("securityError"):
+                                    err = security_data.getElement("securityError")
                                     result[ticker] = {
                                         "error": f"{err.getElementAsString('category')} - {err.getElementAsString('message')}"
                                     }
@@ -308,10 +310,10 @@ class BLPAPIClient(BloombergClientBase):
                                 result[ticker] = {}
                                 
                                 # Extract field values
-                                fieldData = securityData.getElement("fieldData")
+                                field_data = security_data.getElement("fieldData")
                                 for field in fields:
-                                    if fieldData.hasElement(field):
-                                        field_elem = fieldData.getElement(field)
+                                    if field_data.hasElement(field):
+                                        field_elem = field_data.getElement(field)
                                         if not field_elem.isNull():
                                             raw = field_elem.getValue()
                                             result[ticker][field] = _coerce_blp_reference_value(raw)

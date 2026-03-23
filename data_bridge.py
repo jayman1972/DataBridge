@@ -113,7 +113,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
-DATA_BRIDGE_BUILD = "2026-03-24-ecal-logging"
+DATA_BRIDGE_BUILD = "2026-03-24-bbg-datetime-logging"
 
 _ecal_logger = logging.getLogger("data_bridge.economic_calendar")
 if not _ecal_logger.handlers:
@@ -124,6 +124,25 @@ if not _ecal_logger.handlers:
     _ecal_logger.addHandler(_ecal_handler)
     _ecal_logger.setLevel(logging.INFO)
     _ecal_logger.propagate = False
+
+_bbg_logger = logging.getLogger("data_bridge.bloomberg")
+if not _bbg_logger.handlers:
+    _bbg_handler = logging.StreamHandler(sys.stderr)
+    _bbg_handler.setFormatter(
+        logging.Formatter("%(asctime)s [bbg] %(levelname)s %(message)s")
+    )
+    _bbg_logger.addHandler(_bbg_handler)
+    _bbg_logger.setLevel(logging.INFO)
+    _bbg_logger.propagate = False
+
+
+def _bbg_verbose_full() -> bool:
+    """Log full serialized JSON for /reference and extra BLPAPI lines (large)."""
+    e = os.environ.get("DATA_BRIDGE_BLOOMBERG_VERBOSE", "").lower()
+    if e in ("1", "true", "yes"):
+        return True
+    return os.environ.get("DATA_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
+
 
 # IBKR Client Portal Gateway (tickle keeps session alive; must use port 5001 vs Data Bridge 5000)
 IBKR_GATEWAY_URL = os.getenv("IBKR_GATEWAY_URL", "https://localhost:5001").rstrip("/")
@@ -311,7 +330,8 @@ def health():
         "status": "ok" if is_available else "unavailable",
         "service": "data-bridge",
         "build": DATA_BRIDGE_BUILD,
-        "bloomberg": client_info
+        "port": SERVICE_PORT,
+        "bloomberg": client_info,
     }), status_code
 
 
@@ -608,8 +628,16 @@ def historical():
         if not symbols or not fields:
             return jsonify({"error": "symbols and fields are required"}), 400
 
-        # Full request log
-        print(f"[DataBridge historical] REQUEST (full): symbols={symbols} fields={fields} start_date={start_date!r} end_date={end_date!r}")
+        # Full request log (stdout + stderr logger for market-tab refresh debugging)
+        print(f"[DataBridge historical] REQUEST (full): symbols={symbols} fields={fields} start_date={start_date!r} end_date={end_date!r}", flush=True)
+        _bbg_logger.info(
+            "historical REQUEST symbols=%d fields=%s start_date=%s end_date=%s sample_symbols=%s",
+            len(symbols),
+            fields,
+            start_date,
+            end_date,
+            symbols[:8] if len(symbols) > 8 else symbols,
+        )
 
         # US Flash PMI: no override (RELEASE_STAGE_OVERRIDE=P fails in BDH). Use BDP + BDH from Edge Function.
         historical_data = {}
@@ -619,7 +647,18 @@ def historical():
             variants = _get_canadian_ticker_variants(normalized)
             records = []
             last_error = None
-            print(f"[DataBridge historical] REQUEST ticker={ticker!r} variants={variants} fields={fields} start_date={start_date!r} end_date={end_date!r}")
+            print(
+                f"[DataBridge historical] REQUEST ticker={ticker!r} variants={variants} fields={fields} start_date={start_date!r} end_date={end_date!r}",
+                flush=True,
+            )
+            _bbg_logger.info(
+                "historical ticker=%r variants=%s fields=%s start=%s end=%s",
+                ticker,
+                variants,
+                fields,
+                start_date,
+                end_date,
+            )
             for ticker_to_try in variants:
                 try:
                     records = bloomberg_client.get_historical_data(
@@ -629,15 +668,40 @@ def historical():
                         end_date=end_date,
                     )
                     if records:
-                        print(f"[DataBridge historical] RESPONSE ticker={ticker!r} record_count={len(records)} records={_log_serialize(records)}")
+                        ser = _log_serialize(records)
+                        print(
+                            f"[DataBridge historical] RESPONSE ticker={ticker!r} record_count={len(records)} records={ser}",
+                            flush=True,
+                        )
+                        _bbg_logger.info(
+                            "historical RESPONSE ticker=%r record_count=%d (full JSON: DATA_BRIDGE_BLOOMBERG_VERBOSE=1)",
+                            ticker,
+                            len(records),
+                        )
+                        if _bbg_verbose_full():
+                            _bbg_logger.info(
+                                "historical RESPONSE body ticker=%r json=%s",
+                                ticker,
+                                json.dumps(ser, default=str),
+                            )
                         break
                 except Exception as e:
                     last_error = e
-                    print(f"[DataBridge historical] RESPONSE ticker={ticker_to_try!r} exception={e!r}")
+                    print(f"[DataBridge historical] RESPONSE ticker={ticker_to_try!r} exception={e!r}", flush=True)
+                    _bbg_logger.error("historical exception ticker_try=%r err=%s", ticker_to_try, e, exc_info=True)
             if not records and last_error:
                 errors.append(f"{ticker}: {str(last_error)}")
             if not records:
-                print(f"[DataBridge historical] RESPONSE ticker={ticker!r} record_count=0 last_error={last_error!r} (tried variants: {variants})")
+                print(
+                    f"[DataBridge historical] RESPONSE ticker={ticker!r} record_count=0 last_error={last_error!r} (tried variants: {variants})",
+                    flush=True,
+                )
+                _bbg_logger.warning(
+                    "historical empty ticker=%r last_error=%r variants=%s",
+                    ticker,
+                    last_error,
+                    variants,
+                )
             historical_data[ticker] = records  # Key by original ticker for caller
         return jsonify({"historical_data": historical_data, "errors": errors}), 200
     except Exception as e:
@@ -655,9 +719,33 @@ def reference():
         if not symbols or not fields:
             return jsonify({"error": "symbols and fields are required"}), 400
 
-        print(f"[DataBridge reference] REQUEST (full): symbols={symbols} fields={fields}")
+        print(f"[DataBridge reference] REQUEST (full): symbols={symbols} fields={fields}", flush=True)
+        _bbg_logger.info(
+            "reference REQUEST symbols=%d fields=%s sample=%s",
+            len(symbols),
+            fields,
+            symbols[:12] if len(symbols) > 12 else symbols,
+        )
         ref_data = bloomberg_client.get_reference_data(tickers=symbols, fields=fields)
-        print(f"[DataBridge reference] RESPONSE (full from Bloomberg): {json.dumps(_log_serialize(ref_data), default=str, indent=2)}")
+        ser = _log_serialize(ref_data)
+        print(
+            f"[DataBridge reference] RESPONSE (full from Bloomberg): {json.dumps(ser, default=str, indent=2)}",
+            flush=True,
+        )
+        ok = sum(1 for r in ref_data.values() if isinstance(r, dict) and "error" not in r)
+        bad = [k for k, r in ref_data.items() if isinstance(r, dict) and "error" in r]
+        _bbg_logger.info(
+            "reference RESPONSE tickers=%d ok=%d security_errors=%d error_keys=%s",
+            len(ref_data),
+            ok,
+            len(bad),
+            bad[:20] if len(bad) > 20 else bad,
+        )
+        if _bbg_verbose_full():
+            _bbg_logger.info(
+                "reference RESPONSE body json=%s",
+                json.dumps(ser, default=str),
+            )
         # Update expects reference_data[ticker] = [row] (array of rows)
         reference_data = {}
         errors = []
@@ -671,6 +759,7 @@ def reference():
                 reference_data[ticker] = [row_with_date]
         return jsonify({"reference_data": reference_data, "errors": errors}), 200
     except Exception as e:
+        _bbg_logger.error("reference failed: %s", e, exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -1723,6 +1812,14 @@ if __name__ == "__main__":
         print(
             "Economic calendar logs: stderr [ecal] — set ECONOMIC_CALENDAR_LOG_VERBOSE=1 for ticker lists, "
             "ECONOMIC_CALENDAR_LOG_RESPONSE=1 for truncated Bloomberg JSON (max ECONOMIC_CALENDAR_LOG_RESPONSE_MAX)."
+        )
+        print(
+            "Market Bloomberg (/historical, /reference): stderr [bbg] summaries; "
+            "DATA_BRIDGE_BLOOMBERG_VERBOSE=1 or DATA_BRIDGE_DEBUG=1 for full JSON bodies."
+        )
+        print(
+            f"Canonical dashboard bridge: this DataBridge on port {SERVICE_PORT} (set PORT= to override). "
+            "Point ngrok/localtunnel at this port; Supabase DATA_BRIDGE_URL must reach this process—not bloomberg-local-service.py:8765."
         )
         print("Tip: run with python -u or PYTHONUNBUFFERED=1 so prints appear immediately.")
         print("=" * 60)

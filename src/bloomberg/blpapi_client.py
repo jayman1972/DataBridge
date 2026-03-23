@@ -18,6 +18,51 @@ except ImportError:
 from .base_client import BloombergClientBase
 
 
+def _blp_datetime_class() -> Optional[type]:
+    """Bloomberg Terminal may ship blpapi without a top-level ``Datetime`` attribute (PyPI layout differs)."""
+    if not BLPAPI_AVAILABLE:
+        return None
+    cls = getattr(blpapi, "Datetime", None)
+    if cls is not None:
+        return cls
+    try:
+        from blpapi.datetime import Datetime as _D  # type: ignore
+
+        return _D
+    except Exception:
+        return None
+
+
+def _is_blpapi_datetime_value(val: Any) -> bool:
+    """True if ``val`` is Bloomberg's Datetime type (even when not exposed as ``blpapi.Datetime``)."""
+    if val is None or not BLPAPI_AVAILABLE:
+        return False
+    cls = type(val)
+    if getattr(cls, "__name__", "") != "Datetime":
+        return False
+    mod = getattr(cls, "__module__", "") or ""
+    if "blpapi" not in mod:
+        return False
+    return callable(getattr(val, "toDatetime", None))
+
+
+def _coerce_blp_datetime(val: Any) -> Any:
+    try:
+        py_dt = val.toDatetime()
+        if py_dt is None:
+            return None
+        if (
+            py_dt.hour == 0
+            and py_dt.minute == 0
+            and py_dt.second == 0
+            and py_dt.microsecond == 0
+        ):
+            return py_dt.date()
+        return py_dt
+    except Exception:
+        return str(val)
+
+
 def _coerce_blp_reference_value(val: Any) -> Any:
     """Convert Bloomberg getValue() results to JSON-serializable Python types."""
     if val is None:
@@ -28,22 +73,11 @@ def _coerce_blp_reference_value(val: Any) -> Any:
         return val.decode("utf-8", errors="replace")
     if isinstance(val, str):
         return val
-    if BLPAPI_AVAILABLE and isinstance(val, blpapi.Datetime):
-        try:
-            py_dt = val.toDatetime()
-            if py_dt is None:
-                return None
-            if (
-                py_dt.hour == 0
-                and py_dt.minute == 0
-                and py_dt.second == 0
-                and py_dt.microsecond == 0
-            ):
-                # Keep datetime.date so callers (e.g. economic calendar) keep working; Flask jsonifies dates
-                return py_dt.date()
-            return py_dt
-        except Exception:
-            return str(val)
+    _dt_cls = _blp_datetime_class()
+    if BLPAPI_AVAILABLE and _dt_cls is not None and isinstance(val, _dt_cls):
+        return _coerce_blp_datetime(val)
+    if _is_blpapi_datetime_value(val):
+        return _coerce_blp_datetime(val)
     if isinstance(val, datetime):
         if val.time() == dt_time(0, 0, 0):
             return val.date()
@@ -317,6 +351,11 @@ class BLPAPIClient(BloombergClientBase):
                                         field_elem = field_data.getElement(field)
                                         if not field_elem.isNull():
                                             raw = field_elem.getValue()
+                                            if _debug:
+                                                print(
+                                                    f"[BLPAPI ref] {ticker!r} {field!r} "
+                                                    f"raw_type={type(raw).__module__}.{type(raw).__name__}"
+                                                )
                                             result[ticker][field] = _coerce_blp_reference_value(raw)
                 
                 if event.eventType() == blpapi.Event.RESPONSE:

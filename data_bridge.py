@@ -10,6 +10,7 @@ Therefore, this service uses BLPAPI which works in any Python environment.
 import os
 import sys
 import json
+import math
 import traceback
 import time
 import threading
@@ -114,6 +115,17 @@ SERVICE_PORT = int(os.getenv("PORT", "5000"))
 IBKR_GATEWAY_URL = os.getenv("IBKR_GATEWAY_URL", "https://localhost:5001").rstrip("/")
 _ibkr_session = requests.Session()
 _ibkr_session.verify = False
+_ibkr_session.headers.update({"User-Agent": "Console"})  # Gateway may require this to accept server-side requests
+# Optional: send browser session cookie so Gateway accepts requests (log in at https://localhost:5001, copy Cookie from DevTools)
+_ibkr_cookie_str = os.getenv("IBKR_SESSION_COOKIE", "").strip()
+if _ibkr_cookie_str:
+    from urllib.parse import urlparse
+    _ibkr_netloc = urlparse(IBKR_GATEWAY_URL).netloc.split(":")[0]  # e.g. localhost
+    for part in _ibkr_cookie_str.split(";"):
+        part = part.strip()
+        if "=" in part:
+            _name, _val = part.split("=", 1)
+            _ibkr_session.cookies.set(_name.strip(), _val.strip().strip('"'), domain=_ibkr_netloc, path="/")
 _ibkr_rate_lock = threading.Lock()
 _ibkr_last_request_time = 0.0
 _ibkr_history_semaphore = threading.Semaphore(5)  # max 5 concurrent history requests
@@ -940,8 +952,17 @@ def economic_calendar():
                     tickers=batch_tickers,
                     fields=fields
                 )
-                # Full response from Bloomberg (serialized for console)
-                print(f"[economic-calendar] BATCH {batch_num} RESPONSE (full from Bloomberg): {json.dumps(_log_serialize(reference_data), default=str, indent=2)}")
+                # Full response log must never break the endpoint (serialization edge cases)
+                try:
+                    _serialized = _log_serialize(reference_data)
+                    print(
+                        f"[economic-calendar] BATCH {batch_num} RESPONSE (full from Bloomberg): "
+                        f"{json.dumps(_serialized, default=str, indent=2)}"
+                    )
+                except Exception as log_err:
+                    print(
+                        f"[economic-calendar] BATCH {batch_num} RESPONSE log skipped: {log_err}"
+                    )
                 
                 # Process each ticker's data
                 for ticker, data in reference_data.items():
@@ -1142,11 +1163,14 @@ def economic_calendar():
 
 
 def _safe_float(value):
-    """Safely convert value to float, return None if not possible"""
+    """Safely convert value to float, return None if not possible (JSON cannot encode inf/nan)."""
     if value is None:
         return None
     try:
-        return float(value)
+        x = float(value)
+        if math.isnan(x) or math.isinf(x):
+            return None
+        return x
     except (ValueError, TypeError):
         return None
 
@@ -1347,16 +1371,21 @@ def _ibkr_request(
         return (None, {"error": "IBKR request failed", "detail": str(e)})
 
 
+def _ibkr_response_json(r: requests.Response) -> Any:
+    """Parse Gateway response as JSON; on failure return status and raw body for debugging."""
+    try:
+        return r.json()
+    except Exception:
+        return {"_gateway_status": r.status_code, "_gateway_body": (r.text or "(empty)")[:2000]}
+
+
 @app.route("/ibkr/auth-status", methods=["GET"])
 def ibkr_auth_status():
     """Proxy to IBKR Gateway auth status (POST /iserver/auth/status)."""
     r, err = _ibkr_request("POST", "/v1/api/iserver/auth/status", json_body={}, timeout=10)
     if err:
         return jsonify(err), 502
-    try:
-        data = r.json()
-    except Exception:
-        data = {"error": "Invalid response from Gateway"}
+    data = _ibkr_response_json(r)
     return jsonify(data), r.status_code
 
 
@@ -1371,11 +1400,8 @@ def ibkr_snapshot():
     r, err = _ibkr_request("GET", "/v1/api/iserver/marketdata/snapshot", params=params, timeout=15)
     if err:
         return jsonify(err), 502
-    try:
-        data = r.json()
-    except Exception:
-        data = r.text if r.text else {"error": "Invalid response from Gateway"}
-    return (jsonify(data) if isinstance(data, dict) or isinstance(data, list) else jsonify({"raw": data})), r.status_code
+    data = _ibkr_response_json(r)
+    return (jsonify(data) if isinstance(data, (dict, list)) else jsonify({"raw": data})), r.status_code
 
 
 @app.route("/ibkr/history", methods=["GET"])
@@ -1396,11 +1422,8 @@ def ibkr_history():
         r, err = _ibkr_request("GET", "/v1/api/iserver/marketdata/history", params=params, timeout=30)
         if err:
             return jsonify(err), 502
-        try:
-            data = r.json()
-        except Exception:
-            data = r.text if r.text else {"error": "Invalid response from Gateway"}
-        return (jsonify(data) if isinstance(data, dict) or isinstance(data, list) else jsonify({"raw": data})), r.status_code
+        data = _ibkr_response_json(r)
+        return (jsonify(data) if isinstance(data, (dict, list)) else jsonify({"raw": data})), r.status_code
     finally:
         _ibkr_history_semaphore.release()
 
@@ -1419,11 +1442,8 @@ def ibkr_search():
     r, err = _ibkr_request("GET", "/v1/api/iserver/secdef/search", params=params, timeout=10)
     if err:
         return jsonify(err), 502
-    try:
-        data = r.json()
-    except Exception:
-        data = r.text if r.text else {"error": "Invalid response from Gateway"}
-    return (jsonify(data) if isinstance(data, dict) or isinstance(data, list) else jsonify({"raw": data})), r.status_code
+    data = _ibkr_response_json(r)
+    return (jsonify(data) if isinstance(data, (dict, list)) else jsonify({"raw": data})), r.status_code
 
 
 def _ibkr_tickle_loop() -> None:

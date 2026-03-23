@@ -4,6 +4,9 @@ This is the existing implementation wrapped in the new interface.
 """
 
 import os
+import math
+import numbers
+from datetime import date, datetime, time as dt_time
 from typing import List, Dict, Any, Optional
 try:
     import blpapi
@@ -13,6 +16,48 @@ except ImportError:
     blpapi = None
 
 from .base_client import BloombergClientBase
+
+
+def _coerce_blp_reference_value(val: Any) -> Any:
+    """Convert Bloomberg getValue() results to JSON-serializable Python types."""
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    if isinstance(val, str):
+        return val
+    if BLPAPI_AVAILABLE and isinstance(val, blpapi.Datetime):
+        try:
+            py_dt = val.toDatetime()
+            if py_dt is None:
+                return None
+            if (
+                py_dt.hour == 0
+                and py_dt.minute == 0
+                and py_dt.second == 0
+                and py_dt.microsecond == 0
+            ):
+                # Keep datetime.date so callers (e.g. economic calendar) keep working; Flask jsonifies dates
+                return py_dt.date()
+            return py_dt
+        except Exception:
+            return str(val)
+    if isinstance(val, datetime):
+        if val.time() == dt_time(0, 0, 0):
+            return val.date()
+        return val
+    if isinstance(val, date):
+        return val
+    if isinstance(val, numbers.Integral):
+        return int(val)
+    if isinstance(val, numbers.Real):
+        x = float(val)
+        if math.isnan(x) or math.isinf(x):
+            return None
+        return x
+    return str(val)
 
 
 class BLPAPIClient(BloombergClientBase):
@@ -268,8 +313,8 @@ class BLPAPIClient(BloombergClientBase):
                                     if fieldData.hasElement(field):
                                         field_elem = fieldData.getElement(field)
                                         if not field_elem.isNull():
-                                            value = field_elem.getValue()
-                                            result[ticker][field] = value
+                                            raw = field_elem.getValue()
+                                            result[ticker][field] = _coerce_blp_reference_value(raw)
                 
                 if event.eventType() == blpapi.Event.RESPONSE:
                     break

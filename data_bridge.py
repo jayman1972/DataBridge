@@ -890,6 +890,26 @@ def sggg_diamond_trades():
         return jsonify({"error": str(e)}), 500
 
 
+def _eco_calendar_parse_date(release_dt: Any) -> Optional[date_type]:
+    """Parse ECO_RELEASE_DT / ECO_FUTURE_RELEASE_DATE refdata values to a date."""
+    if not release_dt:
+        return None
+    if isinstance(release_dt, datetime):
+        return release_dt.date()
+    if isinstance(release_dt, date_type):
+        return release_dt
+    if isinstance(release_dt, str):
+        try:
+            s = release_dt.strip()
+            if len(s) >= 10 and s[4] == "-":
+                return datetime.strptime(s[:10], "%Y-%m-%d").date()
+            if len(s) >= 8:
+                return datetime.strptime(s[:8], "%Y%m%d").date()
+        except Exception:
+            return None
+    return None
+
+
 @app.route("/economic-calendar", methods=["POST"])
 def economic_calendar():
     """
@@ -974,95 +994,69 @@ def economic_calendar():
                     tickers=batch_tickers,
                     fields=fields
                 )
-                # Full response log must never break the endpoint (serialization edge cases)
-                try:
-                    _serialized = _log_serialize(reference_data)
-                    print(
-                        f"[economic-calendar] BATCH {batch_num} RESPONSE (full from Bloomberg): "
-                        f"{json.dumps(_serialized, default=str, indent=2)}"
-                    )
-                except Exception as log_err:
-                    print(
-                        f"[economic-calendar] BATCH {batch_num} RESPONSE log skipped: {log_err}"
-                    )
-                
-                # Process each ticker's data
+                # Full response log (off by default — huge JSON + slow; edge functions time out)
+                if os.environ.get("ECONOMIC_CALENDAR_DEBUG_FULL", "").lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                ):
+                    try:
+                        _serialized = _log_serialize(reference_data)
+                        print(
+                            f"[economic-calendar] BATCH {batch_num} RESPONSE (full from Bloomberg): "
+                            f"{json.dumps(_serialized, default=str, indent=2)}"
+                        )
+                    except Exception as log_err:
+                        print(
+                            f"[economic-calendar] BATCH {batch_num} RESPONSE log skipped: {log_err}"
+                        )
+
+                # Phase 1: ECO_RELEASE_DT only (no per-ticker Bloomberg round-trips)
+                batch_states: List[dict] = []
                 for ticker, data in reference_data.items():
                     if "error" in data:
                         errors.append(f"{ticker}: {data['error']}")
                         continue
-                    
-                    # Extract release date - try ECO_FUTURE_RELEASE_DATE first for future events
-                    release_date = None
-                    release_time = None
-                    
-                    # Priority: Use ECO_RELEASE_DT if it's today or in the past (current release)
-                    # Only use ECO_FUTURE_RELEASE_DATE if ECO_RELEASE_DT is not today/past
-                    is_future_release = False  # Track if we got the date from ECO_FUTURE_RELEASE_DATE
-                    
-                    # First, try ECO_RELEASE_DT (current/past release)
-                    # BLPAPI returns datetime.date for ECO_RELEASE_DT, not datetime
-                    if "ECO_RELEASE_DT" in data:
-                        release_dt = data["ECO_RELEASE_DT"]
-                        if release_dt:
-                            if isinstance(release_dt, datetime):
-                                release_date = release_dt.date()
-                            elif isinstance(release_dt, date_type):
-                                release_date = release_dt
-                            elif isinstance(release_dt, str):
-                                try:
-                                    s = release_dt.strip()
-                                    if len(s) >= 10 and s[4] == "-":
-                                        release_date = datetime.strptime(s[:10], "%Y-%m-%d").date()
-                                    elif len(s) >= 8:
-                                        release_date = datetime.strptime(s[:8], "%Y%m%d").date()
-                                except Exception:
-                                    pass
-                            
-                            # If ECO_RELEASE_DT is today or in the past, use it (not a future event)
-                            if release_date and release_date <= today:
-                                is_future_release = False
-                    
-                    # If we don't have a release date yet, or if ECO_RELEASE_DT was in the future,
-                    # try ECO_FUTURE_RELEASE_DATE (next future release)
-                    if (not release_date or (release_date and release_date > today)):
+                    eco_rd = _eco_calendar_parse_date(data.get("ECO_RELEASE_DT"))
+                    batch_states.append(
+                        {"ticker": ticker, "data": data, "release_date": eco_rd}
+                    )
+
+                # Phase 2: one batched refdata call per chunk for missing dates only
+                need_future = [s["ticker"] for s in batch_states if s["release_date"] is None]
+                future_by_ticker: Dict[str, dict] = {}
+                if need_future:
+                    for fj in range(0, len(need_future), BATCH_SIZE):
+                        chunk = need_future[fj : fj + BATCH_SIZE]
                         try:
-                            future_release = bloomberg_client.get_reference_data(
-                                tickers=[ticker],
-                                fields=["ECO_FUTURE_RELEASE_DATE"]
+                            fr_batch = bloomberg_client.get_reference_data(
+                                tickers=chunk,
+                                fields=["ECO_FUTURE_RELEASE_DATE"],
                             )
-                            if ticker in future_release and "ECO_FUTURE_RELEASE_DATE" in future_release[ticker]:
-                                future_date = future_release[ticker]["ECO_FUTURE_RELEASE_DATE"]
-                                if future_date:
-                                    # Convert Bloomberg date to Python date
-                                    if isinstance(future_date, datetime):
-                                        future_release_date = future_date.date()
-                                    elif isinstance(future_date, date_type):
-                                        future_release_date = future_date
-                                    elif isinstance(future_date, str):
-                                        try:
-                                            s = future_date.strip()
-                                            if len(s) >= 10 and s[4] == "-":
-                                                future_release_date = datetime.strptime(
-                                                    s[:10], "%Y-%m-%d"
-                                                ).date()
-                                            elif len(s) >= 8:
-                                                future_release_date = datetime.strptime(
-                                                    s[:8], "%Y%m%d"
-                                                ).date()
-                                            else:
-                                                future_release_date = None
-                                        except Exception:
-                                            future_release_date = None
-                                    
-                                    # Only use future date if we don't have a current release date
-                                    if future_release_date and not release_date:
-                                        release_date = future_release_date
-                                        is_future_release = True
-                                    # If we have a current release date that's today, keep it and ignore future date
-                        except Exception as e:
-                            pass
-                    
+                            future_by_ticker.update(fr_batch)
+                        except Exception as fe:
+                            errors.append(
+                                f"ECO_FUTURE_RELEASE_DATE batch {fj // BATCH_SIZE + 1}: {fe}"
+                            )
+
+                # Phase 3: merge future dates and build events
+                for s in batch_states:
+                    ticker = s["ticker"]
+                    data = s["data"]
+                    release_date = s["release_date"]
+                    release_time = None
+                    is_future_release = False
+
+                    if release_date is None:
+                        fr_row = future_by_ticker.get(ticker, {})
+                        if "error" not in fr_row:
+                            future_release_date = _eco_calendar_parse_date(
+                                fr_row.get("ECO_FUTURE_RELEASE_DATE")
+                            )
+                            if future_release_date:
+                                release_date = future_release_date
+                                is_future_release = True
+
                     # Filter by date range
                     # Include all events from today onwards (even if time has passed today)
                     # Events only roll off after the date has passed (i.e., tomorrow)

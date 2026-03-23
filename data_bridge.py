@@ -979,190 +979,210 @@ def economic_calendar():
         
         events = []
         errors = []
-        
-        # Process tickers in batches to avoid overwhelming Bloomberg
-        BATCH_SIZE = 50
-        for i in range(0, len(tickers), BATCH_SIZE):
-            batch_tickers = tickers[i:i+BATCH_SIZE]
-            batch_num = i // BATCH_SIZE + 1
-            print(f"Processing batch {batch_num} ({len(batch_tickers)} tickers)...")
-            print(f"[economic-calendar] BATCH {batch_num} REQUEST (full): tickers={batch_tickers} fields={fields}")
+
+        # One Bloomberg session for the whole request (many refdata calls); avoids flaky multi-connect
+        bb_sess = bloomberg_client.open_refdata_session()
+        if not bb_sess:
+            return _json_response(
+                {
+                    "success": False,
+                    "error": "Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?",
+                    "calendar_data": [],
+                },
+                500,
+            )
+
+        try:
+            # Process tickers in batches to avoid overwhelming Bloomberg
+            BATCH_SIZE = 50
+            for i in range(0, len(tickers), BATCH_SIZE):
+                batch_tickers = tickers[i:i+BATCH_SIZE]
+                batch_num = i // BATCH_SIZE + 1
+                print(f"Processing batch {batch_num} ({len(batch_tickers)} tickers)...")
+                print(f"[economic-calendar] BATCH {batch_num} REQUEST (full): tickers={batch_tickers} fields={fields}")
             
-            try:
-                # Fetch reference data for this batch
-                reference_data = bloomberg_client.get_reference_data(
-                    tickers=batch_tickers,
-                    fields=fields
-                )
-                # Full response log (off by default — huge JSON + slow; edge functions time out)
-                if os.environ.get("ECONOMIC_CALENDAR_DEBUG_FULL", "").lower() in (
-                    "1",
-                    "true",
-                    "yes",
-                ):
-                    try:
-                        _serialized = _log_serialize(reference_data)
-                        print(
-                            f"[economic-calendar] BATCH {batch_num} RESPONSE (full from Bloomberg): "
-                            f"{json.dumps(_serialized, default=str, indent=2)}"
-                        )
-                    except Exception as log_err:
-                        print(
-                            f"[economic-calendar] BATCH {batch_num} RESPONSE log skipped: {log_err}"
-                        )
-
-                # Phase 1: ECO_RELEASE_DT only (no per-ticker Bloomberg round-trips)
-                batch_states: List[dict] = []
-                for ticker, data in reference_data.items():
-                    if "error" in data:
-                        errors.append(f"{ticker}: {data['error']}")
-                        continue
-                    eco_rd = _eco_calendar_parse_date(data.get("ECO_RELEASE_DT"))
-                    batch_states.append(
-                        {"ticker": ticker, "data": data, "release_date": eco_rd}
+                try:
+                    # Fetch reference data for this batch
+                    reference_data = bloomberg_client.get_reference_data(
+                        tickers=batch_tickers,
+                        fields=fields,
+                        session=bb_sess,
                     )
-
-                # Phase 2: one batched refdata call per chunk for missing dates only
-                need_future = [s["ticker"] for s in batch_states if s["release_date"] is None]
-                future_by_ticker: Dict[str, dict] = {}
-                if need_future:
-                    for fj in range(0, len(need_future), BATCH_SIZE):
-                        chunk = need_future[fj : fj + BATCH_SIZE]
+                    # Full response log (off by default — huge JSON + slow; edge functions time out)
+                    if os.environ.get("ECONOMIC_CALENDAR_DEBUG_FULL", "").lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                    ):
                         try:
-                            fr_batch = bloomberg_client.get_reference_data(
-                                tickers=chunk,
-                                fields=["ECO_FUTURE_RELEASE_DATE"],
+                            _serialized = _log_serialize(reference_data)
+                            print(
+                                f"[economic-calendar] BATCH {batch_num} RESPONSE (full from Bloomberg): "
+                                f"{json.dumps(_serialized, default=str, indent=2)}"
                             )
-                            future_by_ticker.update(fr_batch)
-                        except Exception as fe:
-                            errors.append(
-                                f"ECO_FUTURE_RELEASE_DATE batch {fj // BATCH_SIZE + 1}: {fe}"
+                        except Exception as log_err:
+                            print(
+                                f"[economic-calendar] BATCH {batch_num} RESPONSE log skipped: {log_err}"
                             )
 
-                # Phase 3: merge future dates and build events
-                for s in batch_states:
-                    ticker = s["ticker"]
-                    data = s["data"]
-                    release_date = s["release_date"]
-                    release_time = None
-                    is_future_release = False
+                    # Phase 1: ECO_RELEASE_DT only (no per-ticker Bloomberg round-trips)
+                    batch_states: List[dict] = []
+                    for ticker, data in reference_data.items():
+                        if "error" in data:
+                            errors.append(f"{ticker}: {data['error']}")
+                            continue
+                        eco_rd = _eco_calendar_parse_date(data.get("ECO_RELEASE_DT"))
+                        batch_states.append(
+                            {"ticker": ticker, "data": data, "release_date": eco_rd}
+                        )
 
-                    if release_date is None:
-                        fr_row = future_by_ticker.get(ticker, {})
-                        if "error" not in fr_row:
-                            future_release_date = _eco_calendar_parse_date(
-                                fr_row.get("ECO_FUTURE_RELEASE_DATE")
-                            )
-                            if future_release_date:
-                                release_date = future_release_date
-                                is_future_release = True
-
-                    # Filter by date range
-                    # Include all events from today onwards (even if time has passed today)
-                    # Events only roll off after the date has passed (i.e., tomorrow)
-                    if release_date:
-                        if release_date < today or release_date > end_date:
-                            continue  # Skip events outside our date range
-                        # Note: We keep all events for today, regardless of whether the time has passed
-                    
-                    # Extract release time
-                    if "ECO_RELEASE_TIME" in data and data["ECO_RELEASE_TIME"]:
-                        release_time = str(data["ECO_RELEASE_TIME"])
-                    
-                    # Future event only when release_date is strictly after today. For today or past, set actual from PX_LAST.
-                    is_future_event = False
-                    if is_future_release and release_date and release_date > today:
-                        is_future_event = True
-                    elif release_date and release_date > today:
-                        is_future_event = True
-                    # Removed time-of-day check for today: it caused actual to be null when server timezone was before release time.
-                    if False and release_date == today and release_time:
-                            # For today's events, check if the release time has passed
-                            # Bloomberg ECO_RELEASE_TIME is in Eastern Time (EST/EDT)
-                            # Parse release_time (format: "HH:MM:SS" or "08:30:00")
+                    # Phase 2: one batched refdata call per chunk for missing dates only
+                    need_future = [s["ticker"] for s in batch_states if s["release_date"] is None]
+                    future_by_ticker: Dict[str, dict] = {}
+                    if need_future:
+                        for fj in range(0, len(need_future), BATCH_SIZE):
+                            chunk = need_future[fj : fj + BATCH_SIZE]
                             try:
-                                time_parts = release_time.split(":")
-                                if len(time_parts) >= 2:
-                                    release_hour = int(time_parts[0])
-                                    release_minute = int(time_parts[1])
+                                fr_batch = bloomberg_client.get_reference_data(
+                                    tickers=chunk,
+                                    fields=["ECO_FUTURE_RELEASE_DATE"],
+                                    session=bb_sess,
+                                )
+                                future_by_ticker.update(fr_batch)
+                            except Exception as fe:
+                                errors.append(
+                                    f"ECO_FUTURE_RELEASE_DATE batch {fj // BATCH_SIZE + 1}: {fe}"
+                                )
+
+                    # Phase 3: merge future dates and build events
+                    for s in batch_states:
+                        ticker = s["ticker"]
+                        data = s["data"]
+                        release_date = s["release_date"]
+                        release_time = None
+                        is_future_release = False
+
+                        if release_date is None:
+                            fr_row = future_by_ticker.get(ticker, {})
+                            if "error" not in fr_row:
+                                future_release_date = _eco_calendar_parse_date(
+                                    fr_row.get("ECO_FUTURE_RELEASE_DATE")
+                                )
+                                if future_release_date:
+                                    release_date = future_release_date
+                                    is_future_release = True
+
+                        # Filter by date range
+                        # Include all events from today onwards (even if time has passed today)
+                        # Events only roll off after the date has passed (i.e., tomorrow)
+                        if release_date:
+                            if release_date < today or release_date > end_date:
+                                continue  # Skip events outside our date range
+                            # Note: We keep all events for today, regardless of whether the time has passed
+                    
+                        # Extract release time
+                        if "ECO_RELEASE_TIME" in data and data["ECO_RELEASE_TIME"]:
+                            release_time = str(data["ECO_RELEASE_TIME"])
+                    
+                        # Future event only when release_date is strictly after today. For today or past, set actual from PX_LAST.
+                        is_future_event = False
+                        if is_future_release and release_date and release_date > today:
+                            is_future_event = True
+                        elif release_date and release_date > today:
+                            is_future_event = True
+                        # Removed time-of-day check for today: it caused actual to be null when server timezone was before release time.
+                        if False and release_date == today and release_time:
+                                # For today's events, check if the release time has passed
+                                # Bloomberg ECO_RELEASE_TIME is in Eastern Time (EST/EDT)
+                                # Parse release_time (format: "HH:MM:SS" or "08:30:00")
+                                try:
+                                    time_parts = release_time.split(":")
+                                    if len(time_parts) >= 2:
+                                        release_hour = int(time_parts[0])
+                                        release_minute = int(time_parts[1])
                                     
-                                    # Create release datetime in Eastern Time
-                                    # Bloomberg times are in Eastern Time (America/New_York)
-                                    release_time_obj = datetime.min.time().replace(
-                                        hour=release_hour, minute=release_minute, second=0
-                                    )
-                                    release_dt_naive = datetime.combine(release_date, release_time_obj)
+                                        # Create release datetime in Eastern Time
+                                        # Bloomberg times are in Eastern Time (America/New_York)
+                                        release_time_obj = datetime.min.time().replace(
+                                            hour=release_hour, minute=release_minute, second=0
+                                        )
+                                        release_dt_naive = datetime.combine(release_date, release_time_obj)
                                     
-                                    if HAS_ZONEINFO:
-                                        # Use zoneinfo (Python 3.9+)
-                                        eastern_tz = ZoneInfo("America/New_York")
-                                        # Create timezone-aware datetime
-                                        release_dt_eastern = release_dt_naive.replace(tzinfo=eastern_tz)
-                                        # Get current time in Eastern Time
-                                        now_eastern = datetime.now(eastern_tz)
+                                        if HAS_ZONEINFO:
+                                            # Use zoneinfo (Python 3.9+)
+                                            eastern_tz = ZoneInfo("America/New_York")
+                                            # Create timezone-aware datetime
+                                            release_dt_eastern = release_dt_naive.replace(tzinfo=eastern_tz)
+                                            # Get current time in Eastern Time
+                                            now_eastern = datetime.now(eastern_tz)
                                         
-                                        # Compare: if current time < release time, it's a future event
-                                        if now_eastern < release_dt_eastern:
-                                            is_future_event = True
-                                    elif HAS_PYTZ:
-                                        # Use pytz for timezone handling
-                                        eastern_tz = pytz.timezone("America/New_York")
-                                        # Create release datetime in Eastern Time using localize
-                                        release_dt_eastern = eastern_tz.localize(release_dt_naive)
-                                        # Get current time in Eastern Time
-                                        now_eastern = datetime.now(eastern_tz)
+                                            # Compare: if current time < release time, it's a future event
+                                            if now_eastern < release_dt_eastern:
+                                                is_future_event = True
+                                        elif HAS_PYTZ:
+                                            # Use pytz for timezone handling
+                                            eastern_tz = pytz.timezone("America/New_York")
+                                            # Create release datetime in Eastern Time using localize
+                                            release_dt_eastern = eastern_tz.localize(release_dt_naive)
+                                            # Get current time in Eastern Time
+                                            now_eastern = datetime.now(eastern_tz)
                                         
-                                        # Compare: if current time < release time, it's a future event
-                                        if now_eastern < release_dt_eastern:
-                                            is_future_event = True
-                                    else:
-                                        # Fallback: use local time (assumes system is in Eastern Time)
-                                        now = datetime.now()
-                                        current_hour = now.hour
-                                        current_minute = now.minute
-                                        if current_hour < release_hour or (current_hour == release_hour and current_minute < release_minute):
-                                            is_future_event = True
-                            except (ValueError, IndexError, Exception) as e:
-                                # If we can't parse the time, assume it's not a future event
-                                print(f"Warning: Could not parse release_time '{release_time}': {e}")
-                                pass
+                                            # Compare: if current time < release time, it's a future event
+                                            if now_eastern < release_dt_eastern:
+                                                is_future_event = True
+                                        else:
+                                            # Fallback: use local time (assumes system is in Eastern Time)
+                                            now = datetime.now()
+                                            current_hour = now.hour
+                                            current_minute = now.minute
+                                            if current_hour < release_hour or (current_hour == release_hour and current_minute < release_minute):
+                                                is_future_event = True
+                                except (ValueError, IndexError, Exception) as e:
+                                    # If we can't parse the time, assume it's not a future event
+                                    print(f"Warning: Could not parse release_time '{release_time}': {e}")
+                                    pass
                     
-                    # For future events, actual should be NULL (no actual value yet)
-                    # PX_LAST for future events might contain the prior period's value or survey value, not the actual for the future date
-                    # For past/current events (where time has passed), use PX_LAST (current actual value)
-                    # Note: PX_LAST from ReferenceDataRequest gives the current/latest value,
-                    # not the historical value as of the release date
-                    actual_value = None
-                    if not is_future_event:
-                        actual_value = _safe_float(data.get("PX_LAST"))
+                        # For future events, actual should be NULL (no actual value yet)
+                        # PX_LAST for future events might contain the prior period's value or survey value, not the actual for the future date
+                        # For past/current events (where time has passed), use PX_LAST (current actual value)
+                        # Note: PX_LAST from ReferenceDataRequest gives the current/latest value,
+                        # not the historical value as of the release date
+                        actual_value = None
+                        if not is_future_event:
+                            actual_value = _safe_float(data.get("PX_LAST"))
                     
-                    # Build event record (plain str/float/None only — safe for JSON)
-                    event = {
-                        "ticker": str(ticker),
-                        "country": _json_scalar_str(data.get("REGION_OR_COUNTRY")),
-                        "event": _json_scalar_str(data.get("SECURITY_DES")),
-                        "release_date": release_date.strftime("%Y-%m-%d") if release_date else None,
-                        "release_time": release_time,
-                        "period": _json_scalar_str(data.get("OBSERVATION_PERIOD")),
-                        "survey_median": _safe_float(data.get("RT_BN_SURVEY_MEDIAN")),
-                        "actual": actual_value,  # NULL for future events, PX_LAST for past/current
-                        "prior": _safe_float(data.get("PREV_CLOSE_VAL")),
-                        "revised": _safe_float(data.get("FIRST_REVISION")),
-                        "last_update_date": _parse_date(data.get("LAST_UPDATE_DT")),
-                        "last_report_date": _parse_date(data.get("PREV_TRADING_DT_REALTIME")),
-                        "prior_observation_date": _parse_date(data.get("PRIOR_OBSERVATION_DATE")),
-                    }
+                        # Build event record (plain str/float/None only — safe for JSON)
+                        event = {
+                            "ticker": str(ticker),
+                            "country": _json_scalar_str(data.get("REGION_OR_COUNTRY")),
+                            "event": _json_scalar_str(data.get("SECURITY_DES")),
+                            "release_date": release_date.strftime("%Y-%m-%d") if release_date else None,
+                            "release_time": release_time,
+                            "period": _json_scalar_str(data.get("OBSERVATION_PERIOD")),
+                            "survey_median": _safe_float(data.get("RT_BN_SURVEY_MEDIAN")),
+                            "actual": actual_value,  # NULL for future events, PX_LAST for past/current
+                            "prior": _safe_float(data.get("PREV_CLOSE_VAL")),
+                            "revised": _safe_float(data.get("FIRST_REVISION")),
+                            "last_update_date": _parse_date(data.get("LAST_UPDATE_DT")),
+                            "last_report_date": _parse_date(data.get("PREV_TRADING_DT_REALTIME")),
+                            "prior_observation_date": _parse_date(data.get("PRIOR_OBSERVATION_DATE")),
+                        }
                     
-                    # Only add if we have a release date
-                    if event["release_date"]:
-                        events.append(event)
-                
-            except Exception as e:
-                error_msg = f"Error processing batch {i//BATCH_SIZE + 1}: {str(e)}"
-                print(f"  [FAIL] {error_msg}")
-                errors.append(error_msg)
-                traceback.print_exc()
-        
+                        # Only add if we have a release date
+                        if event["release_date"]:
+                            events.append(event)
+            
+                except Exception as e:
+                    error_msg = f"Error processing batch {i//BATCH_SIZE + 1}: {str(e)}"
+                    print(f"  [FAIL] {error_msg}")
+                    errors.append(error_msg)
+                    traceback.print_exc()
+        finally:
+            try:
+                bb_sess.stop()
+            except Exception:
+                pass
+
         print(f"Fetched {len(events)} economic calendar events")
         if len(events) == 0:
             print(f"[economic-calendar] ZERO EVENTS: date filter today={today!r} end_date={end_date!r} (events only included when today <= release_date <= end_date and release_date was set from ECO_RELEASE_DT)")

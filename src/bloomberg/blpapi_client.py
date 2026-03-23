@@ -260,18 +260,25 @@ class BLPAPIClient(BloombergClientBase):
     def get_reference_data(
         self,
         tickers: List[str],
-        fields: List[str]
+        fields: List[str],
+        session: Any = None,
     ) -> Dict[str, Dict[str, Any]]:
-        """Fetch reference/EOD data using blpapi (BDP)"""
+        """Fetch reference/EOD data using blpapi (BDP).
+
+        Pass ``session`` from ``open_refdata_session()`` to reuse one connection
+        for multiple requests (economic calendar, etc.); otherwise a session is
+        created and closed for this call only.
+        """
         _debug = os.environ.get("DATA_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
         if _debug:
             print(f"[BLPAPI ReferenceDataRequest] securities={tickers} fields={fields}")
-        session = self._create_session()
-        if not session:
+        own_session = session is None
+        sess = session if session is not None else self._create_session()
+        if not sess:
             raise Exception("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
-        
+
         try:
-            refDataService = session.getService(self.service)
+            refDataService = sess.getService(self.service)
             request = refDataService.createRequest("ReferenceDataRequest")
             
             # Add securities
@@ -283,12 +290,12 @@ class BLPAPIClient(BloombergClientBase):
                 request.getElement("fields").appendValue(field)
             
             # Send request
-            session.sendRequest(request)
+            sess.sendRequest(request)
             
             result = {}
             
             while True:
-                event = session.nextEvent(500)
+                event = sess.nextEvent(500)
                 
                 if event.eventType() in (blpapi.Event.RESPONSE, blpapi.Event.PARTIAL_RESPONSE):
                     for msg in event:
@@ -324,5 +331,10 @@ class BLPAPIClient(BloombergClientBase):
             return result
         
         finally:
-            session.stop()
+            if own_session:
+                sess.stop()
+
+    def open_refdata_session(self) -> Any:
+        """Open a Bloomberg session with //blp/refdata available. Caller must ``session.stop()``."""
+        return self._create_session()
 

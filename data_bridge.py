@@ -11,6 +11,7 @@ import os
 import sys
 import json
 import math
+import logging
 import traceback
 import time
 import threading
@@ -112,7 +113,17 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
-DATA_BRIDGE_BUILD = "2026-03-24-economic-calendar-json-errors"
+DATA_BRIDGE_BUILD = "2026-03-24-ecal-logging"
+
+_ecal_logger = logging.getLogger("data_bridge.economic_calendar")
+if not _ecal_logger.handlers:
+    _ecal_handler = logging.StreamHandler(sys.stderr)
+    _ecal_handler.setFormatter(
+        logging.Formatter("%(asctime)s [ecal] %(levelname)s %(message)s")
+    )
+    _ecal_logger.addHandler(_ecal_handler)
+    _ecal_logger.setLevel(logging.INFO)
+    _ecal_logger.propagate = False
 
 # IBKR Client Portal Gateway (tickle keeps session alive; must use port 5001 vs Data Bridge 5000)
 IBKR_GATEWAY_URL = os.getenv("IBKR_GATEWAY_URL", "https://localhost:5001").rstrip("/")
@@ -203,7 +214,14 @@ def _json_errors_for_economic_calendar(exc: BaseException):
     path = (request.path or "").rstrip("/")
     if path != "/economic-calendar" or request.method != "POST":
         raise exc
-    traceback.print_exc()
+    _ecal_logger.error(
+        "uncaught_exception %s: %s",
+        type(exc).__name__,
+        exc,
+        exc_info=True,
+    )
+    traceback.print_exc(file=sys.stderr)
+    sys.stderr.flush()
     payload: Dict[str, Any] = {
         "success": False,
         "service": "DataBridge",
@@ -214,7 +232,25 @@ def _json_errors_for_economic_calendar(exc: BaseException):
     }
     if os.environ.get("DATA_BRIDGE_EXPOSE_TRACEBACK", "").lower() in ("1", "true", "yes"):
         payload["traceback"] = traceback.format_exc()
-    return _json_response(payload, 500)
+    try:
+        return _json_response(payload, 500)
+    except Exception as enc_err:
+        _ecal_logger.error("failed to json-serialize error payload: %s", enc_err, exc_info=True)
+        minimal = json.dumps(
+            {
+                "success": False,
+                "error": str(exc),
+                "exception_type": type(exc).__name__,
+                "build": DATA_BRIDGE_BUILD,
+                "calendar_data": [],
+            },
+            default=str,
+        )
+        return Response(
+            minimal,
+            status=500,
+            mimetype="application/json; charset=utf-8",
+        )
 
 
 # Initialize Supabase client
@@ -914,6 +950,14 @@ def sggg_diamond_trades():
         return jsonify({"error": str(e)}), 500
 
 
+def _refdata_result_summary(ref: Dict[str, Any]) -> tuple[int, int]:
+    """Return (num_tickers, num_with_error_key) for a get_reference_data result dict."""
+    if not ref:
+        return 0, 0
+    n_err = sum(1 for v in ref.values() if isinstance(v, dict) and "error" in v)
+    return len(ref), n_err
+
+
 def _eco_calendar_parse_date(release_dt: Any) -> Optional[date_type]:
     """Parse ECO_RELEASE_DT / ECO_FUTURE_RELEASE_DATE refdata values to a date."""
     if not release_dt:
@@ -977,9 +1021,26 @@ def economic_calendar():
         today_str = today.strftime("%Y%m%d")
         end_date_str = end_date.strftime("%Y%m%d")
 
-        # Full request log
-        print(f"[economic-calendar] REQUEST (full): tickers_count={len(tickers)} date_range=[{today_str}, {end_date_str}] tickers={tickers}")
-        print(f"Fetching economic calendar data from {today_str} to {end_date_str}")
+        _ecal_logger.info(
+            "request_start build=%s tickers=%d date_range=%s..%s",
+            DATA_BRIDGE_BUILD,
+            len(tickers),
+            today_str,
+            end_date_str,
+        )
+        verbose = os.environ.get("ECONOMIC_CALENDAR_LOG_VERBOSE", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if verbose:
+            preview = tickers[:20]
+            more = "" if len(tickers) <= 20 else f" ...(+{len(tickers) - 20} more)"
+            _ecal_logger.info("request_tickers_preview=%s%s", preview, more)
+        print(
+            f"[economic-calendar] tickers_count={len(tickers)} date_range=[{today_str}, {end_date_str}]",
+            flush=True,
+        )
         
         # Bloomberg fields needed (based on Excel formulas)
         fields = [
@@ -996,7 +1057,7 @@ def economic_calendar():
             "PREV_TRADING_DT_REALTIME",  # Last report date
             "PRIOR_OBSERVATION_DATE",    # Prior observation date
         ]
-        print(f"[economic-calendar] REQUEST fields={fields}")
+        _ecal_logger.info("refdata_fields n=%d %s", len(fields), fields)
         
         # For future dates, we need to use ECO_FUTURE_RELEASE_DATE
         # For current/past dates, we use the regular fields
@@ -1007,6 +1068,7 @@ def economic_calendar():
         # One Bloomberg session for the whole request (many refdata calls); avoids flaky multi-connect
         bb_sess = bloomberg_client.open_refdata_session()
         if not bb_sess:
+            _ecal_logger.error("bloomberg_session_open_failed")
             return _json_response(
                 {
                     "success": False,
@@ -1022,8 +1084,22 @@ def economic_calendar():
             for i in range(0, len(tickers), BATCH_SIZE):
                 batch_tickers = tickers[i:i+BATCH_SIZE]
                 batch_num = i // BATCH_SIZE + 1
-                print(f"Processing batch {batch_num} ({len(batch_tickers)} tickers)...")
-                print(f"[economic-calendar] BATCH {batch_num} REQUEST (full): tickers={batch_tickers} fields={fields}")
+                _ecal_logger.info(
+                    "blp_refdata_call batch=%d tickers=%d fields=%d",
+                    batch_num,
+                    len(batch_tickers),
+                    len(fields),
+                )
+                if verbose:
+                    _ecal_logger.info(
+                        "blp_refdata_call batch=%d tickers_list=%s",
+                        batch_num,
+                        batch_tickers,
+                    )
+                print(
+                    f"Processing batch {batch_num} ({len(batch_tickers)} tickers)...",
+                    flush=True,
+                )
             
                 try:
                     # Fetch reference data for this batch
@@ -1032,21 +1108,39 @@ def economic_calendar():
                         fields=fields,
                         session=bb_sess,
                     )
-                    # Full response log (off by default — huge JSON + slow; edge functions time out)
-                    if os.environ.get("ECONOMIC_CALENDAR_DEBUG_FULL", "").lower() in (
+                    got, n_err = _refdata_result_summary(reference_data)
+                    _ecal_logger.info(
+                        "blp_refdata_response batch=%d rows=%d rows_with_error=%d",
+                        batch_num,
+                        got,
+                        n_err,
+                    )
+                    log_resp = os.environ.get(
+                        "ECONOMIC_CALENDAR_LOG_RESPONSE", ""
+                    ).lower() in ("1", "true", "yes")
+                    if log_resp or os.environ.get("ECONOMIC_CALENDAR_DEBUG_FULL", "").lower() in (
                         "1",
                         "true",
                         "yes",
                     ):
                         try:
                             _serialized = _log_serialize(reference_data)
-                            print(
-                                f"[economic-calendar] BATCH {batch_num} RESPONSE (full from Bloomberg): "
-                                f"{json.dumps(_serialized, default=str, indent=2)}"
+                            blob = json.dumps(_serialized, default=str)
+                            max_len = int(
+                                os.environ.get("ECONOMIC_CALENDAR_LOG_RESPONSE_MAX", "12000")
+                            )
+                            if len(blob) > max_len:
+                                blob = blob[:max_len] + f"...(truncated, len={len(blob)})"
+                            _ecal_logger.info(
+                                "blp_refdata_response_body batch=%d json=%s",
+                                batch_num,
+                                blob,
                             )
                         except Exception as log_err:
-                            print(
-                                f"[economic-calendar] BATCH {batch_num} RESPONSE log skipped: {log_err}"
+                            _ecal_logger.warning(
+                                "blp_refdata_response_body_log_failed batch=%d err=%s",
+                                batch_num,
+                                log_err,
                             )
 
                     # Phase 1: ECO_RELEASE_DT only (no per-ticker Bloomberg round-trips)
@@ -1066,14 +1160,57 @@ def economic_calendar():
                     if need_future:
                         for fj in range(0, len(need_future), BATCH_SIZE):
                             chunk = need_future[fj : fj + BATCH_SIZE]
+                            fut_bn = fj // BATCH_SIZE + 1
+                            _ecal_logger.info(
+                                "blp_future_call batch=%d chunk=%d tickers=%d fields=ECO_FUTURE_RELEASE_DATE",
+                                batch_num,
+                                fut_bn,
+                                len(chunk),
+                            )
                             try:
                                 fr_batch = bloomberg_client.get_reference_data(
                                     tickers=chunk,
                                     fields=["ECO_FUTURE_RELEASE_DATE"],
                                     session=bb_sess,
                                 )
+                                fg, fe_ct = _refdata_result_summary(fr_batch)
+                                _ecal_logger.info(
+                                    "blp_future_response batch=%d chunk=%d rows=%d rows_with_error=%d",
+                                    batch_num,
+                                    fut_bn,
+                                    fg,
+                                    fe_ct,
+                                )
+                                if log_resp:
+                                    try:
+                                        ser = _log_serialize(fr_batch)
+                                        b = json.dumps(ser, default=str)
+                                        mx = int(
+                                            os.environ.get(
+                                                "ECONOMIC_CALENDAR_LOG_RESPONSE_MAX", "12000"
+                                            )
+                                        )
+                                        if len(b) > mx:
+                                            b = b[:mx] + f"...(truncated len={len(b)})"
+                                        _ecal_logger.info(
+                                            "blp_future_response_body batch=%d chunk=%d json=%s",
+                                            batch_num,
+                                            fut_bn,
+                                            b,
+                                        )
+                                    except Exception as le:
+                                        _ecal_logger.warning(
+                                            "blp_future_response_body_log_failed err=%s", le
+                                        )
                                 future_by_ticker.update(fr_batch)
                             except Exception as fe:
+                                _ecal_logger.error(
+                                    "blp_future_exception batch=%d chunk=%s: %s",
+                                    batch_num,
+                                    fut_bn,
+                                    fe,
+                                    exc_info=True,
+                                )
                                 errors.append(
                                     f"ECO_FUTURE_RELEASE_DATE batch {fj // BATCH_SIZE + 1}: {fe}"
                                 )
@@ -1198,18 +1335,38 @@ def economic_calendar():
             
                 except Exception as e:
                     error_msg = f"Error processing batch {i//BATCH_SIZE + 1}: {str(e)}"
-                    print(f"  [FAIL] {error_msg}")
+                    _ecal_logger.error(
+                        "batch_processing_failed batch=%d: %s",
+                        batch_num,
+                        e,
+                        exc_info=True,
+                    )
+                    print(f"  [FAIL] {error_msg}", flush=True)
                     errors.append(error_msg)
-                    traceback.print_exc()
+                    traceback.print_exc(file=sys.stderr)
+                    sys.stderr.flush()
         finally:
             try:
                 bb_sess.stop()
             except Exception:
                 pass
 
-        print(f"Fetched {len(events)} economic calendar events")
+        _ecal_logger.info(
+            "request_done events=%d errors=%d",
+            len(events),
+            len(errors),
+        )
+        print(f"Fetched {len(events)} economic calendar events", flush=True)
         if len(events) == 0:
-            print(f"[economic-calendar] ZERO EVENTS: date filter today={today!r} end_date={end_date!r} (events only included when today <= release_date <= end_date and release_date was set from ECO_RELEASE_DT)")
+            _ecal_logger.warning(
+                "zero_events_after_filter today=%s end_date=%s",
+                today_str,
+                end_date_str,
+            )
+            print(
+                f"[economic-calendar] ZERO EVENTS: date filter today={today!r} end_date={end_date!r}",
+                flush=True,
+            )
         
         # Return calendar_data to match Edge Function expectations
         # Also include events for backward compatibility
@@ -1227,8 +1384,10 @@ def economic_calendar():
 
     except Exception as e:
         error_msg = f"Economic calendar error: {str(e)}"
-        print(f"[FAIL] {error_msg}")
-        traceback.print_exc()
+        _ecal_logger.error("route_outer_exception: %s", e, exc_info=True)
+        print(f"[FAIL] {error_msg}", flush=True)
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         return _json_response(
             {"success": False, "service": "DataBridge", "error": error_msg, "calendar_data": []},
             500,
@@ -1540,6 +1699,13 @@ def _ibkr_tickle_loop() -> None:
 
 if __name__ == "__main__":
     try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(line_buffering=True)
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+    try:
         print("=" * 60)
         print("Data Bridge Service")
         print("=" * 60)
@@ -1554,6 +1720,11 @@ if __name__ == "__main__":
         print("SGGG requires: OpenVPN + DSN=PSC_VIEWER + pyodbc. IBKR requires Gateway on port 5001 + browser login.")
         print()
         print("Service is running. Press Ctrl+C to stop.")
+        print(
+            "Economic calendar logs: stderr [ecal] — set ECONOMIC_CALENDAR_LOG_VERBOSE=1 for ticker lists, "
+            "ECONOMIC_CALENDAR_LOG_RESPONSE=1 for truncated Bloomberg JSON (max ECONOMIC_CALENDAR_LOG_RESPONSE_MAX)."
+        )
+        print("Tip: run with python -u or PYTHONUNBUFFERED=1 so prints appear immediately.")
         print("=" * 60)
     except:
         pass

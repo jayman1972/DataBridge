@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 import requests
 
 # Suppress SSL warning for IBKR Gateway self-signed cert (localhost:5001)
@@ -111,7 +112,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
-DATA_BRIDGE_BUILD = "2026-03-23-economic-calendar-json"
+DATA_BRIDGE_BUILD = "2026-03-24-economic-calendar-json-errors"
 
 # IBKR Client Portal Gateway (tickle keeps session alive; must use port 5001 vs Data Bridge 5000)
 IBKR_GATEWAY_URL = os.getenv("IBKR_GATEWAY_URL", "https://localhost:5001").rstrip("/")
@@ -192,6 +193,29 @@ def add_cors_headers(response):
     response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
     response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
     return response
+
+
+@app.errorhandler(Exception)
+def _json_errors_for_economic_calendar(exc: BaseException):
+    """Uncaught exceptions on POST /economic-calendar otherwise become HTML 502 via ngrok."""
+    if isinstance(exc, HTTPException):
+        return exc
+    path = (request.path or "").rstrip("/")
+    if path != "/economic-calendar" or request.method != "POST":
+        raise exc
+    traceback.print_exc()
+    payload: Dict[str, Any] = {
+        "success": False,
+        "service": "DataBridge",
+        "build": DATA_BRIDGE_BUILD,
+        "calendar_data": [],
+        "error": str(exc),
+        "exception_type": type(exc).__name__,
+    }
+    if os.environ.get("DATA_BRIDGE_EXPOSE_TRACEBACK", "").lower() in ("1", "true", "yes"):
+        payload["traceback"] = traceback.format_exc()
+    return _json_response(payload, 500)
+
 
 # Initialize Supabase client
 supabase: Optional[Client] = None

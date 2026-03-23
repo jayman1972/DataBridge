@@ -138,29 +138,25 @@ class BLPAPIClient(BloombergClientBase):
             raise Exception("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
         
         try:
-            refDataService = session.getService(self.service)
-            request = refDataService.createRequest("HistoricalDataRequest")
+            ref_data_service = session.getService(self.service)
+            blp_hist_request = ref_data_service.createRequest("HistoricalDataRequest")
 
-            # Set security (match old bloomberg_service: append)
-            request.append("securities", ticker)
+            blp_hist_request.append("securities", ticker)
 
-            # Set fields
             for field in fields:
-                request.append("fields", field)
+                blp_hist_request.append("fields", field)
 
-            # Set date range (Bloomberg API expects YYYYMMDD format)
             if start_date:
                 start_date_bbg = start_date.replace("-", "")
-                request.set("startDate", start_date_bbg)
+                blp_hist_request.set("startDate", start_date_bbg)
             if end_date:
                 end_date_bbg = end_date.replace("-", "")
-                request.set("endDate", end_date_bbg)
+                blp_hist_request.set("endDate", end_date_bbg)
 
-            request.set("periodicitySelection", periodicity)
+            blp_hist_request.set("periodicitySelection", periodicity)
 
-            # Optional overrides (e.g. RELEASE_STAGE_OVERRIDE=P for preliminary-only PMI)
             if overrides:
-                overrides_el = request.getElement("overrides")
+                overrides_el = blp_hist_request.getElement("overrides")
                 for field_id, value in overrides.items():
                     ov = overrides_el.appendElement()
                     ov.setElement("fieldId", field_id)
@@ -169,7 +165,7 @@ class BLPAPIClient(BloombergClientBase):
             if _debug:
                 print(f"[BLPAPI] Request: securities=[{ticker}] fields={fields} periodicity={periodicity} startDate={start_date_bbg if start_date else None} endDate={end_date_bbg if end_date else None}")
 
-            session.sendRequest(request)
+            session.sendRequest(blp_hist_request)
 
             records = []
             while True:
@@ -278,19 +274,17 @@ class BLPAPIClient(BloombergClientBase):
             raise Exception("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
 
         try:
-            refDataService = sess.getService(self.service)
-            request = refDataService.createRequest("ReferenceDataRequest")
-            
-            # Add securities
+            ref_data_service = sess.getService(self.service)
+            # Name must not shadow Flask's ``request`` when this module is used from data_bridge
+            blp_request = ref_data_service.createRequest("ReferenceDataRequest")
+
             for ticker in tickers:
-                request.getElement("securities").appendValue(ticker)
-            
-            # Add fields
+                blp_request.getElement("securities").appendValue(ticker)
+
             for field in fields:
-                request.getElement("fields").appendValue(field)
-            
-            # Send request
-            sess.sendRequest(request)
+                blp_request.getElement("fields").appendValue(field)
+
+            sess.sendRequest(blp_request)
             
             result = {}
             

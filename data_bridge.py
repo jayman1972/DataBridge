@@ -22,6 +22,7 @@ from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 import requests
+import secrets
 
 # Suppress SSL warning for IBKR Gateway self-signed cert (localhost:5001)
 requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
@@ -113,7 +114,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
-DATA_BRIDGE_BUILD = "2026-03-24-bbg-datetime-logging"
+DATA_BRIDGE_BUILD = "2026-04-03-polymarket-alert-webhook"
 
 _ecal_logger = logging.getLogger("data_bridge.economic_calendar")
 if not _ecal_logger.handlers:
@@ -1767,6 +1768,82 @@ def ibkr_search():
     return (jsonify(data) if isinstance(data, (dict, list)) else jsonify({"raw": data})), r.status_code
 
 
+POLYMARKET_ALERT_WEBHOOK_SECRET = os.environ.get("POLYMARKET_ALERT_WEBHOOK_SECRET", "").strip()
+
+
+def _parse_optional_float(v: Any) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+@app.route("/polymarket/alert", methods=["POST"])
+def polymarket_alert():
+    """Ingest Polymarket insider alert into Supabase (service role). Bearer auth required."""
+    if not supabase:
+        return jsonify({"error": "Supabase not configured"}), 503
+    if not POLYMARKET_ALERT_WEBHOOK_SECRET:
+        return jsonify({"error": "POLYMARKET_ALERT_WEBHOOK_SECRET not set"}), 503
+    auth = request.headers.get("Authorization") or ""
+    token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+    if not secrets.compare_digest(token, POLYMARKET_ALERT_WEBHOOK_SECRET):
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON body required"}), 400
+
+    dedup_key = (data.get("dedup_key") or "").strip()
+    wallet_address = (data.get("wallet_address") or "").strip()
+    market_id = (data.get("market_id") or "").strip()
+    if not dedup_key or not wallet_address or not market_id:
+        return jsonify({"error": "dedup_key, wallet_address, and market_id are required"}), 400
+
+    trade_price = _parse_optional_float(data.get("trade_price"))
+    trade_size_usdc = _parse_optional_float(data.get("trade_size_usdc"))
+
+    signals = data.get("signals_triggered")
+    if not isinstance(signals, list):
+        signals = []
+    signals = [str(s) for s in signals if s is not None]
+
+    risk_score = data.get("risk_score")
+    try:
+        risk_score_f = float(risk_score) if risk_score is not None else 0.0
+    except (TypeError, ValueError):
+        risk_score_f = 0.0
+
+    row: Dict[str, Any] = {
+        "dedup_key": dedup_key,
+        "wallet_address": wallet_address,
+        "market_id": market_id,
+        "trade_id": data.get("trade_id"),
+        "trade_side": data.get("trade_side"),
+        "trade_price": trade_price,
+        "trade_size_usdc": trade_size_usdc,
+        "risk_score": risk_score_f,
+        "signals_triggered": signals,
+        "assessment_id": data.get("assessment_id"),
+        "payload": data.get("payload") if isinstance(data.get("payload"), dict) else data,
+    }
+    if data.get("alerted_at"):
+        row["alerted_at"] = data["alerted_at"]
+
+    try:
+        supabase.table("at_polymarket_alerts").insert(row).execute()
+    except Exception as e:
+        err_s = str(e).lower()
+        if "duplicate" in err_s or "23505" in err_s or "unique" in err_s:
+            return jsonify({"ok": True, "duplicate": True}), 200
+        logging.exception("polymarket alert insert failed")
+        return jsonify({"error": "insert failed", "detail": str(e)[:500]}), 500
+
+    return jsonify({"ok": True}), 200
+
+
 def _ibkr_tickle_loop() -> None:
     """Background thread: POST /tickle to IBKR Gateway every 60s to keep session alive."""
     while True:
@@ -1805,7 +1882,7 @@ if __name__ == "__main__":
         print()
         print("Endpoints: /health, /bloomberg-update, /bloomberg/quotes, /quotes, /historical, /historical-debug, /reference,")
         print("  /economic-calendar, /clarifi/process, /clarifi/list, /ehp/process, /sggg/portfolio,")
-        print("  /ibkr/auth-status, /ibkr/snapshot, /ibkr/history, /ibkr/search")
+        print("  /ibkr/auth-status, /ibkr/snapshot, /ibkr/history, /ibkr/search, /polymarket/alert")
         print("SGGG requires: OpenVPN + DSN=PSC_VIEWER + pyodbc. IBKR requires Gateway on port 5001 + browser login.")
         print()
         print("Service is running. Press Ctrl+C to stop.")

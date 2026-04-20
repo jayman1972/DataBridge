@@ -15,6 +15,7 @@ import logging
 import traceback
 import time
 import threading
+import re
 from datetime import datetime, timedelta, timezone, time as dt_time, date as date_type
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -239,6 +240,36 @@ def _psc_portfolio_from_request(data: dict) -> Optional[str]:
     if fund_id and fund_id in SGGG_FUND_ID_TO_PSC_PORTFOLIO:
         return SGGG_FUND_ID_TO_PSC_PORTFOLIO[fund_id]
     return None
+
+
+def _like_patterns_from_fund_name(fund_name: Optional[str]) -> List[str]:
+    """
+    Build a few MySQL LIKE patterns from a fund display name.
+    Example: "EHP Tactical Growth Alternative Fund" -> ["%Tactical%Growth%", "%Tactical%", "%Growth%"].
+    """
+    if not fund_name:
+        return []
+    name = str(fund_name).strip()
+    if not name:
+        return []
+    # Remove common noise words
+    stop = {"EHP", "FUND", "ALTERNATIVE", "ALTERNATIVES", "THE", "SERIES", "TRUST"}
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", name) if w]
+    keep = [w for w in words if w.upper() not in stop and len(w) >= 4]
+    if not keep:
+        return []
+    patterns: List[str] = []
+    if len(keep) >= 2:
+        patterns.append("%" + "%".join(keep[:3]) + "%")
+    patterns.extend([f"%{w}%" for w in keep[:3]])
+    # Dedup preserving order
+    out: List[str] = []
+    seen = set()
+    for p in patterns:
+        if p not in seen:
+            out.append(p)
+            seen.add(p)
+    return out
 
 
 def _pyodbc_or_503():
@@ -1000,9 +1031,10 @@ def sggg_options_tax_reconciliation():
       { portfolio, start_date, end_date, option_trades: [...], position_history: [...] }
     """
     data = request.get_json(silent=True) or {}
+    fund_name = (data.get("fund_name") or "").strip() or None
     portfolio = _psc_portfolio_from_request(data)
-    if not portfolio:
-        return jsonify({"error": "portfolio required (or pass fund_id mapped to a PSC portfolio)"}), 400
+    if not portfolio and not fund_name:
+        return jsonify({"error": "portfolio required (or pass fund_id mapped to a PSC portfolio, or include fund_name for auto-detect)"}), 400
 
     start_date = _compact_to_ymd(data.get("start_date") or "")
     end_date = _compact_to_ymd(data.get("end_date") or "")
@@ -1037,10 +1069,42 @@ def sggg_options_tax_reconciliation():
             "AND SECURITY_TYPE = 'EquityOption' "
             "ORDER BY ORDER_ID, TRADE_DATE_INT, SECURITY, PORTFOLIO, STRATEGY"
         )
-        cursor.execute(orders_sql, (start_compact, end_compact, portfolio))
-        order_cols = [d[0] for d in cursor.description]
-        order_rows = cursor.fetchall()
-        option_trades = [dict(zip(order_cols, row)) for row in order_rows]
+        resolved_portfolio = portfolio
+        portfolio_candidates: List[str] = []
+
+        def _run_orders_query(port: str) -> List[dict]:
+            cursor.execute(orders_sql, (start_compact, end_compact, port))
+            cols = [d[0] for d in cursor.description]
+            rows = cursor.fetchall()
+            return [dict(zip(cols, r)) for r in rows]
+
+        option_trades: List[dict] = []
+        if resolved_portfolio:
+            option_trades = _run_orders_query(resolved_portfolio)
+
+        # If exact portfolio matched 0 trades, try auto-detect using LIKE on option trades in range.
+        if len(option_trades) == 0 and fund_name:
+            like_patterns = _like_patterns_from_fund_name(fund_name)
+            distinct_sql = (
+                "SELECT DISTINCT PORTFOLIO "
+                "FROM psc_filled_orders "
+                "WHERE TRADE_DATE_INT BETWEEN ? AND ? "
+                "AND SECURITY_TYPE = 'EquityOption' "
+                "AND PORTFOLIO LIKE ? "
+                "ORDER BY PORTFOLIO "
+                "LIMIT 10"
+            )
+            for pat in like_patterns:
+                cursor.execute(distinct_sql, (start_compact, end_compact, pat))
+                ports = [str(r[0]).strip() for r in cursor.fetchall() if r and r[0] is not None]
+                for p in ports:
+                    if p and p not in portfolio_candidates:
+                        portfolio_candidates.append(p)
+                if portfolio_candidates:
+                    break
+            if portfolio_candidates:
+                resolved_portfolio = portfolio_candidates[0]
+                option_trades = _run_orders_query(resolved_portfolio)
 
         # 2) Position history (for exposures / hedge context)
         pos_sql = (
@@ -1053,14 +1117,18 @@ def sggg_options_tax_reconciliation():
             "AND POSN_DATE BETWEEN ? AND ? "
             "ORDER BY PORTFOLIO, POSN_DATE, STRATEGY, SECURITY"
         )
-        cursor.execute(pos_sql, (portfolio, start_compact, end_compact))
+        # Use resolved portfolio for position history too (if we found a better match)
+        cursor.execute(pos_sql, (resolved_portfolio or portfolio, start_compact, end_compact))
         pos_cols = [d[0] for d in cursor.description]
         pos_rows = cursor.fetchall()
         position_history = [dict(zip(pos_cols, row)) for row in pos_rows]
 
         # Make sure everything is JSON-serializable
         return _json_response({
-            "portfolio": portfolio,
+            "portfolio": resolved_portfolio or portfolio,
+            "requested_portfolio": portfolio,
+            "fund_name": fund_name,
+            "portfolio_candidates": portfolio_candidates,
             "start_date": start_date,
             "end_date": end_date,
             "option_trades": _log_serialize(option_trades),

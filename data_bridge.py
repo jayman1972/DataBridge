@@ -201,6 +201,59 @@ BLOOMBERG_MAPPINGS = [
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
+SGGG_FUND_ID_TO_PSC_PORTFOLIO: Dict[str, str] = {
+    # Matches the fund list hardcoded in market-dashboard Fund Admin NAV reports.
+    # You can override by sending "portfolio" in the request body.
+    "415a3530-3034-4536-4432-303030364337": "EHP Adv Alt",
+    "41010000-7F7A-0A65-D559-45484608DB40": "EHP Tactical Growth Alt",
+    "41323030-3031-4144-3637-303030364338": "EHP Select Alt",
+    "41010000-7F2A-D7E8-776F-45484608D91C": "EHP Strategic Income Alt",
+    "01010000-801A-4995-8370-45484608DE57": "Exponential Balanced Growth Fund",
+}
+
+
+def _ymd_to_compact(s: str) -> str:
+    """YYYY-MM-DD -> YYYYMMDD (or accept YYYYMMDD)."""
+    if not s:
+        return ""
+    s = str(s).strip()
+    if not s:
+        return ""
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return (s[:10]).replace("-", "")
+    return s.replace("-", "")[:8]
+
+
+def _compact_to_ymd(s: str) -> Optional[str]:
+    s = _ymd_to_compact(s)
+    if len(s) != 8:
+        return None
+    return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+
+
+def _psc_portfolio_from_request(data: dict) -> Optional[str]:
+    portfolio = (data.get("portfolio") or "").strip()
+    if portfolio:
+        return portfolio
+    fund_id = (data.get("fund_id") or "").strip()
+    if fund_id and fund_id in SGGG_FUND_ID_TO_PSC_PORTFOLIO:
+        return SGGG_FUND_ID_TO_PSC_PORTFOLIO[fund_id]
+    return None
+
+
+def _pyodbc_or_503():
+    try:
+        import pyodbc  # type: ignore
+        return pyodbc, None
+    except ImportError:
+        return None, (
+            jsonify({
+                "error": "pyodbc not installed. pip install pyodbc and configure ODBC DSN=PSC_VIEWER.",
+            }),
+            503,
+        )
+
+
 
 def _json_response(payload: dict, status: int = 200) -> Response:
     """JSON response that never raises on odd types (Flask jsonify can still fail on some values)."""
@@ -927,6 +980,101 @@ def sggg_portfolio():
             "usd_cad_rate": None,
             "positions": []
         }), 500
+
+
+# ---------------------------------------------------------------------------
+# SGGG / PSC options trades + exposure history (for Fund Options Tax Recon)
+# ---------------------------------------------------------------------------
+@app.route("/sggg/options-tax-reconciliation", methods=["POST"])
+def sggg_options_tax_reconciliation():
+    """
+    Fetch raw option trades and position history needed to compute options tax characterization.
+
+    Body:
+      - fund_id: Diamond fund id GUID (preferred)
+      - portfolio: PSC portfolio name override (optional)
+      - start_date: YYYY-MM-DD
+      - end_date: YYYY-MM-DD
+
+    Returns:
+      { portfolio, start_date, end_date, option_trades: [...], position_history: [...] }
+    """
+    data = request.get_json(silent=True) or {}
+    portfolio = _psc_portfolio_from_request(data)
+    if not portfolio:
+        return jsonify({"error": "portfolio required (or pass fund_id mapped to a PSC portfolio)"}), 400
+
+    start_date = _compact_to_ymd(data.get("start_date") or "")
+    end_date = _compact_to_ymd(data.get("end_date") or "")
+    if not start_date or not end_date:
+        return jsonify({"error": "start_date and end_date required (YYYY-MM-DD)"}), 400
+
+    start_compact = _ymd_to_compact(start_date)
+    end_compact = _ymd_to_compact(end_date)
+
+    pyodbc, err = _pyodbc_or_503()
+    if err:
+        return err
+
+    conn = None
+    try:
+        conn = pyodbc.connect("DSN=PSC_VIEWER")
+        cursor = conn.cursor()
+
+        # 1) Option trades (fills)
+        orders_sql = (
+            "SELECT "
+            "ORDER_ID, PORTFOLIO, SECURITY, DESCRIPTION, STRATEGY, SEC_CCY, BBG_TICKER, "
+            "TRADE_DATE_INT, TRADE_DATE_TIME, SETTLE_DATE_INT, SETTLE_DATE, `ORDER` AS ORDER_ACTION, PRICE, COMMISH, BROKER, FILLED_QTTY, "
+            "ACT_QTTY, SEC_CCY_AMT, SETTLE_CCY_AMT, COMPANY_SYMBOL, CONTRACT_SIZE, "
+            "COUNTRY, QUOTE_SIZE, SECTOR, SECURITY_TYPE, UNDERLYING_SECURITY, "
+            "UNDERLYING_DESCRIPTION, UNDERLYING_SEC_CCY, UNDERLYING_CUSIP, UNDERLYING_ISIN, "
+            "UNDERLYING_SEDOL, UNDERLYING_EXCHANGE, UNDERLYING_QUOTE_SIZE, UNDERLYING_CONTRACT_SIZE, "
+            "UNDERLYING_SECTOR, UNDERLYING_COUNTRY "
+            "FROM psc_filled_orders "
+            "WHERE TRADE_DATE_INT BETWEEN ? AND ? "
+            "AND PORTFOLIO = ? "
+            "AND SECURITY_TYPE = 'EquityOption' "
+            "ORDER BY ORDER_ID, TRADE_DATE_INT, SECURITY, PORTFOLIO, STRATEGY"
+        )
+        cursor.execute(orders_sql, (start_compact, end_compact, portfolio))
+        order_cols = [d[0] for d in cursor.description]
+        order_rows = cursor.fetchall()
+        option_trades = [dict(zip(order_cols, row)) for row in order_rows]
+
+        # 2) Position history (for exposures / hedge context)
+        pos_sql = (
+            "SELECT "
+            "POSN_DATE, PORTFOLIO, STRATEGY, SECURITY, SECURITY_TYPE, SEC_CCY, SEDOL, BBG_TICKER, DESCRIPTION, SECTOR, "
+            "LONG_SHORT, QUANTITY, AVG_PRICE, CLOSE_PRICE, PRICE_PROFIT, POSN_OPEN_DT, POSN_CLOSE_DT, "
+            "INTEREST, DIVIDENDS, FEES, VALUE, EXPOSURE, PORTFOLIO_NAV, COUNTRY "
+            "FROM psc_position_history "
+            "WHERE PORTFOLIO = ? "
+            "AND POSN_DATE BETWEEN ? AND ? "
+            "ORDER BY PORTFOLIO, POSN_DATE, STRATEGY, SECURITY"
+        )
+        cursor.execute(pos_sql, (portfolio, start_compact, end_compact))
+        pos_cols = [d[0] for d in cursor.description]
+        pos_rows = cursor.fetchall()
+        position_history = [dict(zip(pos_cols, row)) for row in pos_rows]
+
+        # Make sure everything is JSON-serializable
+        return _json_response({
+            "portfolio": portfolio,
+            "start_date": start_date,
+            "end_date": end_date,
+            "option_trades": _log_serialize(option_trades),
+            "position_history": _log_serialize(position_history),
+        }, 200)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _get_diamond_fund_ids():
@@ -1882,6 +2030,7 @@ if __name__ == "__main__":
         print()
         print("Endpoints: /health, /bloomberg-update, /bloomberg/quotes, /quotes, /historical, /historical-debug, /reference,")
         print("  /economic-calendar, /clarifi/process, /clarifi/list, /ehp/process, /sggg/portfolio,")
+        print("  /sggg/options-tax-reconciliation,")
         print("  /ibkr/auth-status, /ibkr/snapshot, /ibkr/history, /ibkr/search, /polymarket/alert")
         print("SGGG requires: OpenVPN + DSN=PSC_VIEWER + pyodbc. IBKR requires Gateway on port 5001 + browser login.")
         print()

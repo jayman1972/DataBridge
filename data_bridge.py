@@ -1054,7 +1054,7 @@ def sggg_options_tax_reconciliation():
         cursor = conn.cursor()
 
         # 1) Option trades (fills)
-        orders_sql = (
+        orders_sql_base = (
             "SELECT "
             "ORDER_ID, PORTFOLIO, SECURITY, DESCRIPTION, STRATEGY, SEC_CCY, BBG_TICKER, "
             "TRADE_DATE_INT, TRADE_DATE_TIME, SETTLE_DATE_INT, SETTLE_DATE, `ORDER` AS ORDER_ACTION, PRICE, COMMISH, BROKER, FILLED_QTTY, "
@@ -1069,11 +1069,24 @@ def sggg_options_tax_reconciliation():
             "AND SECURITY_TYPE = 'EquityOption' "
             "ORDER BY ORDER_ID, TRADE_DATE_INT, SECURITY, PORTFOLIO, STRATEGY"
         )
+        # If PSC has an option delta column, include it. Some environments don't, so we fall back gracefully.
+        orders_sql_with_delta = orders_sql_base.replace(
+            "COMPANY_SYMBOL, CONTRACT_SIZE, ",
+            "COMPANY_SYMBOL, CONTRACT_SIZE, DELTA, ",
+        )
         resolved_portfolio = portfolio
         portfolio_candidates: List[str] = []
 
+        _orders_sql_to_use = orders_sql_with_delta
+
         def _run_orders_query(port: str) -> List[dict]:
-            cursor.execute(orders_sql, (start_compact, end_compact, port))
+            nonlocal _orders_sql_to_use
+            try:
+                cursor.execute(_orders_sql_to_use, (start_compact, end_compact, port))
+            except Exception:
+                # Most likely: DELTA column not present.
+                _orders_sql_to_use = orders_sql_base
+                cursor.execute(_orders_sql_to_use, (start_compact, end_compact, port))
             cols = [d[0] for d in cursor.description]
             rows = cursor.fetchall()
             return [dict(zip(cols, r)) for r in rows]

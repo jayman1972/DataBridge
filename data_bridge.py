@@ -1254,8 +1254,8 @@ def _emsx_history_get_fills(
                                 except Exception:
                                     return None
 
-                        # For options, OCCSymbol is usually the best unique identifier.
-                        security = _get("OCCSymbol") or _get("SecurityName") or _get("Ticker") or ""
+                        # Prefer SecurityName for human-friendly display (e.g. "QQQ 04/22/26 P646").
+                        security = _get("SecurityName") or _get("OCCSymbol") or _get("Ticker") or ""
                         side = (_get("Side") or "").upper()
 
                         fills.append({
@@ -1311,6 +1311,9 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
         # Use whatever timestamp the source provides; keep stable ordering.
         return (_s(t.get("TRADE_DATE_INT")), _s(t.get("TRADE_DATE_TIME")), _s(t.get("ORDER_ID")))
 
+    def _event_key(e):
+        return (_s(e.get("TRADE_DATE_INT")), _s(e.get("TRADE_DATE_TIME")), _s(e.get("ORDER_ID")))
+
     def _signed_delta(order_action: str, qty_abs: float) -> float:
         oa = (order_action or "").upper()
         if oa == "BUY":
@@ -1323,8 +1326,82 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
             return +qty_abs
         return 0.0
 
-    grouped: Dict[str, List[dict]] = {}
+    # Consolidate partial fills into order-level rows (replicates EMSX UI behavior more closely).
+    # Key = (SECURITY, ORDER_ID, ORDER_ACTION).
+    order_map: Dict[str, dict] = {}
     for t in trades:
+        sec = _s(t.get("SECURITY"))
+        if not sec:
+            continue
+        oa = _s(t.get("ORDER_ACTION") or t.get("ORDER") or "")
+        order_id = _s(t.get("ORDER_ID"))
+        if not order_id:
+            # If no order id, treat the fill as its own order.
+            order_id = f"NO_ORDER::{sec}::{_s(t.get('TRADE_DATE_TIME'))}"
+        key = f"{sec}::{order_id}::{oa.upper()}"
+
+        qty = _n(t.get("ACT_QTTY")) or _n(t.get("FILLED_QTTY")) or 0.0
+        qty_abs = abs(qty)
+        price = _n(t.get("PRICE"))
+        tt = _s(t.get("TRADE_DATE_TIME"))
+        td = _s(t.get("TRADE_DATE_INT"))
+        broker = _s(t.get("BROKER"))
+        route_id = _s(t.get("ROUTE_ID"))
+
+        if key not in order_map:
+            order_map[key] = {
+                "SECURITY": sec,
+                "ORDER_ID": order_id,
+                "ORDER_ACTION": oa,
+                "TRADE_DATE_INT": td,
+                "TRADE_DATE_TIME": tt,
+                "TRADE_TIME_FIRST": tt,
+                "TRADE_TIME_LAST": tt,
+                "BROKER": broker,
+                "ROUTE_ID": route_id,
+                "QTY_ABS": 0.0,
+                "NOTIONAL": 0.0,  # qty_abs * price
+            }
+
+        acc = order_map[key]
+        acc["TRADE_DATE_INT"] = acc["TRADE_DATE_INT"] or td
+        # Keep first/last time
+        if tt:
+            if not acc.get("TRADE_TIME_FIRST") or tt < acc["TRADE_TIME_FIRST"]:
+                acc["TRADE_TIME_FIRST"] = tt
+            if not acc.get("TRADE_TIME_LAST") or tt > acc["TRADE_TIME_LAST"]:
+                acc["TRADE_TIME_LAST"] = tt
+        acc["QTY_ABS"] += qty_abs
+        if price is not None:
+            acc["NOTIONAL"] += qty_abs * float(price)
+        # Prefer a non-empty broker/route_id if present
+        if broker and not acc.get("BROKER"):
+            acc["BROKER"] = broker
+        if route_id and not acc.get("ROUTE_ID"):
+            acc["ROUTE_ID"] = route_id
+
+    consolidated_orders: List[dict] = []
+    for _, acc in order_map.items():
+        qty_abs = float(acc.get("QTY_ABS") or 0.0)
+        notional = float(acc.get("NOTIONAL") or 0.0)
+        vwap = (notional / qty_abs) if (qty_abs and notional) else None
+        consolidated_orders.append({
+            "SECURITY": acc.get("SECURITY"),
+            "ORDER_ID": acc.get("ORDER_ID"),
+            "ORDER_ACTION": acc.get("ORDER_ACTION"),
+            "TRADE_DATE_INT": acc.get("TRADE_DATE_INT"),
+            # Use the first fill time as the order time to match EMSX list view; keep last separately for debugging if needed.
+            "TRADE_DATE_TIME": acc.get("TRADE_TIME_FIRST") or acc.get("TRADE_DATE_TIME"),
+            "TRADE_TIME_FIRST": acc.get("TRADE_TIME_FIRST"),
+            "TRADE_TIME_LAST": acc.get("TRADE_TIME_LAST"),
+            "ACT_QTTY": qty_abs,
+            "PRICE": vwap,
+            "BROKER": acc.get("BROKER"),
+            "ROUTE_ID": acc.get("ROUTE_ID"),
+        })
+
+    grouped: Dict[str, List[dict]] = {}
+    for t in consolidated_orders:
         sec = _s(t.get("SECURITY"))
         if not sec:
             continue

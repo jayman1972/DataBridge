@@ -1278,20 +1278,12 @@ def _emsx_history_get_fills(
                             return f"{und} {mm}/{dd}/{yy} {pc}{strike_str}"
 
                         # Determine if this fill is for an option.
-                        # We want "Equity Option" only. EMSX typically exposes this via AssetClass/Type,
-                        # but OCCSymbol is a reliable fallback.
-                        asset_u = asset_class.strip().upper()
-                        type_u = sec_type.strip().upper()
-                        yellow_u = yellow_key.strip().upper()
-
-                        is_equity_option = (
-                            ("OPTION" in asset_u and "EQUITY" in asset_u)
-                            or (asset_u == "EQUITYOPTION")
-                            or ("EQUITY OPTION" in type_u)
-                            or (type_u == "EQUITYOPTION")
-                            or ("EQUITYOPTION" in yellow_u)
-                        )
-                        is_option = bool(occ) or _looks_like_option_name(security_name) or is_equity_option
+                        # Be strict and structural: keep only rows that are definitively options, either:
+                        # - OCC-style symbology (in OCCSymbol OR sometimes SecurityName), or
+                        # - EMSX formatted option SecurityName (MM/DD/YY Pxxx / Cxxx).
+                        # This avoids false positives where EMSX metadata labels equity/future rows oddly.
+                        occ_candidate = (occ or "").strip() or security_name.strip()
+                        is_option = bool(_format_occ(occ_candidate)) or _looks_like_option_name(security_name)
                         if not is_option:
                             filtered_out_count += 1
                             if len(filtered_out) < 25:
@@ -1307,7 +1299,6 @@ def _emsx_history_get_fills(
                             continue
 
                         # Sometimes OCCSymbol isn't populated, but SecurityName is an OCC-style string. Try both.
-                        occ_candidate = (occ or "").strip() or security_name.strip()
                         display = security_name.strip() if _looks_like_option_name(security_name) else (_format_occ(occ_candidate) or security_name.strip() or occ.strip())
                         # Use a stable key for grouping: prefer OCC (unique), else fallback to display string.
                         security_key = occ.strip() or (occ_candidate.strip() if _format_occ(occ_candidate) else display)

@@ -1275,7 +1275,10 @@ def _emsx_history_get_fills(
                             return f"{und} {mm}/{dd}/{yy} {pc}{strike_str}"
 
                         # Determine if this fill is for an option.
-                        is_option = bool(occ) or _looks_like_option_name(security_name) or ("OPT" in yellow_key.upper())
+                        # Be strict: OCCSymbol implies an option. Otherwise require EMSX-style option SecurityName.
+                        # YellowKey-based heuristics are noisy; only accept explicit option keys.
+                        yellow_u = yellow_key.strip().upper()
+                        is_option = bool(occ) or _looks_like_option_name(security_name) or (yellow_u in ("OPT", "OPTION"))
                         if not is_option:
                             continue
 

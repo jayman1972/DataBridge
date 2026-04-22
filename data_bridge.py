@@ -1258,6 +1258,7 @@ def _emsx_history_get_fills(
                         occ = _get("OCCSymbol") or ""
                         yellow_key = _get("YellowKey") or ""
                         asset_class = _get("AssetClass") or ""
+                        sec_type = _get("Type") or ""  # often maps to the EMSX "Sec Type" column
 
                         def _looks_like_option_name(s: str) -> bool:
                             # EMSX typically formats options like: "SPY 04/24/26 P705"
@@ -1275,10 +1276,20 @@ def _emsx_history_get_fills(
                             return f"{und} {mm}/{dd}/{yy} {pc}{strike_str}"
 
                         # Determine if this fill is for an option.
-                        # Be strict: OCCSymbol implies an option. Otherwise require EMSX-style option SecurityName.
-                        # YellowKey-based heuristics are noisy; only accept explicit option keys.
+                        # We want "Equity Option" only. EMSX typically exposes this via AssetClass/Type,
+                        # but OCCSymbol is a reliable fallback.
+                        asset_u = asset_class.strip().upper()
+                        type_u = sec_type.strip().upper()
                         yellow_u = yellow_key.strip().upper()
-                        is_option = bool(occ) or _looks_like_option_name(security_name) or (yellow_u in ("OPT", "OPTION"))
+
+                        is_equity_option = (
+                            ("OPTION" in asset_u and "EQUITY" in asset_u)
+                            or (asset_u == "EQUITYOPTION")
+                            or ("EQUITY OPTION" in type_u)
+                            or (type_u == "EQUITYOPTION")
+                            or ("EQUITYOPTION" in yellow_u)
+                        )
+                        is_option = bool(occ) or _looks_like_option_name(security_name) or is_equity_option
                         if not is_option:
                             continue
 
@@ -1303,6 +1314,7 @@ def _emsx_history_get_fills(
                             "TICKER": _get("Ticker"),
                             "YELLOW_KEY": _get("YellowKey"),
                             "ASSET_CLASS": _get("AssetClass"),
+                            "SEC_TYPE": sec_type or None,
                         })
 
             if et == blpapi.Event.RESPONSE:

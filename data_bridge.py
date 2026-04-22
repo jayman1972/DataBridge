@@ -1261,6 +1261,9 @@ def _emsx_history_get_fills(
                         yellow_key = _get("YellowKey") or ""
                         asset_class = _get("AssetClass") or ""
                         sec_type = _get("Type") or ""  # often maps to the EMSX "Sec Type" column
+                        # Keep EMSX-provided side verbatim; for options it may already be "Sell to Open"/etc.
+                        side_raw = (_get("Side") or "").strip()
+                        side = side_raw.upper()
 
                         def _looks_like_option_name(s: str) -> bool:
                             # EMSX typically formats options like: "SPY 04/24/26 P705"
@@ -1302,9 +1305,6 @@ def _emsx_history_get_fills(
                         display = security_name.strip() if _looks_like_option_name(security_name) else (_format_occ(occ_candidate) or security_name.strip() or occ.strip())
                         # Use a stable key for grouping: prefer OCC (unique), else fallback to display string.
                         security_key = occ.strip() or (occ_candidate.strip() if _format_occ(occ_candidate) else display)
-                        # Keep EMSX-provided side verbatim; for options it may already be "Sell to Open"/etc.
-                        side_raw = (_get("Side") or "").strip()
-                        side = side_raw.upper()
 
                         fills.append({
                             "SECURITY": security_key,

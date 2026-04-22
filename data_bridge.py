@@ -1158,6 +1158,215 @@ def sggg_options_tax_reconciliation():
                 pass
 
 
+# ---------------------------------------------------------------------------
+# Options closeout check (Desktop EMSX planned; PSC fallback available now)
+# ---------------------------------------------------------------------------
+def _options_closeout_analyze(trades: List[dict]) -> dict:
+    """
+    Analyze option fills for closeout mismatches / suspicious close-side usage.
+
+    This is intentionally broker-agnostic and relies on PSC/EMSX-style order actions:
+      - BUY, SELL, SELL SHORT, BUY COVR
+
+    Returns:
+      {
+        open_positions: [{security, net_contracts, first_time, last_time}],
+        suspicious_actions: [{security, trade_time, order_action, qty, net_before, reason}],
+        by_security: {SEC: {...}}
+      }
+    """
+    def _s(v):
+        return (v or "").strip()
+
+    def _n(v):
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    def _trade_key(t):
+        # Use whatever timestamp the source provides; keep stable ordering.
+        return (_s(t.get("TRADE_DATE_INT")), _s(t.get("TRADE_DATE_TIME")), _s(t.get("ORDER_ID")))
+
+    def _signed_delta(order_action: str, qty_abs: float) -> float:
+        oa = (order_action or "").upper()
+        if oa == "BUY":
+            return +qty_abs
+        if oa == "SELL":
+            return -qty_abs
+        if oa == "SELL SHORT":
+            return -qty_abs
+        if oa == "BUY COVR":
+            return +qty_abs
+        return 0.0
+
+    grouped: Dict[str, List[dict]] = {}
+    for t in trades:
+        sec = _s(t.get("SECURITY"))
+        if not sec:
+            continue
+        grouped.setdefault(sec, []).append(t)
+
+    open_positions = []
+    suspicious_actions = []
+    by_security = {}
+
+    for sec, ts in grouped.items():
+        ts_sorted = sorted(ts, key=_trade_key)
+        net = 0.0
+        first_time = None
+        last_time = None
+
+        for t in ts_sorted:
+            oa = _s(t.get("ORDER_ACTION") or t.get("ORDER") or "")
+            qty = _n(t.get("ACT_QTTY")) or _n(t.get("FILLED_QTTY")) or 0.0
+            qty_abs = abs(qty)
+            if qty_abs == 0:
+                continue
+
+            net_before = net
+            # Flag suspicious close-side usage based on current position sign.
+            if net_before > 0 and oa.upper() == "SELL SHORT":
+                suspicious_actions.append({
+                    "security": sec,
+                    "trade_time": _s(t.get("TRADE_DATE_TIME")),
+                    "order_action": oa,
+                    "qty": qty,
+                    "net_before": net_before,
+                    "reason": "Position is long; closing should typically be SELL, not SELL SHORT",
+                })
+            if net_before < 0 and oa.upper() == "BUY":
+                suspicious_actions.append({
+                    "security": sec,
+                    "trade_time": _s(t.get("TRADE_DATE_TIME")),
+                    "order_action": oa,
+                    "qty": qty,
+                    "net_before": net_before,
+                    "reason": "Position is short; closing should typically be BUY COVR, not BUY",
+                })
+
+            net += _signed_delta(oa, qty_abs)
+            first_time = first_time or _s(t.get("TRADE_DATE_TIME"))
+            last_time = _s(t.get("TRADE_DATE_TIME")) or last_time
+
+        by_security[sec] = {
+            "net_contracts": net,
+            "first_time": first_time,
+            "last_time": last_time,
+            "trades_count": len(ts_sorted),
+        }
+
+        # Anything still non-flat near end-of-day is a candidate for exercise risk.
+        if abs(net) > 1e-9:
+            open_positions.append({
+                "security": sec,
+                "net_contracts": net,
+                "first_time": first_time,
+                "last_time": last_time,
+                "trades_count": len(ts_sorted),
+            })
+
+    return {
+        "open_positions": open_positions,
+        "suspicious_actions": suspicious_actions,
+        "by_security": by_security,
+    }
+
+
+@app.route("/emsx/options-closeout-check", methods=["POST"])
+def emsx_options_closeout_check():
+    """
+    Desktop EMSX closeout check.
+
+    For now, uses PSC fills as a fallback data source. When `blpapi` is available on a Bloomberg Desktop host,
+    this endpoint can be extended to pull EMSX fills/orders directly.
+
+    Body:
+      - portfolio: PSC portfolio name (optional if fund_id provided and mapped)
+      - fund_id / fund_name: used for portfolio mapping/auto-detect (optional)
+      - date: YYYY-MM-DD (defaults to today)
+    """
+    data = request.get_json(silent=True) or {}
+    fund_name = (data.get("fund_name") or "").strip() or None
+    portfolio = _psc_portfolio_from_request(data)
+    date_iso = _compact_to_ymd(data.get("date") or "") or datetime.now().strftime("%Y-%m-%d")
+    date_compact = _ymd_to_compact(date_iso)
+
+    pyodbc, err = _pyodbc_or_503()
+    if err:
+        return err
+
+    conn = None
+    try:
+        conn = pyodbc.connect("DSN=PSC_VIEWER")
+        cursor = conn.cursor()
+
+        # Resolve portfolio similarly to the options tax endpoint (if needed).
+        resolved_portfolio = portfolio
+        portfolio_candidates: List[str] = []
+
+        if not resolved_portfolio and fund_name:
+            like_patterns = _like_patterns_from_fund_name(fund_name)
+            distinct_sql = (
+                "SELECT DISTINCT PORTFOLIO "
+                "FROM psc_filled_orders "
+                "WHERE TRADE_DATE_INT = ? "
+                "AND SECURITY_TYPE = 'EquityOption' "
+                "AND PORTFOLIO LIKE ? "
+                "ORDER BY PORTFOLIO "
+                "LIMIT 10"
+            )
+            for pat in like_patterns:
+                cursor.execute(distinct_sql, (date_compact, pat))
+                ports = [str(r[0]).strip() for r in cursor.fetchall() if r and r[0] is not None]
+                for p in ports:
+                    if p and p not in portfolio_candidates:
+                        portfolio_candidates.append(p)
+                if portfolio_candidates:
+                    break
+            if portfolio_candidates:
+                resolved_portfolio = portfolio_candidates[0]
+
+        if not resolved_portfolio:
+            return jsonify({"error": "portfolio required (or pass fund_id mapped to a PSC portfolio, or include fund_name for auto-detect)"}), 400
+
+        fills_sql = (
+            "SELECT "
+            "ORDER_ID, PORTFOLIO, SECURITY, DESCRIPTION, SECURITY_TYPE, "
+            "TRADE_DATE_INT, TRADE_DATE_TIME, `ORDER` AS ORDER_ACTION, "
+            "ACT_QTTY, FILLED_QTTY, PRICE, BROKER "
+            "FROM psc_filled_orders "
+            "WHERE TRADE_DATE_INT = ? "
+            "AND PORTFOLIO = ? "
+            "AND SECURITY_TYPE = 'EquityOption' "
+            "ORDER BY SECURITY, TRADE_DATE_TIME, ORDER_ID"
+        )
+        cursor.execute(fills_sql, (date_compact, resolved_portfolio))
+        cols = [d[0] for d in cursor.description]
+        rows = cursor.fetchall()
+        trades = [dict(zip(cols, r)) for r in rows]
+
+        analysis = _options_closeout_analyze(_log_serialize(trades))
+        return _json_response({
+            "source": "psc_fallback",
+            "portfolio": resolved_portfolio,
+            "requested_portfolio": portfolio,
+            "portfolio_candidates": portfolio_candidates,
+            "date": date_iso,
+            "trade_count": len(trades),
+            **analysis,
+        }, 200)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _get_diamond_fund_ids():
     """Return list of fund IDs from env. SGGG_DIAMOND_FUND_IDS (comma-separated) or SGGG_DIAMOND_FUND_ID (single)."""
     ids_str = os.environ.get("SGGG_DIAMOND_FUND_IDS", "").strip()

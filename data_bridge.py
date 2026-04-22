@@ -1161,6 +1161,127 @@ def sggg_options_tax_reconciliation():
 # ---------------------------------------------------------------------------
 # Options closeout check (Desktop EMSX planned; PSC fallback available now)
 # ---------------------------------------------------------------------------
+def _try_import_blpapi():
+    try:
+        import blpapi  # type: ignore
+        return blpapi, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _emsx_history_get_fills(
+    date_iso: str,
+    uuids: Optional[List[int]] = None,
+    team: Optional[str] = None,
+    host: str = "localhost",
+    port: int = 8194,
+    service: str = "//blp/emsx.history",
+) -> List[dict]:
+    """
+    Pull fills via EMSX History Request service (GetFills).
+
+    Docs: https://emsx-api-doc.readthedocs.io/en/latest/programmable/emsxHistory.html
+    Note: This is a request/response API; OK for a once-per-day check around 3:50pm.
+    """
+    blpapi, err = _try_import_blpapi()
+    if err or blpapi is None:
+        raise RuntimeError(f"blpapi not available ({err}); install Bloomberg Desktop API + Python blpapi on this host")
+
+    if not uuids and not team:
+        raise RuntimeError("EMSX scope missing: set EMSX_UUIDS env var or EMSX_TEAM env var (or pass uuids/team in request)")
+
+    from_dt = f"{date_iso}T00:00:00.000+00:00"
+    to_dt = f"{date_iso}T23:59:59.999+00:00"
+
+    # Session
+    opts = blpapi.SessionOptions()
+    opts.setServerHost(host)
+    opts.setServerPort(port)
+    session = blpapi.Session(opts)
+    if not session.start():
+        raise RuntimeError(f"Failed to start blpapi session to {host}:{port}")
+    try:
+        if not session.openService(service):
+            raise RuntimeError(f"Failed to open EMSX service: {service}")
+        svc = session.getService(service)
+        request = svc.createRequest("GetFills")
+        request.set("FromDateTime", from_dt)
+        request.set("ToDateTime", to_dt)
+
+        scope = request.getElement("Scope")
+        if team:
+            scope.setChoice("Team")
+            scope.setElement("Team", team)
+        else:
+            scope.setChoice("Uuids")
+            el = scope.getElement("Uuids")
+            for u in uuids or []:
+                el.appendValue(int(u))
+
+        corr = session.sendRequest(request)
+        fills: List[dict] = []
+
+        while True:
+            ev = session.nextEvent(5000)
+            et = ev.eventType()
+            for msg in ev:
+                if msg.correlationIds() and msg.correlationIds()[0].value() != corr.value():
+                    continue
+                mtype = str(msg.messageType())
+                if mtype.lower().endswith("errorinfo") or mtype == "ErrorInfo":
+                    # Semi-camel casing per docs
+                    code = msg.getElementAsInteger("ERROR_CODE") if msg.hasElement("ERROR_CODE") else None
+                    emsg = msg.getElementAsString("ERROR_MESSAGE") if msg.hasElement("ERROR_MESSAGE") else str(msg)
+                    raise RuntimeError(f"EMSX GetFills error: {code} {emsg}".strip())
+
+                # Typical response type: GetFillsResponse
+                # We avoid hard-coding element names beyond those in the docs table.
+                if msg.hasElement("Fills"):
+                    arr = msg.getElement("Fills")
+                    for i in range(arr.numValues()):
+                        f = arr.getValueAsElement(i)
+                        def _get(name: str):
+                            try:
+                                return f.getElementAsString(name) if f.hasElement(name) else None
+                            except Exception:
+                                return None
+                        def _get_num(name: str):
+                            try:
+                                return float(f.getElementAsFloat(name)) if f.hasElement(name) else None
+                            except Exception:
+                                try:
+                                    return float(f.getElementAsString(name)) if f.hasElement(name) else None
+                                except Exception:
+                                    return None
+
+                        # For options, OCCSymbol is usually the best unique identifier.
+                        security = _get("OCCSymbol") or _get("SecurityName") or _get("Ticker") or ""
+                        side = (_get("Side") or "").upper()
+
+                        fills.append({
+                            "SECURITY": security,
+                            "TRADE_DATE_TIME": _get("DateTimeOfFill"),
+                            "ORDER_ACTION": "BUY" if side == "BUY" else "SELL" if side == "SELL" else side,
+                            "ACT_QTTY": _get_num("FillShares"),
+                            "PRICE": _get_num("FillPrice"),
+                            "BROKER": _get("Broker"),
+                            "ORDER_ID": _get("OrderId"),
+                            "ROUTE_ID": _get("RouteId"),
+                            "TICKER": _get("Ticker"),
+                            "YELLOW_KEY": _get("YellowKey"),
+                        })
+
+            if et == blpapi.Event.RESPONSE:
+                break
+
+        return fills
+    finally:
+        try:
+            session.stop()
+        except Exception:
+            pass
+
+
 def _options_closeout_analyze(trades: List[dict]) -> dict:
     """
     Analyze option fills for closeout mismatches / suspicious close-side usage.
@@ -1276,95 +1397,113 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
 @app.route("/emsx/options-closeout-check", methods=["POST"])
 def emsx_options_closeout_check():
     """
-    Desktop EMSX closeout check.
+    Desktop EMSX closeout check (intraday).
 
-    For now, uses PSC fills as a fallback data source. When `blpapi` is available on a Bloomberg Desktop host,
-    this endpoint can be extended to pull EMSX fills/orders directly.
+    Uses EMSX History Request service `//blp/emsx.history` (GetFills), which is suitable for a once-per-day check.
+    Docs: https://emsx-api-doc.readthedocs.io/en/latest/programmable/emsxHistory.html
 
     Body:
-      - portfolio: PSC portfolio name (optional if fund_id provided and mapped)
-      - fund_id / fund_name: used for portfolio mapping/auto-detect (optional)
+      - uuids: optional list of Bloomberg UUID ints (otherwise EMSX_UUIDS env var)
+      - team: optional EMSX team name (otherwise EMSX_TEAM env var)
       - date: YYYY-MM-DD (defaults to today)
+      - allow_psc_fallback: bool (default false) for non-intraday debugging only
     """
     data = request.get_json(silent=True) or {}
-    fund_name = (data.get("fund_name") or "").strip() or None
-    portfolio = _psc_portfolio_from_request(data)
     date_iso = _compact_to_ymd(data.get("date") or "") or datetime.now().strftime("%Y-%m-%d")
-    date_compact = _ymd_to_compact(date_iso)
-
-    pyodbc, err = _pyodbc_or_503()
-    if err:
-        return err
-
-    conn = None
     try:
-        conn = pyodbc.connect("DSN=PSC_VIEWER")
-        cursor = conn.cursor()
+        allow_psc_fallback = bool(data.get("allow_psc_fallback") is True)
+        uuids = data.get("uuids")
+        team = (data.get("team") or "").strip() or None
+        if uuids is None:
+            env_uuids = os.environ.get("EMSX_UUIDS", "").strip()
+            uuids = [int(x.strip()) for x in env_uuids.split(",") if x.strip()] if env_uuids else []
+        else:
+            uuids = [int(x) for x in (uuids or [])]
+        if not team:
+            team = (os.environ.get("EMSX_TEAM", "").strip() or None)
 
-        # Resolve portfolio similarly to the options tax endpoint (if needed).
-        resolved_portfolio = portfolio
-        portfolio_candidates: List[str] = []
+        try:
+            trades = _emsx_history_get_fills(date_iso=date_iso, uuids=uuids, team=team)
+            analysis = _options_closeout_analyze(_log_serialize(trades))
+            return _json_response({
+                "source": "emsx_history",
+                "date": date_iso,
+                "trade_count": len(trades),
+                "scope": {"team": team, "uuids": uuids},
+                **analysis,
+            }, 200)
+        except Exception as e:
+            if not allow_psc_fallback:
+                return jsonify({
+                    "error": "EMSX not available on this host (required for intraday).",
+                    "detail": str(e),
+                    "hint": "Run DataBridge on the Bloomberg Terminal machine with Bloomberg Desktop API + Python blpapi installed and EMSX enabled; set EMSX_UUIDS or EMSX_TEAM.",
+                }), 503
 
-        if not resolved_portfolio and fund_name:
-            like_patterns = _like_patterns_from_fund_name(fund_name)
-            distinct_sql = (
-                "SELECT DISTINCT PORTFOLIO "
+            # PSC fallback (debug only; can be empty intraday)
+            fund_name = (data.get("fund_name") or "").strip() or None
+            portfolio = _psc_portfolio_from_request(data)
+            date_compact = _ymd_to_compact(date_iso)
+
+            pyodbc, err = _pyodbc_or_503()
+            if err:
+                return err
+            conn = pyodbc.connect("DSN=PSC_VIEWER")
+            cursor = conn.cursor()
+            resolved_portfolio = portfolio
+            portfolio_candidates: List[str] = []
+            if not resolved_portfolio and fund_name:
+                like_patterns = _like_patterns_from_fund_name(fund_name)
+                distinct_sql = (
+                    "SELECT DISTINCT PORTFOLIO "
+                    "FROM psc_filled_orders "
+                    "WHERE TRADE_DATE_INT = ? "
+                    "AND SECURITY_TYPE = 'EquityOption' "
+                    "AND PORTFOLIO LIKE ? "
+                    "ORDER BY PORTFOLIO "
+                    "LIMIT 10"
+                )
+                for pat in like_patterns:
+                    cursor.execute(distinct_sql, (date_compact, pat))
+                    ports = [str(r[0]).strip() for r in cursor.fetchall() if r and r[0] is not None]
+                    for p in ports:
+                        if p and p not in portfolio_candidates:
+                            portfolio_candidates.append(p)
+                    if portfolio_candidates:
+                        break
+                if portfolio_candidates:
+                    resolved_portfolio = portfolio_candidates[0]
+            if not resolved_portfolio:
+                return jsonify({"error": "portfolio required for PSC fallback"}), 400
+            fills_sql = (
+                "SELECT "
+                "ORDER_ID, PORTFOLIO, SECURITY, DESCRIPTION, SECURITY_TYPE, "
+                "TRADE_DATE_INT, TRADE_DATE_TIME, `ORDER` AS ORDER_ACTION, "
+                "ACT_QTTY, FILLED_QTTY, PRICE, BROKER "
                 "FROM psc_filled_orders "
                 "WHERE TRADE_DATE_INT = ? "
+                "AND PORTFOLIO = ? "
                 "AND SECURITY_TYPE = 'EquityOption' "
-                "AND PORTFOLIO LIKE ? "
-                "ORDER BY PORTFOLIO "
-                "LIMIT 10"
+                "ORDER BY SECURITY, TRADE_DATE_TIME, ORDER_ID"
             )
-            for pat in like_patterns:
-                cursor.execute(distinct_sql, (date_compact, pat))
-                ports = [str(r[0]).strip() for r in cursor.fetchall() if r and r[0] is not None]
-                for p in ports:
-                    if p and p not in portfolio_candidates:
-                        portfolio_candidates.append(p)
-                if portfolio_candidates:
-                    break
-            if portfolio_candidates:
-                resolved_portfolio = portfolio_candidates[0]
-
-        if not resolved_portfolio:
-            return jsonify({"error": "portfolio required (or pass fund_id mapped to a PSC portfolio, or include fund_name for auto-detect)"}), 400
-
-        fills_sql = (
-            "SELECT "
-            "ORDER_ID, PORTFOLIO, SECURITY, DESCRIPTION, SECURITY_TYPE, "
-            "TRADE_DATE_INT, TRADE_DATE_TIME, `ORDER` AS ORDER_ACTION, "
-            "ACT_QTTY, FILLED_QTTY, PRICE, BROKER "
-            "FROM psc_filled_orders "
-            "WHERE TRADE_DATE_INT = ? "
-            "AND PORTFOLIO = ? "
-            "AND SECURITY_TYPE = 'EquityOption' "
-            "ORDER BY SECURITY, TRADE_DATE_TIME, ORDER_ID"
-        )
-        cursor.execute(fills_sql, (date_compact, resolved_portfolio))
-        cols = [d[0] for d in cursor.description]
-        rows = cursor.fetchall()
-        trades = [dict(zip(cols, r)) for r in rows]
-
-        analysis = _options_closeout_analyze(_log_serialize(trades))
-        return _json_response({
-            "source": "psc_fallback",
-            "portfolio": resolved_portfolio,
-            "requested_portfolio": portfolio,
-            "portfolio_candidates": portfolio_candidates,
-            "date": date_iso,
-            "trade_count": len(trades),
-            **analysis,
-        }, 200)
+            cursor.execute(fills_sql, (date_compact, resolved_portfolio))
+            cols = [d[0] for d in cursor.description]
+            rows = cursor.fetchall()
+            psc_trades = [dict(zip(cols, r)) for r in rows]
+            analysis = _options_closeout_analyze(_log_serialize(psc_trades))
+            return _json_response({
+                "source": "psc_fallback",
+                "date": date_iso,
+                "portfolio": resolved_portfolio,
+                "requested_portfolio": portfolio,
+                "portfolio_candidates": portfolio_candidates,
+                "trade_count": len(psc_trades),
+                "emsx_error": str(e),
+                **analysis,
+            }, 200)
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-    finally:
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
 
 def _get_diamond_fund_ids():
@@ -2321,6 +2460,7 @@ if __name__ == "__main__":
         print("Endpoints: /health, /bloomberg-update, /bloomberg/quotes, /quotes, /historical, /historical-debug, /reference,")
         print("  /economic-calendar, /clarifi/process, /clarifi/list, /ehp/process, /sggg/portfolio,")
         print("  /sggg/options-tax-reconciliation,")
+        print("  /emsx/options-closeout-check,")
         print("  /ibkr/auth-status, /ibkr/snapshot, /ibkr/history, /ibkr/search, /polymarket/alert")
         print("SGGG requires: OpenVPN + DSN=PSC_VIEWER + pyodbc. IBKR requires Gateway on port 5001 + browser login.")
         print()

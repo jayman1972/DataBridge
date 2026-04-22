@@ -1220,6 +1220,8 @@ def _emsx_history_get_fills(
 
         corr = session.sendRequest(request)
         fills: List[dict] = []
+        filtered_out: List[dict] = []
+        filtered_out_count = 0
 
         while True:
             ev = session.nextEvent(5000)
@@ -1291,6 +1293,17 @@ def _emsx_history_get_fills(
                         )
                         is_option = bool(occ) or _looks_like_option_name(security_name) or is_equity_option
                         if not is_option:
+                            filtered_out_count += 1
+                            if len(filtered_out) < 25:
+                                filtered_out.append({
+                                    "SecurityName": security_name,
+                                    "OCCSymbol": occ,
+                                    "AssetClass": asset_class,
+                                    "Type": sec_type,
+                                    "YellowKey": yellow_key,
+                                    "Side": side_raw,
+                                    "DateTimeOfFill": _get("DateTimeOfFill"),
+                                })
                             continue
 
                         # Sometimes OCCSymbol isn't populated, but SecurityName is an OCC-style string. Try both.
@@ -1322,6 +1335,14 @@ def _emsx_history_get_fills(
             if et == blpapi.Event.RESPONSE:
                 break
 
+        # Attach debug info for troubleshooting filter behavior (only a few samples).
+        for f in fills:
+            if "FILTER_DEBUG" not in f:
+                f["FILTER_DEBUG"] = {
+                    "filtered_out_count": filtered_out_count,
+                    "filtered_out_examples": filtered_out,
+                }
+                break
         return fills
     finally:
         try:
@@ -1685,6 +1706,7 @@ def emsx_options_closeout_check():
             analysis = _options_closeout_analyze(_log_serialize(trades), starting_net_by_security=starting_net_by_security)
             return _json_response({
                 "source": "emsx_history",
+                "build": DATA_BRIDGE_BUILD,
                 "date": date_iso,
                 "trade_count": len(trades),
                 "scope": {"team": team, "uuids": uuids},

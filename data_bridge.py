@@ -1254,12 +1254,40 @@ def _emsx_history_get_fills(
                                 except Exception:
                                     return None
 
-                        # Prefer SecurityName for human-friendly display (e.g. "QQQ 04/22/26 P646").
-                        security = _get("SecurityName") or _get("OCCSymbol") or _get("Ticker") or ""
+                        security_name = _get("SecurityName") or ""
+                        occ = _get("OCCSymbol") or ""
+                        yellow_key = _get("YellowKey") or ""
+                        asset_class = _get("AssetClass") or ""
+
+                        def _looks_like_option_name(s: str) -> bool:
+                            # EMSX typically formats options like: "SPY 04/24/26 P705"
+                            return bool(re.search(r"\b\d{2}/\d{2}/\d{2}\s+[PC]\d", s or ""))
+
+                        def _format_occ(occ_sym: str) -> Optional[str]:
+                            # OCC: "SPY 260424P00705000" -> "SPY 04/24/26 P705"
+                            m = re.match(r"^([A-Z0-9]{1,6})\s*(\d{2})(\d{2})(\d{2})([CP])(\d{8})$", (occ_sym or "").strip().upper())
+                            if not m:
+                                return None
+                            und, yy, mm, dd, pc, strike_raw = m.groups()
+                            # OCC strike has 3 decimal places
+                            strike = int(strike_raw) / 1000.0
+                            strike_str = str(int(strike)) if abs(strike - int(strike)) < 1e-9 else f"{strike:.3f}".rstrip("0").rstrip(".")
+                            return f"{und} {mm}/{dd}/{yy} {pc}{strike_str}"
+
+                        # Determine if this fill is for an option.
+                        is_option = bool(occ) or _looks_like_option_name(security_name) or ("OPT" in yellow_key.upper())
+                        if not is_option:
+                            continue
+
+                        display = security_name.strip() if _looks_like_option_name(security_name) else (_format_occ(occ) or security_name.strip() or occ.strip())
+                        # Use a stable key for grouping: prefer OCC (unique), else fallback to display string.
+                        security_key = occ.strip() or display
                         side = (_get("Side") or "").upper()
 
                         fills.append({
-                            "SECURITY": security,
+                            "SECURITY": security_key,
+                            "SECURITY_DISPLAY": display,
+                            "OCC_SYMBOL": occ.strip() or None,
                             "TRADE_DATE_TIME": _get("DateTimeOfFill"),
                             "ORDER_ACTION": "BUY" if side == "BUY" else "SELL" if side == "SELL" else side,
                             "ACT_QTTY": _get_num("FillShares"),
@@ -1269,6 +1297,7 @@ def _emsx_history_get_fills(
                             "ROUTE_ID": _get("RouteId"),
                             "TICKER": _get("Ticker"),
                             "YELLOW_KEY": _get("YellowKey"),
+                            "ASSET_CLASS": _get("AssetClass"),
                         })
 
             if et == blpapi.Event.RESPONSE:
@@ -1351,6 +1380,7 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
         if key not in order_map:
             order_map[key] = {
                 "SECURITY": sec,
+                "SECURITY_DISPLAY": _s(t.get("SECURITY_DISPLAY")) or sec,
                 "ORDER_ID": order_id,
                 "ORDER_ACTION": oa,
                 "TRADE_DATE_INT": td,
@@ -1387,6 +1417,7 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
         vwap = (notional / qty_abs) if (qty_abs and notional) else None
         consolidated_orders.append({
             "SECURITY": acc.get("SECURITY"),
+            "SECURITY_DISPLAY": acc.get("SECURITY_DISPLAY") or acc.get("SECURITY"),
             "ORDER_ID": acc.get("ORDER_ID"),
             "ORDER_ACTION": acc.get("ORDER_ACTION"),
             "TRADE_DATE_INT": acc.get("TRADE_DATE_INT"),
@@ -1419,9 +1450,8 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
         first_time = None
         last_time = None
 
-        # Segment into groups by flat-to-flat cycles in timestamp order.
-        group_seq = 0
-        current_gid = None
+        # Grouping for this report: one group per option security.
+        current_gid = sec
         group_start_time = None
         group_flags = 0
         group_trades = 0
@@ -1442,13 +1472,8 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
             net_before = net
             flag_reason = None
 
-            # Start a new group when flat and a position-changing trade arrives.
-            if abs(net_before) <= 1e-9:
-                group_seq += 1
-                current_gid = f"{sec}::{group_seq}"
+            if group_start_time is None:
                 group_start_time = trade_time or None
-                group_flags = 0
-                group_trades = 0
 
             # Flag suspicious close-side usage based on current position sign.
             if net_before > 0 and oa.upper() == "SELL SHORT":
@@ -1482,6 +1507,7 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
 
             normalized_trades.append({
                 "security": sec,
+                "security_display": _s(t.get("SECURITY_DISPLAY")) or sec,
                 "trade_time": trade_time or None,
                 "order_action": oa or None,
                 "qty": qty,
@@ -1495,22 +1521,7 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
                 "flag_reason": flag_reason,
             })
 
-            # Close group when we return to flat after this trade.
-            if current_gid and abs(net) <= 1e-9:
-                groups_out.append({
-                    "group_id": current_gid,
-                    "security": sec,
-                    "start_time": group_start_time,
-                    "end_time": trade_time or None,
-                    "net_end": net,
-                    "is_open": False,
-                    "flags_count": group_flags,
-                    "trades_count": group_trades,
-                })
-                current_gid = None
-                group_start_time = None
-                group_flags = 0
-                group_trades = 0
+            # No flat-to-flat segmentation; keep accumulating.
 
         by_security[sec] = {
             "net_contracts": net,
@@ -1528,18 +1539,18 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
                 "last_time": last_time,
                 "trades_count": len(ts_sorted),
             })
-            # Also emit an "open" group if we ended the day mid-position.
-            if current_gid:
-                groups_out.append({
-                    "group_id": current_gid,
-                    "security": sec,
-                    "start_time": group_start_time,
-                    "end_time": last_time,
-                    "net_end": net,
-                    "is_open": True,
-                    "flags_count": group_flags,
-                    "trades_count": group_trades,
-                })
+
+        # Emit one group summary per security.
+        groups_out.append({
+            "group_id": current_gid,
+            "security": sec,
+            "security_display": _s(ts_sorted[0].get("SECURITY_DISPLAY")) or sec if ts_sorted else sec,
+            "executed_time": last_time,
+            "net_end": net,
+            "is_open": abs(net) > 1e-9,
+            "flags_count": group_flags,
+            "trades_count": group_trades,
+        })
 
     return {
         "trades": normalized_trades,

@@ -1265,7 +1265,7 @@ def _emsx_history_get_fills(
                             return bool(re.search(r"\b\d{2}/\d{2}/\d{2}\s+[PC]\d", s or ""))
 
                         def _format_occ(occ_sym: str) -> Optional[str]:
-                            # OCC: "SPY 260424P00705000" -> "SPY 04/24/26 P705"
+                            # OCC: "SPY 260424P00705000" (or "SPY260424P00705000") -> "SPY 04/24/26 P705"
                             m = re.match(r"^([A-Z0-9]{1,6})\s*(\d{2})(\d{2})(\d{2})([CP])(\d{8})$", (occ_sym or "").strip().upper())
                             if not m:
                                 return None
@@ -1293,9 +1293,11 @@ def _emsx_history_get_fills(
                         if not is_option:
                             continue
 
-                        display = security_name.strip() if _looks_like_option_name(security_name) else (_format_occ(occ) or security_name.strip() or occ.strip())
+                        # Sometimes OCCSymbol isn't populated, but SecurityName is an OCC-style string. Try both.
+                        occ_candidate = (occ or "").strip() or security_name.strip()
+                        display = security_name.strip() if _looks_like_option_name(security_name) else (_format_occ(occ_candidate) or security_name.strip() or occ.strip())
                         # Use a stable key for grouping: prefer OCC (unique), else fallback to display string.
-                        security_key = occ.strip() or display
+                        security_key = occ.strip() or (occ_candidate.strip() if _format_occ(occ_candidate) else display)
                         # Keep EMSX-provided side verbatim; for options it may already be "Sell to Open"/etc.
                         side_raw = (_get("Side") or "").strip()
                         side = side_raw.upper()

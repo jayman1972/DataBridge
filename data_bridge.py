@@ -1291,6 +1291,8 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
 
     Returns:
       {
+        trades: [ {security, trade_time, order_action, qty, price, broker, order_id, route_id, group_id, net_before, net_after, flag_reason?} ],
+        groups: [ {group_id, security, start_time, end_time, net_end, is_open, flags_count, trades_count} ],
         open_positions: [{security, net_contracts, first_time, last_time}],
         suspicious_actions: [{security, trade_time, order_action, qty, net_before, reason}],
         by_security: {SEC: {...}}
@@ -1328,6 +1330,8 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
             continue
         grouped.setdefault(sec, []).append(t)
 
+    normalized_trades: List[dict] = []
+    groups_out: List[dict] = []
     open_positions = []
     suspicious_actions = []
     by_security = {}
@@ -1338,6 +1342,13 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
         first_time = None
         last_time = None
 
+        # Segment into groups by flat-to-flat cycles in timestamp order.
+        group_seq = 0
+        current_gid = None
+        group_start_time = None
+        group_flags = 0
+        group_trades = 0
+
         for t in ts_sorted:
             oa = _s(t.get("ORDER_ACTION") or t.get("ORDER") or "")
             qty = _n(t.get("ACT_QTTY")) or _n(t.get("FILLED_QTTY")) or 0.0
@@ -1345,30 +1356,84 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
             if qty_abs == 0:
                 continue
 
+            trade_time = _s(t.get("TRADE_DATE_TIME"))
+            order_id = _s(t.get("ORDER_ID"))
+            route_id = _s(t.get("ROUTE_ID"))
+            broker = _s(t.get("BROKER"))
+            price = _n(t.get("PRICE"))
+
             net_before = net
+            flag_reason = None
+
+            # Start a new group when flat and a position-changing trade arrives.
+            if abs(net_before) <= 1e-9:
+                group_seq += 1
+                current_gid = f"{sec}::{group_seq}"
+                group_start_time = trade_time or None
+                group_flags = 0
+                group_trades = 0
+
             # Flag suspicious close-side usage based on current position sign.
             if net_before > 0 and oa.upper() == "SELL SHORT":
+                flag_reason = "Position is long; closing should typically be SELL, not SELL SHORT"
                 suspicious_actions.append({
                     "security": sec,
-                    "trade_time": _s(t.get("TRADE_DATE_TIME")),
+                    "trade_time": trade_time,
                     "order_action": oa,
                     "qty": qty,
                     "net_before": net_before,
-                    "reason": "Position is long; closing should typically be SELL, not SELL SHORT",
+                    "reason": flag_reason,
                 })
             if net_before < 0 and oa.upper() == "BUY":
+                flag_reason = "Position is short; closing should typically be BUY COVR, not BUY"
                 suspicious_actions.append({
                     "security": sec,
-                    "trade_time": _s(t.get("TRADE_DATE_TIME")),
+                    "trade_time": trade_time,
                     "order_action": oa,
                     "qty": qty,
                     "net_before": net_before,
-                    "reason": "Position is short; closing should typically be BUY COVR, not BUY",
+                    "reason": flag_reason,
                 })
 
             net += _signed_delta(oa, qty_abs)
-            first_time = first_time or _s(t.get("TRADE_DATE_TIME"))
-            last_time = _s(t.get("TRADE_DATE_TIME")) or last_time
+            first_time = first_time or trade_time
+            last_time = trade_time or last_time
+
+            group_trades += 1
+            if flag_reason:
+                group_flags += 1
+
+            normalized_trades.append({
+                "security": sec,
+                "trade_time": trade_time or None,
+                "order_action": oa or None,
+                "qty": qty,
+                "price": price,
+                "broker": broker or None,
+                "order_id": order_id or None,
+                "route_id": route_id or None,
+                "group_id": current_gid,
+                "net_before": net_before,
+                "net_after": net,
+                "flag_reason": flag_reason,
+            })
+
+            # Close group when we return to flat after this trade.
+            if current_gid and abs(net) <= 1e-9:
+                groups_out.append({
+                    "group_id": current_gid,
+                    "security": sec,
+                    "start_time": group_start_time,
+                    "end_time": trade_time or None,
+                    "net_end": net,
+                    "is_open": False,
+                    "flags_count": group_flags,
+                    "trades_count": group_trades,
+                })
+                current_gid = None
+                group_start_time = None
+                group_flags = 0
+                group_trades = 0
 
         by_security[sec] = {
             "net_contracts": net,
@@ -1386,8 +1451,22 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
                 "last_time": last_time,
                 "trades_count": len(ts_sorted),
             })
+            # Also emit an "open" group if we ended the day mid-position.
+            if current_gid:
+                groups_out.append({
+                    "group_id": current_gid,
+                    "security": sec,
+                    "start_time": group_start_time,
+                    "end_time": last_time,
+                    "net_end": net,
+                    "is_open": True,
+                    "flags_count": group_flags,
+                    "trades_count": group_trades,
+                })
 
     return {
+        "trades": normalized_trades,
+        "groups": groups_out,
         "open_positions": open_positions,
         "suspicious_actions": suspicious_actions,
         "by_security": by_security,

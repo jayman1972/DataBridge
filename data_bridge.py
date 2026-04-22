@@ -1282,14 +1282,16 @@ def _emsx_history_get_fills(
                         display = security_name.strip() if _looks_like_option_name(security_name) else (_format_occ(occ) or security_name.strip() or occ.strip())
                         # Use a stable key for grouping: prefer OCC (unique), else fallback to display string.
                         security_key = occ.strip() or display
-                        side = (_get("Side") or "").upper()
+                        # Keep EMSX-provided side verbatim; for options it may already be "Sell to Open"/etc.
+                        side_raw = (_get("Side") or "").strip()
+                        side = side_raw.upper()
 
                         fills.append({
                             "SECURITY": security_key,
                             "SECURITY_DISPLAY": display,
                             "OCC_SYMBOL": occ.strip() or None,
                             "TRADE_DATE_TIME": _get("DateTimeOfFill"),
-                            "ORDER_ACTION": "BUY" if side == "BUY" else "SELL" if side == "SELL" else side,
+                            "ORDER_ACTION": side_raw or side,
                             "ACT_QTTY": _get_num("FillShares"),
                             "PRICE": _get_num("FillPrice"),
                             "BROKER": _get("Broker"),
@@ -1311,7 +1313,7 @@ def _emsx_history_get_fills(
             pass
 
 
-def _options_closeout_analyze(trades: List[dict]) -> dict:
+def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Optional[Dict[str, float]] = None) -> dict:
     """
     Analyze option fills for closeout mismatches / suspicious close-side usage.
 
@@ -1343,15 +1345,39 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
     def _event_key(e):
         return (_s(e.get("TRADE_DATE_INT")), _s(e.get("TRADE_DATE_TIME")), _s(e.get("ORDER_ID")))
 
+    def _norm_action(order_action: str) -> str:
+        oa = (order_action or "").strip()
+        u = oa.upper()
+        # Normalize common variants
+        if u in ("BUY", "B"):
+            return "Buy"
+        if u in ("SELL", "S"):
+            return "Sell"
+        if u in ("SELL SHORT", "SS"):
+            return "Sell to Open"
+        if u in ("BUY COVR", "BC"):
+            return "Buy to Close"
+        # EMSX-like strings
+        if "BUY" in u and "OPEN" in u:
+            return "Buy to Open"
+        if "BUY" in u and "CLOSE" in u:
+            return "Buy to Close"
+        if "SELL" in u and "OPEN" in u:
+            return "Sell to Open"
+        if "SELL" in u and "CLOSE" in u:
+            return "Sell to Close"
+        return oa
+
     def _signed_delta(order_action: str, qty_abs: float) -> float:
-        oa = (order_action or "").upper()
-        if oa == "BUY":
+        oa = _norm_action(order_action)
+        u = oa.upper()
+        if u in ("BUY", "BUY TO OPEN"):
             return +qty_abs
-        if oa == "SELL":
+        if u in ("SELL", "SELL TO CLOSE"):
             return -qty_abs
-        if oa == "SELL SHORT":
+        if u == "SELL TO OPEN":
             return -qty_abs
-        if oa == "BUY COVR":
+        if u == "BUY TO CLOSE":
             return +qty_abs
         return 0.0
 
@@ -1446,7 +1472,7 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
 
     for sec, ts in grouped.items():
         ts_sorted = sorted(ts, key=_trade_key)
-        net = 0.0
+        net = float((starting_net_by_security or {}).get(sec, 0.0) or 0.0)
         first_time = None
         last_time = None
 
@@ -1457,7 +1483,8 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
         group_trades = 0
 
         for t in ts_sorted:
-            oa = _s(t.get("ORDER_ACTION") or t.get("ORDER") or "")
+            oa_raw = _s(t.get("ORDER_ACTION") or t.get("ORDER") or "")
+            oa = _norm_action(oa_raw)
             qty = _n(t.get("ACT_QTTY")) or _n(t.get("FILLED_QTTY")) or 0.0
             qty_abs = abs(qty)
             if qty_abs == 0:
@@ -1475,9 +1502,10 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
             if group_start_time is None:
                 group_start_time = trade_time or None
 
-            # Flag suspicious close-side usage based on current position sign.
-            if net_before > 0 and oa.upper() == "SELL SHORT":
-                flag_reason = "Position is long; closing should typically be SELL, not SELL SHORT"
+            # Flag suspicious "open vs close" usage based on existing position.
+            # What you want to catch: using an OPEN instruction when you intended to CLOSE.
+            if net_before > 0 and oa.upper() == "SELL TO OPEN":
+                flag_reason = "Position is long; this should typically be Sell to Close (not Sell to Open)"
                 suspicious_actions.append({
                     "security": sec,
                     "trade_time": trade_time,
@@ -1486,8 +1514,8 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
                     "net_before": net_before,
                     "reason": flag_reason,
                 })
-            if net_before < 0 and oa.upper() == "BUY":
-                flag_reason = "Position is short; closing should typically be BUY COVR, not BUY"
+            if net_before < 0 and oa.upper() == "BUY TO OPEN":
+                flag_reason = "Position is short; this should typically be Buy to Close (not Buy to Open)"
                 suspicious_actions.append({
                     "security": sec,
                     "trade_time": trade_time,
@@ -1528,6 +1556,7 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
             "first_time": first_time,
             "last_time": last_time,
             "trades_count": len(ts_sorted),
+            "starting_net": float((starting_net_by_security or {}).get(sec, 0.0) or 0.0),
         }
 
         # Anything still non-flat near end-of-day is a candidate for exercise risk.
@@ -1592,14 +1621,58 @@ def emsx_options_closeout_check():
         if not team:
             team = (os.environ.get("EMSX_TEAM", "").strip() or None)
 
+        # Optional: start-of-day positions from PSC (yesterday/last snapshot) to correctly interpret intraday exits.
+        starting_net_by_security: Dict[str, float] = {}
+        starting_positions_date = None
+        if bool(data.get("use_psc_start_positions") is True):
+            try:
+                # Resolve PSC portfolio from fund_id mapping (or explicit portfolio passed)
+                portfolio = _psc_portfolio_from_request(data)
+                if portfolio:
+                    pyodbc, err = _pyodbc_or_503()
+                    if not err and pyodbc is not None:
+                        conn = pyodbc.connect("DSN=PSC_VIEWER")
+                        cursor = conn.cursor()
+                        # Use the latest snapshot prior to the report date (calendar -1 day is good enough for this check).
+                        prev_compact = _ymd_to_compact((datetime.fromisoformat(date_iso) - timedelta(days=1)).strftime("%Y-%m-%d"))
+                        cursor.execute(
+                            "SELECT MAX(POSN_DATE) FROM psc_position_history WHERE PORTFOLIO = ? AND POSN_DATE <= ?",
+                            (portfolio, prev_compact),
+                        )
+                        row = cursor.fetchone()
+                        snap = str(row[0]) if row and row[0] is not None else None
+                        if snap:
+                            starting_positions_date = snap
+                            cursor.execute(
+                                "SELECT SECURITY, LONG_SHORT, QUANTITY FROM psc_position_history "
+                                "WHERE PORTFOLIO = ? AND POSN_DATE = ? AND SECURITY_TYPE = 'EquityOption'",
+                                (portfolio, snap),
+                            )
+                            for r in cursor.fetchall():
+                                sec = (str(r[0]).strip() if r and r[0] is not None else "")
+                                ls = (str(r[1]).strip().upper() if len(r) > 1 and r[1] is not None else "")
+                                qty = float(r[2]) if len(r) > 2 and r[2] is not None else 0.0
+                                if not sec:
+                                    continue
+                                starting_net_by_security[sec] = starting_net_by_security.get(sec, 0.0) + (qty if ls == "LONG" else -qty if ls == "SHORT" else qty)
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+            except Exception:
+                # Don't fail the EMSX check if PSC isn't reachable; just proceed with zero start positions.
+                starting_net_by_security = starting_net_by_security or {}
+
         try:
             trades = _emsx_history_get_fills(date_iso=date_iso, uuids=uuids, team=team)
-            analysis = _options_closeout_analyze(_log_serialize(trades))
+            analysis = _options_closeout_analyze(_log_serialize(trades), starting_net_by_security=starting_net_by_security)
             return _json_response({
                 "source": "emsx_history",
                 "date": date_iso,
                 "trade_count": len(trades),
                 "scope": {"team": team, "uuids": uuids},
+                "starting_positions_date": starting_positions_date,
+                "starting_positions_count": len(starting_net_by_security),
                 **analysis,
             }, 200)
         except Exception as e:

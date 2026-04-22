@@ -1394,7 +1394,7 @@ def _options_closeout_analyze(trades: List[dict]) -> dict:
     }
 
 
-@app.route("/emsx/options-closeout-check", methods=["POST"])
+@app.route("/emsx/options-closeout-check", methods=["POST", "OPTIONS"])
 def emsx_options_closeout_check():
     """
     Desktop EMSX closeout check (intraday).
@@ -1409,6 +1409,9 @@ def emsx_options_closeout_check():
       - allow_psc_fallback: bool (default false) for non-intraday debugging only
     """
     data = request.get_json(silent=True) or {}
+    # Explicitly handle CORS preflight (ngrok/browser can be strict).
+    if request.method == "OPTIONS":
+        return ("", 204)
     date_iso = _compact_to_ymd(data.get("date") or "") or datetime.now().strftime("%Y-%m-%d")
     try:
         allow_psc_fallback = bool(data.get("allow_psc_fallback") is True)

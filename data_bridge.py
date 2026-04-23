@@ -1401,6 +1401,21 @@ def _canonical_option_key(sym: str) -> Optional[str]:
     return None
 
 
+def _normalize_option_desc_key(sym: str) -> Optional[str]:
+    """
+    Normalize PSC/EMSX option description strings for dictionary key matching.
+    Example: "XLE 04/24/26 C57 US Equity" -> "XLE 04/24/26 C57"
+    """
+    s = (sym or "").strip().upper()
+    if not s:
+        return None
+    s = re.sub(r"\bEQUITY\b", "", s)
+    s = re.sub(r"\bUS\b", "", s)
+    s = s.replace(".US", "")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s or None
+
+
 def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Optional[Dict[str, float]] = None) -> dict:
     """
     Analyze option fills for closeout mismatches / suspicious close-side usage.
@@ -1782,13 +1797,21 @@ def emsx_options_closeout_check():
                                 # Example: "XLE 04/24/26 C57 US Equity" -> should canonicalize to the same OCC key
                                 # as EMSX display / OCC.
                                 desc_raw = (str(r[0]).strip() if r and r[0] is not None else "")
-                                sec = _canonical_option_key(desc_raw) or desc_raw.upper()
+                                canon = _canonical_option_key(desc_raw)
+                                desc_key = _normalize_option_desc_key(desc_raw) or desc_raw.upper()
+                                sec = canon or desc_key
                                 ls = (str(r[1]).strip().upper() if len(r) > 1 and r[1] is not None else "")
                                 qty = float(r[2]) if len(r) > 2 and r[2] is not None else 0.0
                                 if not sec:
                                     continue
                                 signed = (qty if ls == "LONG" else -qty if ls == "SHORT" else qty)
+                                # Store both canonical and description keys so we can match EMSX (canonical)
+                                # and PSC/diamond display strings (description).
                                 starting_net_by_security[sec] = starting_net_by_security.get(sec, 0.0) + signed
+                                if canon and canon != sec:
+                                    starting_net_by_security[canon] = starting_net_by_security.get(canon, 0.0) + signed
+                                if desc_key and desc_key != sec:
+                                    starting_net_by_security[desc_key] = starting_net_by_security.get(desc_key, 0.0) + signed
 
                         try:
                             conn.close()

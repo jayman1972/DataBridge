@@ -1704,9 +1704,10 @@ def emsx_options_closeout_check():
                 portfolio = _psc_portfolio_from_request(data)
                 portfolios: List[str] = [portfolio] if portfolio else list(sorted(set(SGGG_FUND_ID_TO_PSC_PORTFOLIO.values())))
 
-                # Use the latest snapshot prior to the report date (calendar -1 day is good enough for this check).
-                prev_compact = _ymd_to_compact((datetime.fromisoformat(date_iso) - timedelta(days=1)).strftime("%Y-%m-%d"))
-                cache_key = f"{prev_compact}||{','.join(portfolios)}"
+                # Use the latest snapshot strictly prior to the report date.
+                # This naturally handles weekends/holidays without needing a trading-day calendar.
+                report_compact = _ymd_to_compact(date_iso)
+                cache_key = f"{report_compact}||{','.join(portfolios)}"
                 if cache_key in _PSC_START_POS_CACHE:
                     starting_net_by_security = dict(_PSC_START_POS_CACHE.get(cache_key) or {})
                     starting_positions_date = (_PSC_START_POS_CACHE_META.get(cache_key) or {}).get("starting_positions_date")
@@ -1721,9 +1722,9 @@ def emsx_options_closeout_check():
                         cursor.execute(
                             f"SELECT PORTFOLIO, MAX(POSN_DATE) AS POSN_DATE "
                             f"FROM psc_position_history "
-                            f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE <= ? "
+                            f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE < ? "
                             f"GROUP BY PORTFOLIO",
-                            tuple(portfolios) + (prev_compact,),
+                            tuple(portfolios) + (report_compact,),
                         )
                         snap_by_portfolio: Dict[str, str] = {}
                         all_snaps: List[str] = []

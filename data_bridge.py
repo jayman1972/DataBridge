@@ -1363,6 +1363,11 @@ def _canonical_option_key(sym: str) -> Optional[str]:
     s = (sym or "").strip().upper()
     if not s:
         return None
+    # PSC sometimes appends market/asset suffixes. Strip common noise.
+    s = re.sub(r"\bEQUITY\b", "", s)
+    s = re.sub(r"\bUS\b", "", s)
+    s = s.replace(".US", "")
+    s = re.sub(r"\s+", " ", s).strip()
 
     # Raw OCC: UNDERLYING + YYMMDD + P/C + STRIKE(8, 3dp implied)
     m = re.match(r"^([A-Z0-9]{1,6})\s*(\d{2})(\d{2})(\d{2})([CP])(\d{8})$", s)
@@ -1374,6 +1379,18 @@ def _canonical_option_key(sym: str) -> Optional[str]:
     m2 = re.match(r"^([A-Z0-9]{1,6})\s+(\d{2})/(\d{2})/(\d{2})\s+([CP])\s*([0-9]+(?:\.[0-9]+)?)$", s)
     if m2:
         und, mm, dd, yy, pc, strike_str = m2.groups()
+        try:
+            strike = float(strike_str)
+        except Exception:
+            return None
+        strike_raw = f"{int(round(strike * 1000.0)):08d}"
+        return f"{und}{yy}{mm}{dd}{pc}{strike_raw}"
+
+    # Alternate display: "SPY 20260424 P705" or "SPY 2026-04-24 P705"
+    m3 = re.match(r"^([A-Z0-9]{1,6})\s+(\d{4})-?(\d{2})-?(\d{2})\s+([CP])\s*([0-9]+(?:\.[0-9]+)?)$", s)
+    if m3:
+        und, yyyy, mm, dd, pc, strike_str = m3.groups()
+        yy = yyyy[2:4]
         try:
             strike = float(strike_str)
         except Exception:
@@ -1755,7 +1772,7 @@ def emsx_options_closeout_check():
                                 continue
                             cursor.execute(
                                 "SELECT SECURITY, LONG_SHORT, QUANTITY FROM psc_position_history "
-                                "WHERE PORTFOLIO = ? AND POSN_DATE = ? AND SECURITY_TYPE = 'EquityOption'",
+                                "WHERE PORTFOLIO = ? AND POSN_DATE = ? AND SECURITY_TYPE IN ('EquityOption','Equity Option')",
                                 (p, snap),
                             )
                             for r in cursor.fetchall() or []:

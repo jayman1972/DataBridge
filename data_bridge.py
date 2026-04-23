@@ -1419,14 +1419,26 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
     def _norm_action(order_action: str) -> str:
         oa = (order_action or "").strip()
         u = oa.upper()
-        # Normalize common variants
-        if u in ("BUY", "B"):
-            return "Buy"
-        if u in ("SELL", "S"):
-            return "Sell"
-        if u in ("BS",):
+        # EMSX Side mappings (exact, no inference):
+        #   B  = Buy to Open
+        #   BS = Buy to Close
+        #   SS = Sell to Open
+        #   S  = Sell to Close
+        if u == "B":
+            return "Buy to Open"
+        if u == "BS":
             return "Buy to Close"
-        if u in ("SELL SHORT", "SS"):
+        if u == "SS":
+            return "Sell to Open"
+        if u == "S":
+            return "Sell to Close"
+
+        # Normalize common variants (PSC / other sources)
+        if u == "BUY":
+            return "Buy to Open"
+        if u == "SELL":
+            return "Sell to Close"
+        if u == "SELL SHORT":
             return "Sell to Open"
         if u in ("BUY COVR", "BC"):
             return "Buy to Close"
@@ -1444,9 +1456,9 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
     def _signed_delta(order_action: str, qty_abs: float) -> float:
         oa = _norm_action(order_action)
         u = oa.upper()
-        if u in ("BUY", "BUY TO OPEN"):
+        if u == "BUY TO OPEN":
             return +qty_abs
-        if u in ("SELL", "SELL TO CLOSE"):
+        if u == "SELL TO CLOSE":
             return -qty_abs
         if u == "SELL TO OPEN":
             return -qty_abs

@@ -1771,13 +1771,18 @@ def emsx_options_closeout_check():
                             if not snap:
                                 continue
                             cursor.execute(
-                                "SELECT SECURITY, LONG_SHORT, QUANTITY FROM psc_position_history "
-                                "WHERE PORTFOLIO = ? AND POSN_DATE = ? AND SECURITY_TYPE IN ('EquityOption','Equity Option')",
+                                # Use DESCRIPTION (the same option display string shown in the fast Portfolio page)
+                                # because PSC's SECURITY field can differ from EMSX/portfolio symbology for options.
+                                "SELECT DESCRIPTION, LONG_SHORT, QUANTITY, SECURITY_TYPE FROM psc_position_history "
+                                "WHERE PORTFOLIO = ? AND POSN_DATE = ? AND SECURITY_TYPE LIKE '%Option%'",
                                 (p, snap),
                             )
                             for r in cursor.fetchall() or []:
-                                sec_raw = (str(r[0]).strip() if r and r[0] is not None else "")
-                                sec = _canonical_option_key(sec_raw) or sec_raw.upper()
+                                # Prefer DESCRIPTION (human-readable symbol) as the key basis.
+                                # Example: "XLE 04/24/26 C57 US Equity" -> should canonicalize to the same OCC key
+                                # as EMSX display / OCC.
+                                desc_raw = (str(r[0]).strip() if r and r[0] is not None else "")
+                                sec = _canonical_option_key(desc_raw) or desc_raw.upper()
                                 ls = (str(r[1]).strip().upper() if len(r) > 1 and r[1] is not None else "")
                                 qty = float(r[2]) if len(r) > 2 and r[2] is not None else 0.0
                                 if not sec:

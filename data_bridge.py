@@ -1761,52 +1761,38 @@ def emsx_options_closeout_check():
                         conn = pyodbc.connect("DSN=PSC_VIEWER")
                         cursor = conn.cursor()
 
-                        # Find the best snapshot per portfolio (fast and prevents "missing yesterday" issues).
+                        # FAST PATH: pick a single snapshot date and pull all option rows in one query.
+                        # This matches the performance characteristics of the Portfolio page and avoids
+                        # per-portfolio snapshot + per-portfolio fetch loops.
                         placeholders = ",".join(["?"] * len(portfolios))
                         cursor.execute(
-                            f"SELECT PORTFOLIO, MAX(POSN_DATE) AS POSN_DATE "
+                            f"SELECT MAX(POSN_DATE) "
                             f"FROM psc_position_history "
-                            f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE < ? "
-                            f"GROUP BY PORTFOLIO",
+                            f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE < ? AND SECURITY_TYPE LIKE '%Option%'",
                             tuple(portfolios) + (report_compact,),
                         )
-                        snap_by_portfolio: Dict[str, str] = {}
-                        all_snaps: List[str] = []
-                        for r in cursor.fetchall() or []:
-                            p = (str(r[0]).strip() if r and r[0] is not None else "")
-                            d = (str(r[1]).strip() if len(r) > 1 and r[1] is not None else "")
-                            if p and d:
-                                snap_by_portfolio[p] = d
-                                all_snaps.append(d)
+                        r = cursor.fetchone()
+                        snap = (str(r[0]).strip() if r and r[0] is not None else "")
+                        starting_positions_date = snap or None
 
-                        starting_positions_date = max(all_snaps) if all_snaps else None
-
-                        for p in portfolios:
-                            snap = snap_by_portfolio.get(p)
-                            if not snap:
-                                continue
+                        if snap:
                             cursor.execute(
-                                # Use DESCRIPTION (the same option display string shown in the fast Portfolio page)
-                                # because PSC's SECURITY field can differ from EMSX/portfolio symbology for options.
-                                "SELECT DESCRIPTION, LONG_SHORT, QUANTITY, SECURITY_TYPE FROM psc_position_history "
-                                "WHERE PORTFOLIO = ? AND POSN_DATE = ? AND SECURITY_TYPE LIKE '%Option%'",
-                                (p, snap),
+                                # Use DESCRIPTION (same display string shown in the Portfolio page) and aggregate across
+                                # all portfolios at the chosen snapshot date.
+                                "SELECT DESCRIPTION, LONG_SHORT, QUANTITY, SECURITY_TYPE, PORTFOLIO FROM psc_position_history "
+                                f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE = ? AND SECURITY_TYPE LIKE '%Option%'",
+                                tuple(portfolios) + (snap,),
                             )
-                            for r in cursor.fetchall() or []:
-                                # Prefer DESCRIPTION (human-readable symbol) as the key basis.
-                                # Example: "XLE 04/24/26 C57 US Equity" -> should canonicalize to the same OCC key
-                                # as EMSX display / OCC.
-                                desc_raw = (str(r[0]).strip() if r and r[0] is not None else "")
+                            for rr in cursor.fetchall() or []:
+                                desc_raw = (str(rr[0]).strip() if rr and rr[0] is not None else "")
                                 canon = _canonical_option_key(desc_raw)
                                 desc_key = _normalize_option_desc_key(desc_raw) or desc_raw.upper()
                                 sec = canon or desc_key
-                                ls = (str(r[1]).strip().upper() if len(r) > 1 and r[1] is not None else "")
-                                qty = float(r[2]) if len(r) > 2 and r[2] is not None else 0.0
+                                ls = (str(rr[1]).strip().upper() if len(rr) > 1 and rr[1] is not None else "")
+                                qty = float(rr[2]) if len(rr) > 2 and rr[2] is not None else 0.0
                                 if not sec:
                                     continue
                                 signed = (qty if ls == "LONG" else -qty if ls == "SHORT" else qty)
-                                # Store both canonical and description keys so we can match EMSX (canonical)
-                                # and PSC/diamond display strings (description).
                                 starting_net_by_security[sec] = starting_net_by_security.get(sec, 0.0) + signed
                                 if canon and canon != sec:
                                     starting_net_by_security[canon] = starting_net_by_security.get(canon, 0.0) + signed

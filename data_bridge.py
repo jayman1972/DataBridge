@@ -212,6 +212,11 @@ SGGG_FUND_ID_TO_PSC_PORTFOLIO: Dict[str, str] = {
     "01010000-801A-4995-8370-45484608DE57": "Exponential Balanced Growth Fund",
 }
 
+# Cache PSC start-of-day option positions by (asof_date, portfolios_key).
+# This avoids repeatedly hitting PSC for the same snapshot when you rerun the report.
+_PSC_START_POS_CACHE: Dict[str, Dict[str, float]] = {}
+_PSC_START_POS_CACHE_META: Dict[str, dict] = {}
+
 
 def _ymd_to_compact(s: str) -> str:
     """YYYY-MM-DD -> YYYYMMDD (or accept YYYYMMDD)."""
@@ -1303,8 +1308,13 @@ def _emsx_history_get_fills(
 
                         # Sometimes OCCSymbol isn't populated, but SecurityName is an OCC-style string. Try both.
                         display = security_name.strip() if _looks_like_option_name(security_name) else (_format_occ(occ_candidate) or security_name.strip() or occ.strip())
-                        # Use a stable key for grouping: prefer OCC (unique), else fallback to display string.
-                        security_key = occ.strip() or (occ_candidate.strip() if _format_occ(occ_candidate) else display)
+                        # Use a stable key for grouping: canonicalize so it matches PSC symbols too.
+                        security_key = (
+                            _canonical_option_key(occ.strip())
+                            or _canonical_option_key(occ_candidate)
+                            or occ.strip()
+                            or (occ_candidate.strip() if _format_occ(occ_candidate) else display)
+                        )
 
                         fills.append({
                             "SECURITY": security_key,
@@ -1340,6 +1350,38 @@ def _emsx_history_get_fills(
             session.stop()
         except Exception:
             pass
+
+
+def _canonical_option_key(sym: str) -> Optional[str]:
+    """
+    Canonical key used to match the same option across data sources.
+
+    Returns OCC-style canonical key without spaces:
+      - "SPY 260424P00705000" -> "SPY260424P00705000"
+      - "SPY 04/24/26 P705"   -> "SPY260424P00705000"
+    """
+    s = (sym or "").strip().upper()
+    if not s:
+        return None
+
+    # Raw OCC: UNDERLYING + YYMMDD + P/C + STRIKE(8, 3dp implied)
+    m = re.match(r"^([A-Z0-9]{1,6})\s*(\d{2})(\d{2})(\d{2})([CP])(\d{8})$", s)
+    if m:
+        und, yy, mm, dd, pc, strike_raw = m.groups()
+        return f"{und}{yy}{mm}{dd}{pc}{strike_raw}"
+
+    # EMSX display: "SPY 04/24/26 P705" (strike may have decimals)
+    m2 = re.match(r"^([A-Z0-9]{1,6})\s+(\d{2})/(\d{2})/(\d{2})\s+([CP])\s*([0-9]+(?:\.[0-9]+)?)$", s)
+    if m2:
+        und, mm, dd, yy, pc, strike_str = m2.groups()
+        try:
+            strike = float(strike_str)
+        except Exception:
+            return None
+        strike_raw = f"{int(round(strike * 1000.0)):08d}"
+        return f"{und}{yy}{mm}{dd}{pc}{strike_raw}"
+
+    return None
 
 
 def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Optional[Dict[str, float]] = None) -> dict:
@@ -1382,6 +1424,8 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
             return "Buy"
         if u in ("SELL", "S"):
             return "Sell"
+        if u in ("BS",):
+            return "Buy to Close"
         if u in ("SELL SHORT", "SS"):
             return "Sell to Open"
         if u in ("BUY COVR", "BC"):
@@ -1414,7 +1458,8 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
     # Key = (SECURITY, ORDER_ID, ORDER_ACTION).
     order_map: Dict[str, dict] = {}
     for t in trades:
-        sec = _s(t.get("SECURITY"))
+        sec_raw = _s(t.get("SECURITY"))
+        sec = _canonical_option_key(sec_raw) or sec_raw
         if not sec:
             continue
         oa = _s(t.get("ORDER_ACTION") or t.get("ORDER") or "")
@@ -1655,39 +1700,68 @@ def emsx_options_closeout_check():
         starting_positions_date = None
         if bool(data.get("use_psc_start_positions") is True):
             try:
-                # Resolve PSC portfolio from fund_id mapping (or explicit portfolio passed)
+                # Resolve PSC portfolios. For "All funds" (no specific mapping), aggregate all known portfolios.
                 portfolio = _psc_portfolio_from_request(data)
-                if portfolio:
+                portfolios: List[str] = [portfolio] if portfolio else list(sorted(set(SGGG_FUND_ID_TO_PSC_PORTFOLIO.values())))
+
+                # Use the latest snapshot prior to the report date (calendar -1 day is good enough for this check).
+                prev_compact = _ymd_to_compact((datetime.fromisoformat(date_iso) - timedelta(days=1)).strftime("%Y-%m-%d"))
+                cache_key = f"{prev_compact}||{','.join(portfolios)}"
+                if cache_key in _PSC_START_POS_CACHE:
+                    starting_net_by_security = dict(_PSC_START_POS_CACHE.get(cache_key) or {})
+                    starting_positions_date = (_PSC_START_POS_CACHE_META.get(cache_key) or {}).get("starting_positions_date")
+                else:
                     pyodbc, err = _pyodbc_or_503()
                     if not err and pyodbc is not None:
                         conn = pyodbc.connect("DSN=PSC_VIEWER")
                         cursor = conn.cursor()
-                        # Use the latest snapshot prior to the report date (calendar -1 day is good enough for this check).
-                        prev_compact = _ymd_to_compact((datetime.fromisoformat(date_iso) - timedelta(days=1)).strftime("%Y-%m-%d"))
+
+                        # Find the best snapshot per portfolio (fast and prevents "missing yesterday" issues).
+                        placeholders = ",".join(["?"] * len(portfolios))
                         cursor.execute(
-                            "SELECT MAX(POSN_DATE) FROM psc_position_history WHERE PORTFOLIO = ? AND POSN_DATE <= ?",
-                            (portfolio, prev_compact),
+                            f"SELECT PORTFOLIO, MAX(POSN_DATE) AS POSN_DATE "
+                            f"FROM psc_position_history "
+                            f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE <= ? "
+                            f"GROUP BY PORTFOLIO",
+                            tuple(portfolios) + (prev_compact,),
                         )
-                        row = cursor.fetchone()
-                        snap = str(row[0]) if row and row[0] is not None else None
-                        if snap:
-                            starting_positions_date = snap
+                        snap_by_portfolio: Dict[str, str] = {}
+                        all_snaps: List[str] = []
+                        for r in cursor.fetchall() or []:
+                            p = (str(r[0]).strip() if r and r[0] is not None else "")
+                            d = (str(r[1]).strip() if len(r) > 1 and r[1] is not None else "")
+                            if p and d:
+                                snap_by_portfolio[p] = d
+                                all_snaps.append(d)
+
+                        starting_positions_date = max(all_snaps) if all_snaps else None
+
+                        for p in portfolios:
+                            snap = snap_by_portfolio.get(p)
+                            if not snap:
+                                continue
                             cursor.execute(
                                 "SELECT SECURITY, LONG_SHORT, QUANTITY FROM psc_position_history "
                                 "WHERE PORTFOLIO = ? AND POSN_DATE = ? AND SECURITY_TYPE = 'EquityOption'",
-                                (portfolio, snap),
+                                (p, snap),
                             )
-                            for r in cursor.fetchall():
-                                sec = (str(r[0]).strip() if r and r[0] is not None else "")
+                            for r in cursor.fetchall() or []:
+                                sec_raw = (str(r[0]).strip() if r and r[0] is not None else "")
+                                sec = _canonical_option_key(sec_raw) or sec_raw.upper()
                                 ls = (str(r[1]).strip().upper() if len(r) > 1 and r[1] is not None else "")
                                 qty = float(r[2]) if len(r) > 2 and r[2] is not None else 0.0
                                 if not sec:
                                     continue
-                                starting_net_by_security[sec] = starting_net_by_security.get(sec, 0.0) + (qty if ls == "LONG" else -qty if ls == "SHORT" else qty)
+                                signed = (qty if ls == "LONG" else -qty if ls == "SHORT" else qty)
+                                starting_net_by_security[sec] = starting_net_by_security.get(sec, 0.0) + signed
+
                         try:
                             conn.close()
                         except Exception:
                             pass
+
+                        _PSC_START_POS_CACHE[cache_key] = dict(starting_net_by_security)
+                        _PSC_START_POS_CACHE_META[cache_key] = {"starting_positions_date": starting_positions_date}
             except Exception:
                 # Don't fail the EMSX check if PSC isn't reachable; just proceed with zero start positions.
                 starting_net_by_security = starting_net_by_security or {}

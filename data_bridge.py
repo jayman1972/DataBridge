@@ -1765,14 +1765,29 @@ def emsx_options_closeout_check():
                         # This matches the performance characteristics of the Portfolio page and avoids
                         # per-portfolio snapshot + per-portfolio fetch loops.
                         placeholders = ",".join(["?"] * len(portfolios))
+                        # Prefer exact SECURITY_TYPE matches for speed (can use indexes).
                         cursor.execute(
                             f"SELECT MAX(POSN_DATE) "
                             f"FROM psc_position_history "
-                            f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE < ? AND SECURITY_TYPE LIKE '%Option%'",
+                            f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE < ? "
+                            f"AND SECURITY_TYPE IN ('EquityOption','Equity Option')",
                             tuple(portfolios) + (report_compact,),
                         )
                         r = cursor.fetchone()
                         snap = (str(r[0]).strip() if r and r[0] is not None else "")
+                        sec_type_filter = "SECURITY_TYPE IN ('EquityOption','Equity Option')"
+                        if not snap:
+                            # Fallback if PSC uses other option type labels.
+                            cursor.execute(
+                                f"SELECT MAX(POSN_DATE) "
+                                f"FROM psc_position_history "
+                                f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE < ? "
+                                f"AND SECURITY_TYPE LIKE '%Option%'",
+                                tuple(portfolios) + (report_compact,),
+                            )
+                            r = cursor.fetchone()
+                            snap = (str(r[0]).strip() if r and r[0] is not None else "")
+                            sec_type_filter = "SECURITY_TYPE LIKE '%Option%'"
                         starting_positions_date = snap or None
 
                         if snap:
@@ -1780,7 +1795,7 @@ def emsx_options_closeout_check():
                                 # Use DESCRIPTION (same display string shown in the Portfolio page) and aggregate across
                                 # all portfolios at the chosen snapshot date.
                                 "SELECT DESCRIPTION, LONG_SHORT, QUANTITY, SECURITY_TYPE, PORTFOLIO FROM psc_position_history "
-                                f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE = ? AND SECURITY_TYPE LIKE '%Option%'",
+                                f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE = ? AND {sec_type_filter}",
                                 tuple(portfolios) + (snap,),
                             )
                             for rr in cursor.fetchall() or []:

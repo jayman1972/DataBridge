@@ -237,6 +237,30 @@ def _compact_to_ymd(s: str) -> Optional[str]:
     return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
 
 
+def _psc_probe_snapshot_before(cursor, portfolio: str, report_compact: str, lookback_days: int = 14) -> Optional[str]:
+    """
+    Resolve latest POSN_DATE strictly before report_compact by probing likely dates with equality.
+    This avoids expensive MAX()/ORDER BY scans which can time out on some PSC installs.
+    """
+    try:
+        report_date = datetime(int(report_compact[:4]), int(report_compact[4:6]), int(report_compact[6:8]))
+    except Exception:
+        return None
+
+    for back in range(1, max(1, int(lookback_days)) + 1):
+        cand = report_date - timedelta(days=back)
+        cand_compact = cand.strftime("%Y%m%d")
+        cursor.execute(
+            "SELECT 1 FROM psc_position_history WHERE PORTFOLIO = ? AND POSN_DATE = ? LIMIT 1",
+            (portfolio, cand_compact),
+        )
+        r = cursor.fetchone()
+        if r:
+            return cand_compact
+
+    return None
+
+
 def _psc_portfolio_from_request(data: dict) -> Optional[str]:
     portfolio = (data.get("portfolio") or "").strip()
     if portfolio:
@@ -1761,44 +1785,8 @@ def emsx_options_closeout_check():
                         conn = pyodbc.connect("DSN=PSC_VIEWER")
                         cursor = conn.cursor()
 
-                        # FAST PATH: pick a single snapshot date and pull all option rows in one query.
-                        # This matches the performance characteristics of the Portfolio page and avoids
-                        # per-portfolio snapshot + per-portfolio fetch loops.
-                        placeholders = ",".join(["?"] * len(portfolios))
-                        # Prefer exact SECURITY_TYPE matches for speed (can use indexes).
-                        cursor.execute(
-                            f"SELECT MAX(POSN_DATE) "
-                            f"FROM psc_position_history "
-                            f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE < ? "
-                            f"AND SECURITY_TYPE IN ('EquityOption','Equity Option')",
-                            tuple(portfolios) + (report_compact,),
-                        )
-                        r = cursor.fetchone()
-                        snap = (str(r[0]).strip() if r and r[0] is not None else "")
-                        sec_type_filter = "SECURITY_TYPE IN ('EquityOption','Equity Option')"
-                        if not snap:
-                            # Fallback if PSC uses other option type labels.
-                            cursor.execute(
-                                f"SELECT MAX(POSN_DATE) "
-                                f"FROM psc_position_history "
-                                f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE < ? "
-                                f"AND SECURITY_TYPE LIKE '%Option%'",
-                                tuple(portfolios) + (report_compact,),
-                            )
-                            r = cursor.fetchone()
-                            snap = (str(r[0]).strip() if r and r[0] is not None else "")
-                            sec_type_filter = "SECURITY_TYPE LIKE '%Option%'"
-                        starting_positions_date = snap or None
-
-                        if snap:
-                            cursor.execute(
-                                # Use DESCRIPTION (same display string shown in the Portfolio page) and aggregate across
-                                # all portfolios at the chosen snapshot date.
-                                "SELECT DESCRIPTION, LONG_SHORT, QUANTITY, SECURITY_TYPE, PORTFOLIO FROM psc_position_history "
-                                f"WHERE PORTFOLIO IN ({placeholders}) AND POSN_DATE = ? AND {sec_type_filter}",
-                                tuple(portfolios) + (snap,),
-                            )
-                            for rr in cursor.fetchall() or []:
+                        def _accumulate_rows(rows: list):
+                            for rr in rows or []:
                                 desc_raw = (str(rr[0]).strip() if rr and rr[0] is not None else "")
                                 canon = _canonical_option_key(desc_raw)
                                 desc_key = _normalize_option_desc_key(desc_raw) or desc_raw.upper()
@@ -1813,6 +1801,44 @@ def emsx_options_closeout_check():
                                     starting_net_by_security[canon] = starting_net_by_security.get(canon, 0.0) + signed
                                 if desc_key and desc_key != sec:
                                     starting_net_by_security[desc_key] = starting_net_by_security.get(desc_key, 0.0) + signed
+
+                        placeholders = ",".join(["?"] * len(portfolios))
+                        sec_type_filter = "SECURITY_TYPE IN ('EquityOption','Equity Option')"
+
+                        if len(portfolios) == 1:
+                            # Single-fund fast path: one probe + one fetch.
+                            snap = _psc_probe_snapshot_before(cursor, portfolios[0], report_compact, lookback_days=14) or ""
+                            starting_positions_date = snap or None
+                            if snap:
+                                cursor.execute(
+                                    "SELECT DESCRIPTION, LONG_SHORT, QUANTITY, SECURITY_TYPE, PORTFOLIO FROM psc_position_history "
+                                    "WHERE PORTFOLIO = ? AND POSN_DATE = ? AND " + sec_type_filter,
+                                    (portfolios[0], snap),
+                                )
+                                _accumulate_rows(cursor.fetchall())
+                        else:
+                            # All-funds path: portfolios can have different latest snapshots.
+                            # Resolve a snapshot per portfolio (fast probes), then fetch per snapshot bucket.
+                            snap_by_portfolio: Dict[str, str] = {}
+                            for p in portfolios:
+                                snap = _psc_probe_snapshot_before(cursor, p, report_compact, lookback_days=14)
+                                if snap:
+                                    snap_by_portfolio[p] = snap
+
+                            snaps_used = sorted(set(snap_by_portfolio.values()))
+                            starting_positions_date = (max(snaps_used) if snaps_used else None)
+
+                            for snap in snaps_used:
+                                ps = [p for p, s in snap_by_portfolio.items() if s == snap]
+                                if not ps:
+                                    continue
+                                ps_placeholders = ",".join(["?"] * len(ps))
+                                cursor.execute(
+                                    "SELECT DESCRIPTION, LONG_SHORT, QUANTITY, SECURITY_TYPE, PORTFOLIO FROM psc_position_history "
+                                    f"WHERE PORTFOLIO IN ({ps_placeholders}) AND POSN_DATE = ? AND {sec_type_filter}",
+                                    tuple(ps) + (snap,),
+                                )
+                                _accumulate_rows(cursor.fetchall())
 
                         try:
                             conn.close()

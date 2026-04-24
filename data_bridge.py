@@ -1795,7 +1795,9 @@ def emsx_options_closeout_check():
                                 qty = float(rr[2]) if len(rr) > 2 and rr[2] is not None else 0.0
                                 if not sec:
                                     continue
-                                signed = (qty if ls == "LONG" else -qty if ls == "SHORT" else qty)
+                                # PSC QUANTITY is already signed (shorts are typically negative).
+                                # Using LONG_SHORT to re-sign can double-flip and break aggregation across funds.
+                                signed = qty
                                 starting_net_by_security[sec] = starting_net_by_security.get(sec, 0.0) + signed
                                 if canon and canon != sec:
                                     starting_net_by_security[canon] = starting_net_by_security.get(canon, 0.0) + signed

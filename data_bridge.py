@@ -212,6 +212,14 @@ SGGG_FUND_ID_TO_PSC_PORTFOLIO: Dict[str, str] = {
     "01010000-801A-4995-8370-45484608DE57": "Exponential Balanced Growth Fund",
 }
 
+# "All funds" for closeout checks should include Alpha even if it's not in the fund-id mapping.
+PSC_ALL_FUNDS_PORTFOLIOS: List[str] = [
+    "EHP Alpha",
+    "EHP Select Alt",
+    "EHP Strat Inc Alt",
+    "EHP Tact Growth Alt",
+]
+
 # Cache PSC start-of-day option positions by (asof_date, portfolios_key).
 # This avoids repeatedly hitting PSC for the same snapshot when you rerun the report.
 _PSC_START_POS_CACHE: Dict[str, Dict[str, float]] = {}
@@ -1770,7 +1778,7 @@ def emsx_options_closeout_check():
             try:
                 # Resolve PSC portfolios. For "All funds" (no specific mapping), aggregate all known portfolios.
                 portfolio = _psc_portfolio_from_request(data)
-                portfolios: List[str] = [portfolio] if portfolio else list(sorted(set(SGGG_FUND_ID_TO_PSC_PORTFOLIO.values())))
+                portfolios: List[str] = [portfolio] if portfolio else list(PSC_ALL_FUNDS_PORTFOLIOS)
 
                 # Use the latest snapshot strictly prior to the report date.
                 # This naturally handles weekends/holidays without needing a trading-day calendar.

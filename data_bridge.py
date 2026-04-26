@@ -964,7 +964,7 @@ def sggg_portfolio():
             sql = (
                 "SELECT STRATEGY, TRADE_GROUP, COMPANY_SYMBOL, DESCRIPTION, SECURITY_TYPE, "
                 "SEC_CCY AS Currency, BBG_TICKER, SECTOR, COUNTRY, LONG_SHORT, QUANTITY, "
-                "AVG_PRICE, CLOSE_PRICE, PRICE_PROFIT, INTEREST, DIVIDENDS, VALUE, EXPOSURE, "
+                "AVG_PRICE, CLOSE_PRICE, PRICE_PROFIT, FX_SETTLE_TO_BASE, INTEREST, DIVIDENDS, VALUE, EXPOSURE, "
                 "DAY_PROFIT, PORTFOLIO_NAV "
                 "FROM psc_position_history "
                 "WHERE PORTFOLIO = 'EHP Select Alt' AND POSN_DATE = ? "
@@ -975,9 +975,9 @@ def sggg_portfolio():
             cursor.execute(sql, (query_date,))
             rows = cursor.fetchall()
             fund_nav = None
-            if rows and rows[0] and rows[0][19] is not None:
+            if rows and rows[0] and rows[0][20] is not None:
                 try:
-                    fund_nav = float(rows[0][19])
+                    fund_nav = float(rows[0][20])
                 except (TypeError, ValueError, IndexError):
                     pass
             nav_date_iso = f"{query_date[:4]}-{query_date[4:6]}-{query_date[6:8]}" if len(query_date) == 8 else query_date
@@ -1004,7 +1004,7 @@ def sggg_portfolio():
 
             positions = []
             for row in rows:
-                exposure = _num(row[17]) if len(row) > 17 else None
+                exposure = _num(row[18]) if len(row) > 18 else None
                 pct_nav = (exposure / fund_nav * 100) if (fund_nav and fund_nav != 0 and exposure is not None) else None
                 positions.append({
                     "strategy": _str(row[0]),
@@ -1021,12 +1021,13 @@ def sggg_portfolio():
                     "avg_price": _num(row[11]) if len(row) > 11 else None,
                     "close_price": _num(row[12]) if len(row) > 12 else None,
                     "price_profit": _num(row[13]) if len(row) > 13 else None,
-                    "interest": _num(row[14]) if len(row) > 14 else None,
-                    "dividends": _num(row[15]) if len(row) > 15 else None,
-                    "value": _num(row[16]) if len(row) > 16 else None,
+                    "FX_SETTLE_TO_BASE": row[14] if len(row) > 14 else None,
+                    "interest": _num(row[15]) if len(row) > 15 else None,
+                    "dividends": _num(row[16]) if len(row) > 16 else None,
+                    "value": _num(row[17]) if len(row) > 17 else None,
                     "exposure": exposure,
                     "exposure_pct_nav": pct_nav,
-                    "day_profit": _num(row[18]) if len(row) > 18 else None,
+                    "day_profit": _num(row[19]) if len(row) > 19 else None,
                     "profit": None,  # PSC query doesn't have Profit column; can add if available
                 })
         finally:
@@ -1160,7 +1161,7 @@ def sggg_options_tax_reconciliation():
         pos_sql = (
             "SELECT "
             "POSN_DATE, PORTFOLIO, STRATEGY, SECURITY, SECURITY_TYPE, SEC_CCY, SEDOL, BBG_TICKER, DESCRIPTION, SECTOR, "
-            "LONG_SHORT, QUANTITY, AVG_PRICE, CLOSE_PRICE, PRICE_PROFIT, POSN_OPEN_DT, POSN_CLOSE_DT, "
+            "LONG_SHORT, QUANTITY, AVG_PRICE, CLOSE_PRICE, PRICE_PROFIT, FX_SETTLE_TO_BASE, POSN_OPEN_DT, POSN_CLOSE_DT, "
             "INTEREST, DIVIDENDS, FEES, VALUE, EXPOSURE, PORTFOLIO_NAV, COUNTRY "
             "FROM psc_position_history "
             "WHERE PORTFOLIO = ? "

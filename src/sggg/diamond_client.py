@@ -46,7 +46,12 @@ class DiamondAPIClient:
         url = f"{self.base_url}/login/"
         payload = {"Username": self.username, "Password": self.password}
         resp = requests.post(url, json=payload, timeout=30)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except Exception as e:
+            body = (resp.text or "").strip()
+            snippet = body[:2000] + ("...(truncated)" if len(body) > 2000 else "")
+            raise RuntimeError(f"Diamond login failed: HTTP {getattr(resp, 'status_code', '?')}: {snippet}") from e
         data = resp.json()
         auth_key = data.get("AuthKey") or data.get("Authkey")
         if not auth_key:
@@ -70,7 +75,12 @@ class DiamondAPIClient:
             "Content-Type": "application/json",
         }
         resp = requests.post(url, json=payload, headers=headers, timeout=120)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except Exception as e:
+            body = (resp.text or "").strip()
+            snippet = body[:2000] + ("...(truncated)" if len(body) > 2000 else "")
+            raise RuntimeError(f"Diamond request failed: {path} HTTP {getattr(resp, 'status_code', '?')}: {snippet}") from e
         if accept_json:
             return resp.json()
         return resp.text

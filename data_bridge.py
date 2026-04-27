@@ -940,13 +940,27 @@ def sggg_portfolio():
     try:
         data = request.get_json(silent=True) or {}
         query_date = request.args.get("date") or data.get("date")
-        fund = request.args.get("fund", "EHP Select Alt").strip()
+        # Prefer query param `fund=` (from the app), but be defensive: some proxies/clients
+        # have been observed to drop non-date params from request.args. Fall back to parsing
+        # the raw query string and/or JSON body.
+        fund = (request.args.get("fund") or "").strip()
+        if not fund:
+            try:
+                from urllib.parse import parse_qs
+                qs = parse_qs((request.query_string or b"").decode("utf-8", errors="ignore"))
+                fund = (qs.get("fund", [""])[0] or "").strip()
+            except Exception:
+                fund = ""
+        if not fund:
+            fund = ((data.get("fund") or data.get("fund_name") or "")).strip()
+        if not fund:
+            fund = "EHP Select Alt"
         if query_date:
             query_date = query_date.replace("-", "")[:8]
         else:
             query_date = datetime.now().strftime("%Y%m%d")
 
-        print(f"[/sggg/portfolio] date={query_date} fund={fund}")
+        print(f"[/sggg/portfolio] date={query_date} fund={fund}", flush=True)
 
         try:
             import pyodbc
@@ -1038,6 +1052,7 @@ def sggg_portfolio():
                 conn.close()
 
         return jsonify({
+            "fund": fund,
             "fund_nav": fund_nav,
             "nav_date": nav_date_iso,
             "usd_cad_rate": usd_cad_rate,

@@ -940,10 +940,13 @@ def sggg_portfolio():
     try:
         data = request.get_json(silent=True) or {}
         query_date = request.args.get("date") or data.get("date")
+        fund = request.args.get("fund", "EHP Select Alt").strip()
         if query_date:
             query_date = query_date.replace("-", "")[:8]
         else:
             query_date = datetime.now().strftime("%Y%m%d")
+
+        print(f"[/sggg/portfolio] date={query_date} fund={fund}")
 
         try:
             import pyodbc
@@ -967,12 +970,12 @@ def sggg_portfolio():
                 "AVG_PRICE, CLOSE_PRICE, PRICE_PROFIT, FX_SETTLE_TO_BASE, INTEREST, DIVIDENDS, VALUE, EXPOSURE, "
                 "DAY_PROFIT, PORTFOLIO_NAV "
                 "FROM psc_position_history "
-                "WHERE PORTFOLIO = 'EHP Select Alt' AND POSN_DATE = ? "
+                "WHERE PORTFOLIO = ? AND POSN_DATE = ? "
                 "AND SECURITY_TYPE IN ('Stock', 'EquityOption', 'LeveragedETF', 'Futures') "
                 "AND STRATEGY <> 'Risk Arbitrage' "
                 "ORDER BY STRATEGY, TRADE_GROUP, COMPANY_SYMBOL"
             )
-            cursor.execute(sql, (query_date,))
+            cursor.execute(sql, (fund, query_date))
             rows = cursor.fetchall()
             fund_nav = None
             if rows and rows[0] and rows[0][20] is not None:

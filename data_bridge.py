@@ -16,6 +16,8 @@ import traceback
 import time
 import threading
 import re
+import socket
+import subprocess
 from datetime import datetime, timedelta, timezone, time as dt_time, date as date_type
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -2901,6 +2903,61 @@ def _ibkr_tickle_loop() -> None:
             pass
 
 
+def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """
+    Best-effort check to prevent accidentally running multiple DataBridge instances.
+    Returns True if we cannot bind the (host, port) tuple.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        # Avoid keeping the port reserved; we just probe.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        s.bind((host, int(port)))
+        return False
+    except OSError:
+        return True
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _listening_pids_windows(port: int) -> List[int]:
+    """Return PIDs listening on 127.0.0.1:port (Windows-only, best-effort)."""
+    try:
+        out = subprocess.check_output(["netstat", "-ano", "-p", "tcp"], text=True, errors="replace")
+    except Exception:
+        return []
+
+    pids: List[int] = []
+    needle = f":{int(port)}"
+    for line in out.splitlines():
+        # Example: TCP  127.0.0.1:5000  0.0.0.0:0  LISTENING  71832
+        if "LISTENING" not in line:
+            continue
+        if needle not in line:
+            continue
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            pid = int(parts[-1])
+        except Exception:
+            continue
+        pids.append(pid)
+
+    # De-dupe while keeping order.
+    seen = set()
+    deduped: List[int] = []
+    for pid in pids:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        deduped.append(pid)
+    return deduped
+
+
 if __name__ == "__main__":
     try:
         if hasattr(sys.stdout, "reconfigure"):
@@ -2909,6 +2966,14 @@ if __name__ == "__main__":
             sys.stderr.reconfigure(line_buffering=True)
     except Exception:
         pass
+
+    # Guard: avoid running multiple listeners on the same port.
+    if _port_in_use(SERVICE_PORT, host="127.0.0.1"):
+        pids = _listening_pids_windows(SERVICE_PORT)
+        pid_hint = f" (PID(s): {', '.join(str(p) for p in pids)})" if pids else ""
+        print(f"[FATAL] Port {SERVICE_PORT} is already in use{pid_hint}.", file=sys.stderr)
+        print("Stop the existing DataBridge process before starting another.", file=sys.stderr)
+        sys.exit(1)
     try:
         print("=" * 60)
         print("Data Bridge Service")

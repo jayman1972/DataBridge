@@ -55,8 +55,11 @@ if ($existingNgrokUrl) {
     } catch { }
 
     if ($existingTunnelHealthy) {
-        Write-Host "Ngrok tunnel already running: $existingNgrokUrl" -ForegroundColor Green
-        exit 0
+        # Reuse the existing tunnel instead of exiting early. This keeps the
+        # startup UX consistent (secrets update + health monitor) and avoids
+        # dropping back to the batch file's trailing `pause`.
+        Write-Host "Ngrok tunnel already running: $existingNgrokUrl (reusing)" -ForegroundColor Green
+        $ngrokUrl = $existingNgrokUrl
     }
 }
 
@@ -87,31 +90,33 @@ function Update-SupabaseSecret {
     } finally { Pop-Location }
 }
 
-Write-Host "Starting ngrok on port $PORT..." -ForegroundColor Yellow
-# Prefer passed path, then local ngrok.exe, then ngrok from PATH
-$ngrokExe = $NgrokPath
-if (-not $ngrokExe) {
-    $localNgrok = Join-Path $SCRIPT_DIR "ngrok.exe"
-    if (Test-Path $localNgrok) {
-        $ngrokExe = $localNgrok
-    } else {
-        $ngrokExe = "ngrok"
-    }
-}
-$ngrokProcess = Start-Process -FilePath $ngrokExe -ArgumentList "http", $PORT -NoNewWindow -PassThru -RedirectStandardOutput "ngrok_output.txt" -RedirectStandardError "ngrok_error.txt"
-Start-Sleep -Seconds 3
-
-$ngrokUrl = $null
-for ($i = 0; $i -lt 10; $i++) {
-    try {
-        $api = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -ErrorAction SilentlyContinue
-        if ($api.tunnels -and $api.tunnels.Count -gt 0) {
-            $ngrokUrl = ($api.tunnels | Where-Object { $_.public_url -like "https://*" } | Select-Object -First 1).public_url
-            if (-not $ngrokUrl) { $ngrokUrl = $api.tunnels[0].public_url }
-            break
+if (-not $ngrokUrl) {
+    Write-Host "Starting ngrok on port $PORT..." -ForegroundColor Yellow
+    # Prefer passed path, then local ngrok.exe, then ngrok from PATH
+    $ngrokExe = $NgrokPath
+    if (-not $ngrokExe) {
+        $localNgrok = Join-Path $SCRIPT_DIR "ngrok.exe"
+        if (Test-Path $localNgrok) {
+            $ngrokExe = $localNgrok
+        } else {
+            $ngrokExe = "ngrok"
         }
-    } catch { }
-    Start-Sleep -Seconds 1
+    }
+    $ngrokProcess = Start-Process -FilePath $ngrokExe -ArgumentList "http", $PORT -NoNewWindow -PassThru -RedirectStandardOutput "ngrok_output.txt" -RedirectStandardError "ngrok_error.txt"
+    Start-Sleep -Seconds 3
+
+    $ngrokUrl = $null
+    for ($i = 0; $i -lt 10; $i++) {
+        try {
+            $api = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -ErrorAction SilentlyContinue
+            if ($api.tunnels -and $api.tunnels.Count -gt 0) {
+                $ngrokUrl = ($api.tunnels | Where-Object { $_.public_url -like "https://*" } | Select-Object -First 1).public_url
+                if (-not $ngrokUrl) { $ngrokUrl = $api.tunnels[0].public_url }
+                break
+            }
+        } catch { }
+        Start-Sleep -Seconds 1
+    }
 }
 
 if ($ngrokUrl) {

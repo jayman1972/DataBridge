@@ -133,20 +133,27 @@ set "CLARIFI_DIR=%USERPROFILE%\OneDrive\Desktop\EHP_Files\DailyExports from Clar
 echo Using CLARIFI_DIR=%CLARIFI_DIR%
 
 REM Check if Data Bridge is already running (idempotent)
-set "BRIDGE_PID="
-for /f "tokens=1-5" %%A in ('netstat -ano ^| findstr /R /C":%PORT% " ^| findstr LISTENING') do (
-    set "BRIDGE_PID=%%E"
-)
+echo Checking for existing Data Bridge on port %PORT%...
+REM Kill any existing data_bridge.py listeners so the tunnel starts cleanly.
+REM (Only targets python processes whose command line includes data_bridge.py.)
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$port=%PORT%; " ^
+  "$conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue; " ^
+  "if ($conns) { " ^
+  "  foreach ($c in $conns) { " ^
+  "    $procId = $c.OwningProcess; " ^
+  "    try { $p = Get-CimInstance Win32_Process -Filter \"ProcessId=$procId\" -ErrorAction SilentlyContinue } catch { $p = $null }; " ^
+  "    if ($p -and $p.CommandLine -match 'data_bridge\.py') { " ^
+  "      Write-Host \"Stopping existing Data Bridge (PID $procId)...\" -ForegroundColor Yellow; " ^
+  "      try { Stop-Process -Id $procId -Force -ErrorAction Stop } catch { Write-Host \"  Failed to stop PID ${procId} - $($_.Exception.Message)\" -ForegroundColor Red } " ^
+  "    } " ^
+  "  } " ^
+  "} "
 
-if defined BRIDGE_PID (
-    echo Detected existing Data Bridge on port %PORT% (PID %BRIDGE_PID%)
-    echo Skipping launch of a second service.
-) else (
-    echo Starting Data Bridge service...
-    set DATA_BRIDGE_DEBUG=1
-    start "Data Bridge Service" cmd /k "cd /d %~dp0 && set DATA_BRIDGE_DEBUG=1 && python data_bridge.py"
-    timeout /t 3 /nobreak >nul
-)
+echo Starting Data Bridge service...
+set DATA_BRIDGE_DEBUG=1
+start "Data Bridge Service" cmd /k "cd /d %~dp0 && set DATA_BRIDGE_DEBUG=1 && python data_bridge.py"
+timeout /t 3 /nobreak >nul
 
 REM Check for ngrok (local ngrok.exe or in PATH)
 set "NGROK_CMD=%~dp0ngrok.exe"

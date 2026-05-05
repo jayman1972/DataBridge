@@ -979,7 +979,7 @@ def sggg_portfolio():
             conn = pyodbc.connect("DSN=PSC_VIEWER")
             cursor = conn.cursor()
 
-            # Full report query (same as FetchEHPSelectAltData)
+            # Full report query (no strategy filtering; strategies are internal only).
             sql = (
                 "SELECT STRATEGY, TRADE_GROUP, COMPANY_SYMBOL, DESCRIPTION, SECURITY_TYPE, "
                 "SEC_CCY AS Currency, BBG_TICKER, SECTOR, COUNTRY, LONG_SHORT, QUANTITY, "
@@ -988,7 +988,6 @@ def sggg_portfolio():
                 "FROM psc_position_history "
                 "WHERE PORTFOLIO = ? AND POSN_DATE = ? "
                 "AND SECURITY_TYPE IN ('Stock', 'EquityOption', 'LeveragedETF', 'Futures') "
-                "AND STRATEGY <> 'Risk Arbitrage' "
                 "ORDER BY STRATEGY, TRADE_GROUP, COMPANY_SYMBOL"
             )
             cursor.execute(sql, (fund, query_date))

@@ -979,26 +979,45 @@ def sggg_portfolio():
             conn = pyodbc.connect("DSN=PSC_VIEWER")
             cursor = conn.cursor()
 
-            # Full report query (no strategy filtering; strategies are internal only).
-            # Some PSC portfolios have minor naming variants (suffixes, spacing). Use an exact match
-            # first, but fall back to a prefix LIKE match so Fund Admin exports don't silently
-            # return empty for valid funds.
+            # IMPORTANT: For external reporting, do NOT filter by STRATEGY or SECURITY_TYPE.
+            # Strategies/security-type whitelists are internal and can cause valid portfolios
+            # (e.g. credit/income) to return empty.
+            #
+            # Use POSN_DATE_INT (YYYYMMDD) to match VBA usage and avoid POSN_DATE type differences.
+            #
+            # Some PSC portfolios have minor naming variants (suffixes, spacing). Use an exact match first,
+            # but fall back to a prefix LIKE match so valid funds don't silently return empty.
             sql = (
-                "SELECT STRATEGY, TRADE_GROUP, COMPANY_SYMBOL, DESCRIPTION, SECURITY_TYPE, "
-                "SEC_CCY AS Currency, BBG_TICKER, SECTOR, COUNTRY, LONG_SHORT, QUANTITY, "
-                "AVG_PRICE, CLOSE_PRICE, PRICE_PROFIT, FX_SETTLE_TO_BASE, INTEREST, DIVIDENDS, VALUE, EXPOSURE, "
-                "DAY_PROFIT, PORTFOLIO_NAV "
-                "FROM psc_position_history "
-                "WHERE (PORTFOLIO = ? OR PORTFOLIO LIKE ?) AND POSN_DATE = ? "
-                "AND SECURITY_TYPE IN ('Stock', 'EquityOption', 'LeveragedETF', 'Futures') "
-                "ORDER BY STRATEGY, TRADE_GROUP, COMPANY_SYMBOL"
+                "SELECT "
+                "  ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.SECURITY_TYPE, "
+                "  ph.SEC_CCY AS Currency, ph.BBG_TICKER, ph.SECTOR, ph.COUNTRY, ph.LONG_SHORT, "
+                "  sd.SEDOL, "
+                "  SUM(ph.QUANTITY) AS QUANTITY, "
+                "  AVG(ph.AVG_PRICE) AS AVG_PRICE, "
+                "  MAX(ph.CLOSE_PRICE) AS CLOSE_PRICE, "
+                "  SUM(ph.PRICE_PROFIT) AS PRICE_PROFIT, "
+                "  MAX(ph.FX_SETTLE_TO_BASE) AS FX_SETTLE_TO_BASE, "
+                "  SUM(ph.INTEREST) AS INTEREST, "
+                "  SUM(ph.DIVIDENDS) AS DIVIDENDS, "
+                "  SUM(ph.VALUE) AS VALUE, "
+                "  SUM(ph.EXPOSURE) AS EXPOSURE, "
+                "  SUM(ph.DAY_PROFIT) AS DAY_PROFIT, "
+                "  MAX(ph.PORTFOLIO_NAV) AS PORTFOLIO_NAV "
+                "FROM psc_position_history ph "
+                "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
+                "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? "
+                "GROUP BY "
+                "  ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.SECURITY_TYPE, "
+                "  ph.SEC_CCY, ph.BBG_TICKER, ph.SECTOR, ph.COUNTRY, ph.LONG_SHORT, sd.SEDOL "
+                "ORDER BY ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL"
             )
             cursor.execute(sql, (fund, f"{fund}%", query_date))
             rows = cursor.fetchall()
             fund_nav = None
-            if rows and rows[0] and rows[0][20] is not None:
+            # PORTFOLIO_NAV is the last selected column
+            if rows and rows[0] and rows[0][-1] is not None:
                 try:
-                    fund_nav = float(rows[0][20])
+                    fund_nav = float(rows[0][-1])
                 except (TypeError, ValueError, IndexError):
                     pass
             nav_date_iso = f"{query_date[:4]}-{query_date[4:6]}-{query_date[6:8]}" if len(query_date) == 8 else query_date
@@ -1025,7 +1044,8 @@ def sggg_portfolio():
 
             positions = []
             for row in rows:
-                exposure = _num(row[18]) if len(row) > 18 else None
+                # EXPOSURE index after adding SEDOL + aggregations
+                exposure = _num(row[19]) if len(row) > 19 else None
                 pct_nav = (exposure / fund_nav * 100) if (fund_nav and fund_nav != 0 and exposure is not None) else None
                 positions.append({
                     "strategy": _str(row[0]),
@@ -1038,17 +1058,18 @@ def sggg_portfolio():
                     "sector": _str(row[7]),
                     "country": _str(row[8]),
                     "long_short": _str(row[9]),
-                    "quantity": _num(row[10]) if len(row) > 10 else None,
-                    "avg_price": _num(row[11]) if len(row) > 11 else None,
-                    "close_price": _num(row[12]) if len(row) > 12 else None,
-                    "price_profit": _num(row[13]) if len(row) > 13 else None,
-                    "FX_SETTLE_TO_BASE": row[14] if len(row) > 14 else None,
-                    "interest": _num(row[15]) if len(row) > 15 else None,
-                    "dividends": _num(row[16]) if len(row) > 16 else None,
-                    "value": _num(row[17]) if len(row) > 17 else None,
+                    "sedol": _str(row[10]),
+                    "quantity": _num(row[11]) if len(row) > 11 else None,
+                    "avg_price": _num(row[12]) if len(row) > 12 else None,
+                    "close_price": _num(row[13]) if len(row) > 13 else None,
+                    "price_profit": _num(row[14]) if len(row) > 14 else None,
+                    "FX_SETTLE_TO_BASE": row[15] if len(row) > 15 else None,
+                    "interest": _num(row[16]) if len(row) > 16 else None,
+                    "dividends": _num(row[17]) if len(row) > 17 else None,
+                    "value": _num(row[18]) if len(row) > 18 else None,
                     "exposure": exposure,
                     "exposure_pct_nav": pct_nav,
-                    "day_profit": _num(row[19]) if len(row) > 19 else None,
+                    "day_profit": _num(row[20]) if len(row) > 20 else None,
                     "profit": None,  # PSC query doesn't have Profit column; can add if available
                 })
         finally:

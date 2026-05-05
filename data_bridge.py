@@ -980,17 +980,20 @@ def sggg_portfolio():
             cursor = conn.cursor()
 
             # Full report query (no strategy filtering; strategies are internal only).
+            # Some PSC portfolios have minor naming variants (suffixes, spacing). Use an exact match
+            # first, but fall back to a prefix LIKE match so Fund Admin exports don't silently
+            # return empty for valid funds.
             sql = (
                 "SELECT STRATEGY, TRADE_GROUP, COMPANY_SYMBOL, DESCRIPTION, SECURITY_TYPE, "
                 "SEC_CCY AS Currency, BBG_TICKER, SECTOR, COUNTRY, LONG_SHORT, QUANTITY, "
                 "AVG_PRICE, CLOSE_PRICE, PRICE_PROFIT, FX_SETTLE_TO_BASE, INTEREST, DIVIDENDS, VALUE, EXPOSURE, "
                 "DAY_PROFIT, PORTFOLIO_NAV "
                 "FROM psc_position_history "
-                "WHERE PORTFOLIO = ? AND POSN_DATE = ? "
+                "WHERE (PORTFOLIO = ? OR PORTFOLIO LIKE ?) AND POSN_DATE = ? "
                 "AND SECURITY_TYPE IN ('Stock', 'EquityOption', 'LeveragedETF', 'Futures') "
                 "ORDER BY STRATEGY, TRADE_GROUP, COMPANY_SYMBOL"
             )
-            cursor.execute(sql, (fund, query_date))
+            cursor.execute(sql, (fund, f"{fund}%", query_date))
             rows = cursor.fetchall()
             fund_nav = None
             if rows and rows[0] and rows[0][20] is not None:

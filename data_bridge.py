@@ -985,8 +985,9 @@ def sggg_portfolio():
             #
             # Use POSN_DATE_INT (YYYYMMDD) to match VBA usage and avoid POSN_DATE type differences.
             #
-            # Some PSC portfolios have minor naming variants (suffixes, spacing). Use an exact match first,
-            # but fall back to a prefix LIKE match so valid funds don't silently return empty.
+            # Some PSC portfolios have minor naming variants (suffixes, spacing). Prefer an exact match,
+            # and only fall back to a prefix LIKE when the exact match returns zero rows. This avoids
+            # ambiguous matches like "EHP Alpha" accidentally pulling "EHP Alpha Hedge".
             sql = (
                 "SELECT "
                 "  ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.SECURITY_TYPE, "
@@ -1011,8 +1012,19 @@ def sggg_portfolio():
                 "  ph.SEC_CCY, ph.BBG_TICKER, ph.SECTOR, ph.COUNTRY, ph.LONG_SHORT, sd.SEDOL "
                 "ORDER BY ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL"
             )
-            cursor.execute(sql, (fund, f"{fund}%", query_date))
+            sql_exact = sql.replace(
+                "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
+                "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? ",
+            )
+            cursor.execute(sql_exact, (fund, query_date))
             rows = cursor.fetchall()
+            if not rows:
+                sql_like = sql.replace(
+                    "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
+                    "WHERE ph.PORTFOLIO LIKE ? AND ph.POSN_DATE_INT = ? ",
+                )
+                cursor.execute(sql_like, (f"{fund}%", query_date))
+                rows = cursor.fetchall()
             fund_nav = None
             # PORTFOLIO_NAV is the last selected column
             if rows and rows[0] and rows[0][-1] is not None:

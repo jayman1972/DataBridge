@@ -291,6 +291,7 @@ class BLPAPIClient(BloombergClientBase):
         self,
         tickers: List[str],
         fields: List[str],
+        overrides: Optional[Dict[str, str]] = None,
         session: Any = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Fetch reference/EOD data using blpapi (BDP).
@@ -317,6 +318,19 @@ class BLPAPIClient(BloombergClientBase):
 
             for field in fields:
                 blp_request.getElement("fields").appendValue(field)
+
+            if overrides:
+                overrides_el = blp_request.getElement("overrides")
+                for field_id, value in overrides.items():
+                    if field_id is None or value is None:
+                        continue
+                    fid = str(field_id).strip()
+                    val = str(value).strip()
+                    if not fid or not val:
+                        continue
+                    ov = overrides_el.appendElement()
+                    ov.setElement("fieldId", fid)
+                    ov.setElement("value", val)
 
             sess.sendRequest(blp_request)
             

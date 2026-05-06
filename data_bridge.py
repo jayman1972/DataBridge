@@ -835,13 +835,16 @@ def historical():
 
 @app.route("/reference", methods=["POST"])
 def reference():
-    """Bloomberg reference/EOD data - format: { symbols, fields }. Returns { reference_data: { TICKER: [{date, ...}] } }."""
+    """Bloomberg reference/EOD data - format: { symbols, fields, overrides? }. Returns { reference_data: { TICKER: [{date, ...}] } }."""
     try:
         data = request.get_json() or {}
         symbols = data.get("symbols") or []
         fields = data.get("fields") or []
+        overrides = data.get("overrides") or None
         if not symbols or not fields:
             return jsonify({"error": "symbols and fields are required"}), 400
+        if overrides is not None and not isinstance(overrides, dict):
+            return jsonify({"error": "overrides must be an object/dict"}), 400
 
         print(f"[DataBridge reference] REQUEST (full): symbols={symbols} fields={fields}", flush=True)
         _bbg_logger.info(
@@ -850,7 +853,7 @@ def reference():
             fields,
             symbols[:12] if len(symbols) > 12 else symbols,
         )
-        ref_data = bloomberg_client.get_reference_data(tickers=symbols, fields=fields)
+        ref_data = bloomberg_client.get_reference_data(tickers=symbols, fields=fields, overrides=overrides)
         ser = _log_serialize(ref_data)
         print(
             f"[DataBridge reference] RESPONSE (full from Bloomberg): {json.dumps(ser, default=str, indent=2)}",

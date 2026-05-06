@@ -43,7 +43,8 @@ class BloombergClientBase(ABC):
     def get_reference_data(
         self,
         tickers: List[str],
-        fields: List[str]
+        fields: List[str],
+        overrides: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """
         Fetch reference/EOD data for tickers.
@@ -51,6 +52,7 @@ class BloombergClientBase(ABC):
         Args:
             tickers: List of Bloomberg tickers
             fields: List of field names
+            overrides: Optional Bloomberg overrides dict (e.g. BDP overrides)
             
         Returns:
             Dictionary mapping ticker to field values.

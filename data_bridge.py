@@ -51,7 +51,7 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 
 from bloomberg import get_bloomberg_client, BloombergClientType
-from sggg.diamond_client import DiamondNavUnavailableError, get_diamond_client
+from sggg.diamond_client import DiamondNavUnavailableError, fetch_nav_sheet, get_diamond_client
 from sggg.nav_sheet_parse import normalize_valuation_date, parse_nav_sheet_summary
 
 from supabase import create_client, Client
@@ -2200,7 +2200,12 @@ def sggg_diamond_nav_availability():
         else:
             fund_specs = [{"id": fid, "name": ""} for fid in _get_diamond_fund_ids()]
 
-        def _fetch_one(spec: Dict[str, str]) -> Dict[str, Any]:
+        auth_key = client._ensure_auth()
+        max_workers = min(8, max(1, len(fund_specs)))
+        started = time.time()
+        results: List[Dict[str, Any]] = [None] * len(fund_specs)  # type: ignore[list-item]
+
+        def _fetch_one_parallel(spec: Dict[str, str]) -> Dict[str, Any]:
             fid = spec["id"]
             name = spec.get("name") or fid
             entry: Dict[str, Any] = {
@@ -2212,7 +2217,12 @@ def sggg_diamond_nav_availability():
                 "classes": [],
             }
             try:
-                raw = client.get_nav_sheet(fund_id=fid, valuation_date=valuation_date)
+                raw = fetch_nav_sheet(
+                    client.base_url,
+                    fid,
+                    valuation_date,
+                    auth_key=auth_key,
+                )
                 summary = parse_nav_sheet_summary(raw)
                 entry["classes"] = summary.get("classes") or []
                 entry["status"] = "available" if summary.get("available") else "unavailable"
@@ -2224,16 +2234,21 @@ def sggg_diamond_nav_availability():
                 entry["error"] = str(exc)
             return entry
 
-        client._ensure_auth()
-        max_workers = min(8, max(1, len(fund_specs)))
-        results: List[Dict[str, Any]] = [None] * len(fund_specs)  # type: ignore[list-item]
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
-                executor.submit(_fetch_one, spec): idx for idx, spec in enumerate(fund_specs)
+                executor.submit(_fetch_one_parallel, spec): idx for idx, spec in enumerate(fund_specs)
             }
             for future in as_completed(future_map):
                 idx = future_map[future]
                 results[idx] = future.result()
+
+        elapsed = time.time() - started
+        logging.getLogger(__name__).info(
+            "nav-availability: %d funds in %.2fs (workers=%d)",
+            len(fund_specs),
+            elapsed,
+            max_workers,
+        )
 
         return jsonify({"valuation_date": valuation_date, "funds": results})
     except Exception as e:

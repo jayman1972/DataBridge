@@ -80,28 +80,11 @@ class DiamondAPIClient:
         path: str,
         payload: Dict[str, Any],
         accept_json: bool = True,
+        *,
+        auth_key: Optional[str] = None,
     ) -> Any:
-        auth = self._ensure_auth()
-        url = f"{self.base_url}/{path.lstrip('/')}"
-        # Diamond docs: send `Authorization: AuthKey <token>`.
-        # API error text mentions "Missing AuthKey", so also include
-        # a direct `AuthKey` header for maximum compatibility.
-        headers = {
-            "Authorization": f"AuthKey {auth}",
-            "AuthKey": auth,
-            "Content-Type": "application/json",
-        }
-        # Use module-level requests.post (not Session) so parallel fund fetches are thread-safe.
-        resp = requests.post(url, json=payload, headers=headers, timeout=120)
-        try:
-            resp.raise_for_status()
-        except Exception as e:
-            body = (resp.text or "").strip()
-            snippet = body[:2000] + ("...(truncated)" if len(body) > 2000 else "")
-            raise RuntimeError(f"Diamond request failed: {path} HTTP {getattr(resp, 'status_code', '?')}: {snippet}") from e
-        if accept_json:
-            return resp.json()
-        return resp.text
+        auth = auth_key or self._ensure_auth()
+        return _diamond_post(self.base_url, path, payload, auth, accept_json=accept_json)
 
     def get_portfolio(
         self,
@@ -145,18 +128,19 @@ class DiamondAPIClient:
             payload["EndDate"] = end_date
         return self._post("GetPortfolioTrades/", payload)
 
-    def get_nav_sheet(self, fund_id: str, valuation_date: str) -> Any:
-        payload = {"FundID": fund_id, "ValuationDate": valuation_date}
-        try:
-            return self._post("GetNAVSheet/", payload)
-        except RuntimeError as exc:
-            parsed = parse_diamond_nav_unavailable(exc, valuation_date)
-            if parsed:
-                raise DiamondNavUnavailableError(
-                    parsed["message"],
-                    end_date=parsed["end_date"],
-                ) from exc
-            raise
+    def get_nav_sheet(
+        self,
+        fund_id: str,
+        valuation_date: str,
+        *,
+        auth_key: Optional[str] = None,
+    ) -> Any:
+        return fetch_nav_sheet(
+            self.base_url,
+            fund_id,
+            valuation_date,
+            auth_key=auth_key or self._ensure_auth(),
+        )
 
     def get_fund_details(self, fund_id: str) -> Any:
         payload = {"FundID": fund_id}
@@ -165,6 +149,57 @@ class DiamondAPIClient:
 
 _cached_diamond_client: Optional[DiamondAPIClient] = None
 _cached_diamond_credentials: Optional[Tuple[str, str]] = None
+
+
+def _diamond_post(
+    base_url: str,
+    path: str,
+    payload: Dict[str, Any],
+    auth_key: str,
+    *,
+    accept_json: bool = True,
+) -> Any:
+    """Thread-safe Diamond POST (no client lock during HTTP)."""
+    if not REQUESTS_AVAILABLE:
+        raise ImportError("requests package required. pip install requests")
+    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    headers = {
+        "Authorization": f"AuthKey {auth_key}",
+        "AuthKey": auth_key,
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=120)
+    try:
+        resp.raise_for_status()
+    except Exception as e:
+        body = (resp.text or "").strip()
+        snippet = body[:2000] + ("...(truncated)" if len(body) > 2000 else "")
+        raise RuntimeError(
+            f"Diamond request failed: {path} HTTP {getattr(resp, 'status_code', '?')}: {snippet}"
+        ) from e
+    if accept_json:
+        return resp.json()
+    return resp.text
+
+
+def fetch_nav_sheet(
+    base_url: str,
+    fund_id: str,
+    valuation_date: str,
+    *,
+    auth_key: str,
+) -> Any:
+    payload = {"FundID": fund_id, "ValuationDate": valuation_date}
+    try:
+        return _diamond_post(base_url, "GetNAVSheet/", payload, auth_key)
+    except RuntimeError as exc:
+        parsed = parse_diamond_nav_unavailable(exc, valuation_date)
+        if parsed:
+            raise DiamondNavUnavailableError(
+                parsed["message"],
+                end_date=parsed["end_date"],
+            ) from exc
+        raise
 
 
 def get_diamond_client() -> Optional[DiamondAPIClient]:

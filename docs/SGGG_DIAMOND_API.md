@@ -2,6 +2,10 @@
 
 The Diamond API provides programmatic access to SGGG fund data (GetPortfolio, GetPortfolioTrades, etc.). It runs **in parallel** with the PSC/ODBC approach—use both as needed.
 
+**Vendor reference (spec + XML samples):** [docs/vendor/README.md](./vendor/README.md)  
+**All known endpoints:** [SGGG_DIAMOND_ENDPOINTS.md](./SGGG_DIAMOND_ENDPOINTS.md)  
+**Response field lists (from samples):** [SGGG_DIAMOND_RESPONSE_FIELDS.md](./SGGG_DIAMOND_RESPONSE_FIELDS.md)
+
 ## Prerequisites
 
 - Credentials from SGGG-FSI (Username, Password)

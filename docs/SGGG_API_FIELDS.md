@@ -2,6 +2,8 @@
 
 Reference for valid fields from the SGGG (PSC) position history API. Use when querying `psc_position_history` or similar views via ODBC (DSN=PSC_VIEWER).
 
+For the **Diamond HTTP API** (GetPortfolio / trades), see [vendor/Diamond API Specifications v1.17.docx](./vendor/Diamond%20API%20Specifications%20v1.17.docx) and [SGGG_DIAMOND_RESPONSE_FIELDS.md](./SGGG_DIAMOND_RESPONSE_FIELDS.md).
+
 ## Field Schema
 
 | Field | Type | Null | Key | Default | Comment |

@@ -51,7 +51,7 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 
 from bloomberg import get_bloomberg_client, BloombergClientType
-from sggg.diamond_client import get_diamond_client
+from sggg.diamond_client import DiamondNavUnavailableError, get_diamond_client
 from sggg.nav_sheet_parse import normalize_valuation_date, parse_nav_sheet_summary
 
 from supabase import create_client, Client
@@ -2147,10 +2147,21 @@ def sggg_diamond_nav_sheet():
         summary = parse_nav_sheet_summary(raw)
         return jsonify(
             {
+                "status": "available" if summary.get("available") else "unavailable",
                 "valuation_date": valuation_date,
                 "fund_id": fund_id,
                 "raw": raw,
                 "summary": summary,
+            }
+        )
+    except DiamondNavUnavailableError as exc:
+        return jsonify(
+            {
+                "status": "unavailable",
+                "valuation_date": valuation_date,
+                "fund_id": fund_id,
+                "unavailable_end_date": exc.end_date,
+                "message": exc.user_message,
             }
         )
     except Exception as e:
@@ -2197,6 +2208,7 @@ def sggg_diamond_nav_availability():
                 "fund_name": name,
                 "status": "unavailable",
                 "error": None,
+                "message": None,
                 "classes": [],
             }
             try:
@@ -2204,6 +2216,9 @@ def sggg_diamond_nav_availability():
                 summary = parse_nav_sheet_summary(raw)
                 entry["classes"] = summary.get("classes") or []
                 entry["status"] = "available" if summary.get("available") else "unavailable"
+            except DiamondNavUnavailableError as exc:
+                entry["status"] = "unavailable"
+                entry["message"] = exc.user_message
             except Exception as exc:
                 entry["status"] = "error"
                 entry["error"] = str(exc)

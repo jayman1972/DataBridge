@@ -106,3 +106,31 @@ def normalize_valuation_date(raw: str) -> str:
     if len(compact) == 8 and compact.isdigit():
         return f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
     raise ValueError(f"Invalid valuation_date: {raw}")
+
+
+_END_DATE_IN_MESSAGE = re.compile(r"End Date:\s*(\d{4}-\d{2}-\d{2})", re.IGNORECASE)
+_NOT_FINALIZED_PHRASES = (
+    "not yet been finalized",
+    "has not been finalized",
+    "not been finalized",
+)
+
+
+def nav_unavailable_user_message(end_date: str) -> str:
+    return f"NAV not available yet for {end_date}"
+
+
+def parse_diamond_nav_unavailable(error: Exception, valuation_date: str) -> Optional[Dict[str, str]]:
+    """
+    Detect Diamond HTTP 400 responses where the valuation period is not finalized yet.
+    Returns {end_date, message} or None if this is a different error.
+    """
+    text = str(error or "")
+    lower = text.lower()
+    if "http 400" not in lower and " 400:" not in lower:
+        return None
+    if not any(phrase in lower for phrase in _NOT_FINALIZED_PHRASES):
+        return None
+    match = _END_DATE_IN_MESSAGE.search(text)
+    end_date = match.group(1) if match else normalize_valuation_date(valuation_date)
+    return {"end_date": end_date, "message": nav_unavailable_user_message(end_date)}

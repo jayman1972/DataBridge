@@ -9,6 +9,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from sggg.nav_sheet_parse import parse_diamond_nav_unavailable
+
 try:
     import requests
     REQUESTS_AVAILABLE = True
@@ -18,6 +20,15 @@ except ImportError:
 
 BASE_URL = "https://api.sgggfsi.com/api/v1"
 AUTH_EXPIRY_BUFFER_SEC = 300  # Refresh AuthKey 5 min before expiry
+
+
+class DiamondNavUnavailableError(Exception):
+    """NAV sheet not finalized for the requested valuation period."""
+
+    def __init__(self, message: str, *, end_date: str):
+        self.end_date = end_date
+        self.user_message = message
+        super().__init__(message)
 
 
 class DiamondAPIClient:
@@ -138,7 +149,16 @@ class DiamondAPIClient:
 
     def get_nav_sheet(self, fund_id: str, valuation_date: str) -> Any:
         payload = {"FundID": fund_id, "ValuationDate": valuation_date}
-        return self._post("GetNAVSheet/", payload)
+        try:
+            return self._post("GetNAVSheet/", payload)
+        except RuntimeError as exc:
+            parsed = parse_diamond_nav_unavailable(exc, valuation_date)
+            if parsed:
+                raise DiamondNavUnavailableError(
+                    parsed["message"],
+                    end_date=parsed["end_date"],
+                ) from exc
+            raise
 
     def get_fund_details(self, fund_id: str) -> Any:
         payload = {"FundID": fund_id}

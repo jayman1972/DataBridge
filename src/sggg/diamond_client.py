@@ -5,6 +5,7 @@ Spec: Diamond API v2.03 - https://api.sgggfsi.com/api/v1/
 """
 
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -31,21 +32,28 @@ class DiamondAPIClient:
         self.base_url = base_url.rstrip("/")
         self._auth_key: Optional[str] = None
         self._auth_key_expires_at: float = 0
+        self._auth_lock = threading.Lock()
+        self._session = requests.Session() if REQUESTS_AVAILABLE else None
 
     def _ensure_auth(self) -> str:
         now = time.time()
         if self._auth_key and now < self._auth_key_expires_at - AUTH_EXPIRY_BUFFER_SEC:
             return self._auth_key
-        self._auth_key = self._login()
-        self._auth_key_expires_at = now + 3600  # 1 hour
-        return self._auth_key
+        with self._auth_lock:
+            now = time.time()
+            if self._auth_key and now < self._auth_key_expires_at - AUTH_EXPIRY_BUFFER_SEC:
+                return self._auth_key
+            self._auth_key = self._login()
+            self._auth_key_expires_at = now + 3600  # 1 hour
+            return self._auth_key
 
     def _login(self) -> str:
         if not REQUESTS_AVAILABLE:
             raise ImportError("requests package required. pip install requests")
         url = f"{self.base_url}/login/"
         payload = {"Username": self.username, "Password": self.password}
-        resp = requests.post(url, json=payload, timeout=30)
+        http = self._session or requests
+        resp = http.post(url, json=payload, timeout=30)
         try:
             resp.raise_for_status()
         except Exception as e:
@@ -74,7 +82,8 @@ class DiamondAPIClient:
             "AuthKey": auth,
             "Content-Type": "application/json",
         }
-        resp = requests.post(url, json=payload, headers=headers, timeout=120)
+        http = self._session or requests
+        resp = http.post(url, json=payload, headers=headers, timeout=120)
         try:
             resp.raise_for_status()
         except Exception as e:

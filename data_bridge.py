@@ -15,6 +15,7 @@ import logging
 import traceback
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import socket
 import subprocess
@@ -2188,31 +2189,35 @@ def sggg_diamond_nav_availability():
         else:
             fund_specs = [{"id": fid, "name": ""} for fid in _get_diamond_fund_ids()]
 
-        results = []
-        for spec in fund_specs:
+        def _fetch_one(spec: Dict[str, str]) -> Dict[str, Any]:
             fid = spec["id"]
             name = spec.get("name") or fid
-            entry = {
+            entry: Dict[str, Any] = {
                 "fund_id": fid,
                 "fund_name": name,
                 "status": "unavailable",
                 "error": None,
-                "summary": None,
                 "classes": [],
             }
             try:
                 raw = client.get_nav_sheet(fund_id=fid, valuation_date=valuation_date)
                 summary = parse_nav_sheet_summary(raw)
-                entry["summary"] = summary
                 entry["classes"] = summary.get("classes") or []
-                if summary.get("available"):
-                    entry["status"] = "available"
-                else:
-                    entry["status"] = "unavailable"
+                entry["status"] = "available" if summary.get("available") else "unavailable"
             except Exception as exc:
                 entry["status"] = "error"
                 entry["error"] = str(exc)
-            results.append(entry)
+            return entry
+
+        max_workers = min(8, max(1, len(fund_specs)))
+        results: List[Dict[str, Any]] = [None] * len(fund_specs)  # type: ignore[list-item]
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(_fetch_one, spec): idx for idx, spec in enumerate(fund_specs)
+            }
+            for future in as_completed(future_map):
+                idx = future_map[future]
+                results[idx] = future.result()
 
         return jsonify({"valuation_date": valuation_date, "funds": results})
     except Exception as e:

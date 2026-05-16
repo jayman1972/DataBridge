@@ -51,6 +51,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src
 
 from bloomberg import get_bloomberg_client, BloombergClientType
 from sggg.diamond_client import get_diamond_client
+from sggg.nav_sheet_parse import normalize_valuation_date, parse_nav_sheet_summary
 
 from supabase import create_client, Client
 
@@ -2113,6 +2114,107 @@ def sggg_diamond_trades():
             end_date=end_date,
         )
         return jsonify(result)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/sggg/diamond/nav-sheet", methods=["GET", "POST"])
+def sggg_diamond_nav_sheet():
+    """
+    Get NAV sheet (per-class NAVPU and daily return) from SGGG Diamond API.
+    Body or query: fund_id, valuation_date (yyyy-mm-dd)
+    """
+    try:
+        client = get_diamond_client()
+        if not client:
+            return jsonify({"error": "Diamond API not configured. Set SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD."}), 503
+        data = request.get_json(silent=True) or {}
+        fund_id = request.args.get("fund_id") or data.get("fund_id")
+        if not fund_id:
+            fund_id = _get_default_fund_id()
+        raw_date = (
+            request.args.get("date")
+            or request.args.get("valuation_date")
+            or data.get("date")
+            or data.get("valuation_date")
+        )
+        if not raw_date:
+            raw_date = datetime.now().strftime("%Y-%m-%d")
+        valuation_date = normalize_valuation_date(str(raw_date))
+        raw = client.get_nav_sheet(fund_id=fund_id, valuation_date=valuation_date)
+        summary = parse_nav_sheet_summary(raw)
+        return jsonify(
+            {
+                "valuation_date": valuation_date,
+                "fund_id": fund_id,
+                "raw": raw,
+                "summary": summary,
+            }
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/sggg/diamond/nav-availability", methods=["GET", "POST"])
+def sggg_diamond_nav_availability():
+    """
+    NAV availability summary for one or more funds on a valuation date.
+    Body: valuation_date, optional funds: [{id, name}, ...] — defaults to SGGG_DIAMOND_FUND_IDS with unknown names.
+    """
+    try:
+        client = get_diamond_client()
+        if not client:
+            return jsonify({"error": "Diamond API not configured. Set SGGG_DIAMOND_USERNAME, SGGG_DIAMOND_PASSWORD."}), 503
+        data = request.get_json(silent=True) or {}
+        raw_date = (
+            request.args.get("date")
+            or request.args.get("valuation_date")
+            or data.get("date")
+            or data.get("valuation_date")
+        )
+        if not raw_date:
+            raw_date = datetime.now().strftime("%Y-%m-%d")
+        valuation_date = normalize_valuation_date(str(raw_date))
+
+        funds_in = data.get("funds")
+        if isinstance(funds_in, list) and funds_in:
+            fund_specs = [
+                {"id": str(f.get("id") or f.get("fund_id") or "").strip(), "name": str(f.get("name") or "").strip()}
+                for f in funds_in
+                if isinstance(f, dict) and (f.get("id") or f.get("fund_id"))
+            ]
+        else:
+            fund_specs = [{"id": fid, "name": ""} for fid in _get_diamond_fund_ids()]
+
+        results = []
+        for spec in fund_specs:
+            fid = spec["id"]
+            name = spec.get("name") or fid
+            entry = {
+                "fund_id": fid,
+                "fund_name": name,
+                "status": "unavailable",
+                "error": None,
+                "summary": None,
+                "classes": [],
+            }
+            try:
+                raw = client.get_nav_sheet(fund_id=fid, valuation_date=valuation_date)
+                summary = parse_nav_sheet_summary(raw)
+                entry["summary"] = summary
+                entry["classes"] = summary.get("classes") or []
+                if summary.get("available"):
+                    entry["status"] = "available"
+                else:
+                    entry["status"] = "unavailable"
+            except Exception as exc:
+                entry["status"] = "error"
+                entry["error"] = str(exc)
+            results.append(entry)
+
+        return jsonify({"valuation_date": valuation_date, "funds": results})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

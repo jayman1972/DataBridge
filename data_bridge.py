@@ -2224,6 +2224,7 @@ def sggg_diamond_nav_availability():
                 entry["error"] = str(exc)
             return entry
 
+        client._ensure_auth()
         max_workers = min(8, max(1, len(fund_specs)))
         results: List[Dict[str, Any]] = [None] * len(fund_specs)  # type: ignore[list-item]
         with ThreadPoolExecutor(max_workers=max_workers) as executor:

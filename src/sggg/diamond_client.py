@@ -7,7 +7,7 @@ Spec: Diamond API v2.03 - https://api.sgggfsi.com/api/v1/
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sggg.nav_sheet_parse import parse_diamond_nav_unavailable
 
@@ -44,7 +44,6 @@ class DiamondAPIClient:
         self._auth_key: Optional[str] = None
         self._auth_key_expires_at: float = 0
         self._auth_lock = threading.Lock()
-        self._session = requests.Session() if REQUESTS_AVAILABLE else None
 
     def _ensure_auth(self) -> str:
         now = time.time()
@@ -63,8 +62,7 @@ class DiamondAPIClient:
             raise ImportError("requests package required. pip install requests")
         url = f"{self.base_url}/login/"
         payload = {"Username": self.username, "Password": self.password}
-        http = self._session or requests
-        resp = http.post(url, json=payload, timeout=30)
+        resp = requests.post(url, json=payload, timeout=30)
         try:
             resp.raise_for_status()
         except Exception as e:
@@ -93,8 +91,8 @@ class DiamondAPIClient:
             "AuthKey": auth,
             "Content-Type": "application/json",
         }
-        http = self._session or requests
-        resp = http.post(url, json=payload, headers=headers, timeout=120)
+        # Use module-level requests.post (not Session) so parallel fund fetches are thread-safe.
+        resp = requests.post(url, json=payload, headers=headers, timeout=120)
         try:
             resp.raise_for_status()
         except Exception as e:
@@ -165,10 +163,19 @@ class DiamondAPIClient:
         return self._post("GetFundDetails/", payload)
 
 
+_cached_diamond_client: Optional[DiamondAPIClient] = None
+_cached_diamond_credentials: Optional[Tuple[str, str]] = None
+
+
 def get_diamond_client() -> Optional[DiamondAPIClient]:
-    """Create Diamond client from env vars. Returns None if not configured."""
+    """Return a process-wide Diamond client from env vars, or None if not configured."""
+    global _cached_diamond_client, _cached_diamond_credentials
     username = os.environ.get("SGGG_DIAMOND_USERNAME", "").strip()
     password = os.environ.get("SGGG_DIAMOND_PASSWORD", "").strip()
     if not username or not password:
         return None
-    return DiamondAPIClient(username=username, password=password)
+    creds = (username, password)
+    if _cached_diamond_client is None or _cached_diamond_credentials != creds:
+        _cached_diamond_client = DiamondAPIClient(username=username, password=password)
+        _cached_diamond_credentials = creds
+    return _cached_diamond_client

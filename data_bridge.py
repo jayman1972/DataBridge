@@ -58,7 +58,7 @@ from sggg.nav_sheet_parse import (
     prior_business_day_iso,
     pick_class_i_bps,
 )
-from sggg.nav_working_paper import estimates_by_fund_id
+from sggg.compliance_check_estimates import estimates_by_fund_id
 
 from supabase import create_client, Client
 
@@ -2241,9 +2241,17 @@ def sggg_diamond_nav_availability():
                 "nav_change_difference_dollars": None,
             }
             est_row = (wp.get("estimates_by_fund_id") or {}).get(fid) or {}
-            if est_row.get("estimate_nav_change_dollars") is not None:
-                entry["estimate_nav_change_dollars"] = est_row["estimate_nav_change_dollars"]
+            if est_row.get("estimate_bps") is not None:
+                entry["estimate_bps"] = int(est_row["estimate_bps"])
+            if est_row.get("spreadsheet_label"):
                 entry["spreadsheet_label"] = est_row.get("spreadsheet_label")
+            if est_row.get("ror_display"):
+                entry["estimate_ror_display"] = est_row.get("ror_display")
+            prior_eod = est_row.get("prior_eod_aum")
+            if prior_eod is not None and entry.get("estimate_bps") is not None:
+                entry["estimate_nav_change_dollars"] = float(prior_eod) * (
+                    float(entry["estimate_bps"]) / 10_000.0
+                )
 
             try:
                 raw_close = fetch_nav_sheet(
@@ -2321,16 +2329,22 @@ def sggg_diamond_nav_availability():
             max_workers,
         )
 
+        compliance_meta = {
+            "available": wp.get("available", False),
+            "workbook_path": wp.get("workbook_path"),
+            "note": wp.get("note"),
+            "error": wp.get("error"),
+            "file_variant": wp.get("file_variant"),
+            "saved_at": wp.get("saved_at"),
+            "sheet_as_of": wp.get("sheet_as_of"),
+            "date_warning": wp.get("date_warning"),
+        }
         return jsonify(
             {
                 "valuation_date": valuation_date,
                 "prior_valuation_date": prior_date,
-                "working_paper": {
-                    "available": wp.get("available", False),
-                    "workbook_path": wp.get("workbook_path"),
-                    "note": wp.get("note"),
-                    "error": wp.get("error"),
-                },
+                "compliance_check": compliance_meta,
+                "working_paper": compliance_meta,
                 "funds": results,
             }
         )

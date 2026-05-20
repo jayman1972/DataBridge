@@ -167,15 +167,20 @@ def find_compliance_workbook(
     if not base.exists():
         return None, f"Compliance check root not found: {base}"
 
+    # Date in filename — glob only that day (faster than rglob + parse every file).
+    date_token = valuation_date.strftime("%Y.%m.%d")
+    pattern = f"EHP Alt Funds - compliance check - {date_token}*"
     matches: List[Tuple[float, Path]] = []
-    for path in base.rglob("EHP Alt Funds - compliance check*"):
+    seen: set[str] = set()
+    for path in base.glob(f"**/{pattern}"):
         if path.name.startswith("~$"):
             continue
         if path.suffix.lower() not in (".xls", ".xlsx"):
             continue
-        file_date = _parse_workbook_date(path)
-        if file_date != valuation_date:
+        key = str(path.resolve())
+        if key in seen:
             continue
+        seen.add(key)
         try:
             matches.append((path.stat().st_mtime, path))
         except OSError:

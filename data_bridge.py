@@ -2208,25 +2208,33 @@ def sggg_diamond_nav_availability():
             fund_specs = [{"id": fid, "name": ""} for fid in _get_diamond_fund_ids()]
 
         auth_key = client._ensure_auth()
-        max_workers = min(8, max(1, len(fund_specs)))
         started = time.time()
         results: List[Dict[str, Any]] = [None] * len(fund_specs)  # type: ignore[list-item]
 
         prior_date = prior_business_day_iso(valuation_date)
         fund_ids_list = [spec["id"] for spec in fund_specs]
-        psc_navs = fetch_psc_portfolio_navs(fund_ids_list, prior_date, valuation_date)
 
+        t_prep = time.time()
         wp: Dict[str, Any] = {}
-        try:
+        psc_navs: Dict[str, Dict[str, Optional[float]]] = {}
+        with ThreadPoolExecutor(max_workers=2) as prep_executor:
             from datetime import date as _date
 
-            wp = estimates_by_fund_id(_date.fromisoformat(valuation_date))
-        except Exception as exc:
-            wp = {"available": False, "error": str(exc), "estimates_by_fund_id": {}}
+            fut_wp = prep_executor.submit(estimates_by_fund_id, _date.fromisoformat(valuation_date))
+            fut_psc = prep_executor.submit(
+                fetch_psc_portfolio_navs, fund_ids_list, prior_date, valuation_date
+            )
+            try:
+                wp = fut_wp.result()
+            except Exception as exc:
+                wp = {"available": False, "error": str(exc), "estimates_by_fund_id": {}}
+            psc_navs = fut_psc.result()
+        prep_sec = time.time() - t_prep
 
-        def _fetch_one_parallel(spec: Dict[str, str]) -> Dict[str, Any]:
+        def _base_entry(spec: Dict[str, str]) -> Dict[str, Any]:
             fid = spec["id"]
             name = spec.get("name") or fid
+            est_row = (wp.get("estimates_by_fund_id") or {}).get(fid) or {}
             entry: Dict[str, Any] = {
                 "fund_id": fid,
                 "fund_name": name,
@@ -2245,24 +2253,21 @@ def sggg_diamond_nav_availability():
                 "nav_change_difference_dollars": None,
                 "opening_aum_source": None,
                 "closing_aum_source": None,
+                "_estimate_bps_from_compliance": est_row.get("estimate_bps") is not None,
+                "_est_row": est_row,
             }
-            est_row = (wp.get("estimates_by_fund_id") or {}).get(fid) or {}
-            estimate_bps_from_compliance = est_row.get("estimate_bps") is not None
-            if estimate_bps_from_compliance:
+            if entry["_estimate_bps_from_compliance"]:
                 entry["estimate_bps"] = int(est_row["estimate_bps"])
             if est_row.get("spreadsheet_label"):
                 entry["spreadsheet_label"] = est_row.get("spreadsheet_label")
             if est_row.get("ror_display"):
                 entry["estimate_ror_display"] = est_row.get("ror_display")
-
-            # Opening/closing AUM: compliance Steps (Z/X) -> PSC by date -> Diamond NetAssetValue fallback.
             if est_row.get("prior_eod_aum") is not None:
                 entry["opening_nav_aum"] = float(est_row["prior_eod_aum"])
                 entry["opening_aum_source"] = "compliance"
             if est_row.get("current_aum") is not None:
                 entry["closing_nav_aum"] = float(est_row["current_aum"])
                 entry["closing_aum_source"] = "compliance"
-
             psc_row = psc_navs.get(fid) or {}
             if entry["opening_nav_aum"] is None and psc_row.get("opening") is not None:
                 entry["opening_nav_aum"] = float(psc_row["opening"])
@@ -2270,15 +2275,61 @@ def sggg_diamond_nav_availability():
             if entry["closing_nav_aum"] is None and psc_row.get("closing") is not None:
                 entry["closing_nav_aum"] = float(psc_row["closing"])
                 entry["closing_aum_source"] = "psc"
+            return entry
 
-            try:
-                raw_close = fetch_nav_sheet(
-                    client.base_url,
-                    fid,
-                    valuation_date,
-                    auth_key=auth_key,
-                )
-                summary_close = parse_nav_sheet_summary(raw_close)
+        entries = [_base_entry(spec) for spec in fund_specs]
+
+        # Flat pool: every fund needs closing NAV sheet (class NAVPU/BPS); opening only if AUM still missing.
+        diamond_tasks: List[tuple] = []
+        for idx, entry in enumerate(entries):
+            fid = entry["fund_id"]
+            diamond_tasks.append((idx, fid, valuation_date, "close"))
+            if entry["opening_nav_aum"] is None:
+                diamond_tasks.append((idx, fid, prior_date, "open"))
+
+        diamond_workers = min(
+            int(os.environ.get("SGGG_DIAMOND_NAV_MAX_WORKERS", "12")),
+            max(1, len(diamond_tasks)),
+        )
+        diamond_results: Dict[tuple, Dict[str, Any]] = {}
+        diamond_errors: Dict[tuple, Any] = {}
+
+        def _fetch_nav_task(task: tuple) -> tuple:
+            idx, fid, vdate, role = task
+            raw = fetch_nav_sheet(client.base_url, fid, vdate, auth_key=auth_key)
+            return (idx, role, parse_nav_sheet_summary(raw))
+
+        t_diamond = time.time()
+        with ThreadPoolExecutor(max_workers=diamond_workers) as diamond_executor:
+            future_map = {diamond_executor.submit(_fetch_nav_task, t): t for t in diamond_tasks}
+            for future in as_completed(future_map):
+                task = future_map[future]
+                key = (task[0], task[3])
+                try:
+                    idx, role, summary = future.result()
+                    diamond_results[(idx, role)] = summary
+                except DiamondNavUnavailableError as exc:
+                    diamond_errors[key] = exc
+                except Exception as exc:
+                    diamond_errors[key] = exc
+        diamond_sec = time.time() - t_diamond
+
+        for idx, entry in enumerate(entries):
+            est_row = entry.pop("_est_row", {})
+            estimate_bps_from_compliance = entry.pop("_estimate_bps_from_compliance", False)
+            summary_close = diamond_results.get((idx, "close"))
+            close_err = diamond_errors.get((idx, "close"))
+            if close_err and not summary_close:
+                if isinstance(close_err, DiamondNavUnavailableError):
+                    entry["status"] = "unavailable"
+                    entry["message"] = close_err.user_message
+                else:
+                    entry["status"] = "error"
+                    entry["error"] = str(close_err)
+                results[idx] = entry
+                continue
+
+            if summary_close:
                 entry["classes"] = summary_close.get("classes") or []
                 entry["class_i_bps"] = pick_class_i_bps(entry["classes"])
                 if entry["closing_nav_aum"] is None:
@@ -2287,74 +2338,54 @@ def sggg_diamond_nav_availability():
                         entry["closing_nav_aum"] = float(closing)
                         entry["closing_aum_source"] = "diamond"
 
-                if entry["opening_nav_aum"] is None:
-                    try:
-                        raw_open = fetch_nav_sheet(
-                            client.base_url,
-                            fid,
-                            prior_date,
-                            auth_key=auth_key,
+            summary_open = diamond_results.get((idx, "open"))
+            if summary_open and entry["opening_nav_aum"] is None:
+                opening = summary_open.get("net_asset_value")
+                if opening is not None:
+                    entry["opening_nav_aum"] = float(opening)
+                    entry["opening_aum_source"] = "diamond"
+
+            if entry["opening_nav_aum"] is not None and entry["closing_nav_aum"] is not None:
+                entry["sggg_nav_change_dollars"] = entry["closing_nav_aum"] - entry["opening_nav_aum"]
+
+            if entry.get("estimate_bps") is not None and entry.get("opening_nav_aum") is not None:
+                entry["estimate_nav_change_dollars"] = float(entry["opening_nav_aum"]) * (
+                    float(entry["estimate_bps"]) / 10_000.0
+                )
+
+            if not estimate_bps_from_compliance:
+                prior_eod = est_row.get("prior_eod_aum") or entry.get("opening_nav_aum")
+                if (
+                    prior_eod is not None
+                    and entry.get("estimate_nav_change_dollars") is not None
+                    and float(prior_eod) != 0
+                ):
+                    entry["estimate_bps"] = int(
+                        round(
+                            (float(entry["estimate_nav_change_dollars"]) / float(prior_eod)) * 10_000
                         )
-                        summary_open = parse_nav_sheet_summary(raw_open)
-                        opening = summary_open.get("net_asset_value")
-                        if opening is not None:
-                            entry["opening_nav_aum"] = float(opening)
-                            entry["opening_aum_source"] = "diamond"
-                    except DiamondNavUnavailableError:
-                        pass
-                    except Exception:
-                        pass
-
-                if entry["opening_nav_aum"] is not None and entry["closing_nav_aum"] is not None:
-                    entry["sggg_nav_change_dollars"] = entry["closing_nav_aum"] - entry["opening_nav_aum"]
-
-                if entry.get("estimate_bps") is not None and entry.get("opening_nav_aum") is not None:
-                    entry["estimate_nav_change_dollars"] = float(entry["opening_nav_aum"]) * (
-                        float(entry["estimate_bps"]) / 10_000.0
                     )
+            if entry["class_i_bps"] is not None and entry["estimate_bps"] is not None:
+                entry["bps_difference"] = int(entry["class_i_bps"]) - int(entry["estimate_bps"])
+            if entry["sggg_nav_change_dollars"] is not None and entry["estimate_nav_change_dollars"] is not None:
+                entry["nav_change_difference_dollars"] = (
+                    float(entry["sggg_nav_change_dollars"]) - float(entry["estimate_nav_change_dollars"])
+                )
 
-                if not estimate_bps_from_compliance:
-                    prior_eod = est_row.get("prior_eod_aum") or entry.get("opening_nav_aum")
-                    if (
-                        prior_eod is not None
-                        and entry.get("estimate_nav_change_dollars") is not None
-                        and float(prior_eod) != 0
-                    ):
-                        entry["estimate_bps"] = int(
-                            round(
-                                (float(entry["estimate_nav_change_dollars"]) / float(prior_eod)) * 10_000
-                            )
-                        )
-                if entry["class_i_bps"] is not None and entry["estimate_bps"] is not None:
-                    entry["bps_difference"] = int(entry["class_i_bps"]) - int(entry["estimate_bps"])
-                if entry["sggg_nav_change_dollars"] is not None and entry["estimate_nav_change_dollars"] is not None:
-                    entry["nav_change_difference_dollars"] = (
-                        float(entry["sggg_nav_change_dollars"]) - float(entry["estimate_nav_change_dollars"])
-                    )
-
+            if summary_close:
                 entry["status"] = "available" if summary_close.get("available") else "unavailable"
-            except DiamondNavUnavailableError as exc:
-                entry["status"] = "unavailable"
-                entry["message"] = exc.user_message
-            except Exception as exc:
-                entry["status"] = "error"
-                entry["error"] = str(exc)
-            return entry
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {
-                executor.submit(_fetch_one_parallel, spec): idx for idx, spec in enumerate(fund_specs)
-            }
-            for future in as_completed(future_map):
-                idx = future_map[future]
-                results[idx] = future.result()
+            results[idx] = entry
 
         elapsed = time.time() - started
         logging.getLogger(__name__).info(
-            "nav-availability: %d funds in %.2fs (workers=%d)",
+            "nav-availability: %d funds, %d diamond calls in %.2fs "
+            "(prep=%.2fs diamond=%.2fs workers=%d)",
             len(fund_specs),
+            len(diamond_tasks),
             elapsed,
-            max_workers,
+            prep_sec,
+            diamond_sec,
+            diamond_workers,
         )
 
         compliance_meta = {
@@ -2374,6 +2405,13 @@ def sggg_diamond_nav_availability():
                 "compliance_check": compliance_meta,
                 "working_paper": compliance_meta,
                 "funds": results,
+                "timing": {
+                    "total_sec": round(elapsed, 2),
+                    "prep_sec": round(prep_sec, 2),
+                    "diamond_sec": round(diamond_sec, 2),
+                    "diamond_requests": len(diamond_tasks),
+                    "diamond_workers": diamond_workers,
+                },
             }
         )
     except Exception as e:

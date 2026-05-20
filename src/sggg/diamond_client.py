@@ -149,6 +149,16 @@ class DiamondAPIClient:
 
 _cached_diamond_client: Optional[DiamondAPIClient] = None
 _cached_diamond_credentials: Optional[Tuple[str, str]] = None
+_thread_local = threading.local()
+
+
+def _get_http_session() -> "requests.Session":
+    """One Session per thread for HTTP keep-alive to api.sgggfsi.com."""
+    sess = getattr(_thread_local, "session", None)
+    if sess is None:
+        sess = requests.Session()
+        _thread_local.session = sess
+    return sess
 
 
 def _diamond_post(
@@ -168,7 +178,7 @@ def _diamond_post(
         "AuthKey": auth_key,
         "Content-Type": "application/json",
     }
-    resp = requests.post(url, json=payload, headers=headers, timeout=120)
+    resp = _get_http_session().post(url, json=payload, headers=headers, timeout=120)
     try:
         resp.raise_for_status()
     except Exception as e:

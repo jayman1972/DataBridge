@@ -96,6 +96,88 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
     }
 
 
+# Diamond fund parent GUID -> PSC portfolio name (Fund Admin NAV checker)
+NAV_CHECKER_FUND_ID_TO_PSC: Dict[str, str] = {
+    "415a3530-3034-4536-4432-303030364337": "EHP Alpha",
+    "41010000-7F7A-0A65-D559-45484608DB40": "EHP Tact Growth Alt",
+    "41323030-3031-4144-3637-303030364338": "EHP Select Alt",
+    "41010000-7F2A-D7E8-776F-45484608D91C": "EHP Strat Inc Alt",
+    "01010000-801A-4995-8370-45484608DE57": "Exponential Balanced Growth Fund",
+}
+
+
+def _compact_yyyymmdd(iso_date: str) -> str:
+    return normalize_valuation_date(iso_date).replace("-", "")
+
+
+def fetch_psc_portfolio_navs(
+    fund_ids: List[str],
+    prior_date_iso: str,
+    valuation_date_iso: str,
+    dsn: str = "PSC_VIEWER",
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """
+    Fund-level PORTFOLIO_NAV from PSC for prior and valuation dates.
+    Returns {fund_id: {"opening": float|None, "closing": float|None}}.
+    """
+    portfolios = {
+        fid: NAV_CHECKER_FUND_ID_TO_PSC.get(fid)
+        for fid in fund_ids
+        if NAV_CHECKER_FUND_ID_TO_PSC.get(fid)
+    }
+    if not portfolios:
+        return {}
+
+    prior_compact = _compact_yyyymmdd(prior_date_iso)
+    val_compact = _compact_yyyymmdd(valuation_date_iso)
+    port_names = sorted(set(portfolios.values()))
+    port_placeholders = ",".join(["?"] * len(port_names))
+
+    try:
+        import pyodbc
+    except ImportError:
+        return {}
+
+    out: Dict[str, Dict[str, Optional[float]]] = {fid: {"opening": None, "closing": None} for fid in fund_ids}
+    conn = None
+    try:
+        conn = pyodbc.connect(f"DSN={dsn}", timeout=15)
+        cur = conn.cursor()
+        sql = (
+            "SELECT PORTFOLIO, POSN_DATE_INT, MAX(PORTFOLIO_NAV) AS NAV "
+            "FROM psc_position_history "
+            f"WHERE PORTFOLIO IN ({port_placeholders}) AND POSN_DATE_INT IN (?, ?) "
+            "GROUP BY PORTFOLIO, POSN_DATE_INT"
+        )
+        cur.execute(sql, (*port_names, prior_compact, val_compact))
+        nav_by_port_date: Dict[tuple, float] = {}
+        for row in cur.fetchall() or []:
+            port = (str(row[0]).strip() if row[0] is not None else "")
+            dt = (str(row[1]).strip() if row[1] is not None else "")
+            nav = float(row[2]) if row[2] is not None else None
+            if port and dt and nav is not None:
+                nav_by_port_date[(port, dt)] = nav
+
+        for fid, port in portfolios.items():
+            if not port:
+                continue
+            opening = nav_by_port_date.get((port, prior_compact))
+            closing = nav_by_port_date.get((port, val_compact))
+            out[fid] = {
+                "opening": opening,
+                "closing": closing,
+            }
+    except Exception:
+        return {fid: {"opening": None, "closing": None} for fid in fund_ids}
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return out
+
+
 def prior_business_day_iso(valuation_date: str) -> str:
     """Previous business day relative to yyyy-mm-dd valuation date."""
     from datetime import date, timedelta

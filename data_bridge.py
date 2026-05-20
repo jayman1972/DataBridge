@@ -53,6 +53,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src
 from bloomberg import get_bloomberg_client, BloombergClientType
 from sggg.diamond_client import DiamondNavUnavailableError, fetch_nav_sheet, get_diamond_client
 from sggg.nav_sheet_parse import (
+    fetch_psc_portfolio_navs,
     normalize_valuation_date,
     parse_nav_sheet_summary,
     prior_business_day_iso,
@@ -2212,6 +2213,9 @@ def sggg_diamond_nav_availability():
         results: List[Dict[str, Any]] = [None] * len(fund_specs)  # type: ignore[list-item]
 
         prior_date = prior_business_day_iso(valuation_date)
+        fund_ids_list = [spec["id"] for spec in fund_specs]
+        psc_navs = fetch_psc_portfolio_navs(fund_ids_list, prior_date, valuation_date)
+
         wp: Dict[str, Any] = {}
         try:
             from datetime import date as _date
@@ -2239,19 +2243,33 @@ def sggg_diamond_nav_availability():
                 "estimate_bps": None,
                 "bps_difference": None,
                 "nav_change_difference_dollars": None,
+                "opening_aum_source": None,
+                "closing_aum_source": None,
             }
             est_row = (wp.get("estimates_by_fund_id") or {}).get(fid) or {}
-            if est_row.get("estimate_bps") is not None:
+            estimate_bps_from_compliance = est_row.get("estimate_bps") is not None
+            if estimate_bps_from_compliance:
                 entry["estimate_bps"] = int(est_row["estimate_bps"])
             if est_row.get("spreadsheet_label"):
                 entry["spreadsheet_label"] = est_row.get("spreadsheet_label")
             if est_row.get("ror_display"):
                 entry["estimate_ror_display"] = est_row.get("ror_display")
-            prior_eod = est_row.get("prior_eod_aum")
-            if prior_eod is not None and entry.get("estimate_bps") is not None:
-                entry["estimate_nav_change_dollars"] = float(prior_eod) * (
-                    float(entry["estimate_bps"]) / 10_000.0
-                )
+
+            # Opening/closing AUM: compliance Steps (Z/X) -> PSC by date -> Diamond NetAssetValue fallback.
+            if est_row.get("prior_eod_aum") is not None:
+                entry["opening_nav_aum"] = float(est_row["prior_eod_aum"])
+                entry["opening_aum_source"] = "compliance"
+            if est_row.get("current_aum") is not None:
+                entry["closing_nav_aum"] = float(est_row["current_aum"])
+                entry["closing_aum_source"] = "compliance"
+
+            psc_row = psc_navs.get(fid) or {}
+            if entry["opening_nav_aum"] is None and psc_row.get("opening") is not None:
+                entry["opening_nav_aum"] = float(psc_row["opening"])
+                entry["opening_aum_source"] = "psc"
+            if entry["closing_nav_aum"] is None and psc_row.get("closing") is not None:
+                entry["closing_nav_aum"] = float(psc_row["closing"])
+                entry["closing_aum_source"] = "psc"
 
             try:
                 raw_close = fetch_nav_sheet(
@@ -2263,40 +2281,50 @@ def sggg_diamond_nav_availability():
                 summary_close = parse_nav_sheet_summary(raw_close)
                 entry["classes"] = summary_close.get("classes") or []
                 entry["class_i_bps"] = pick_class_i_bps(entry["classes"])
-                closing = summary_close.get("net_asset_value")
-                if closing is not None:
-                    entry["closing_nav_aum"] = float(closing)
+                if entry["closing_nav_aum"] is None:
+                    closing = summary_close.get("net_asset_value")
+                    if closing is not None:
+                        entry["closing_nav_aum"] = float(closing)
+                        entry["closing_aum_source"] = "diamond"
 
-                try:
-                    raw_open = fetch_nav_sheet(
-                        client.base_url,
-                        fid,
-                        prior_date,
-                        auth_key=auth_key,
-                    )
-                    summary_open = parse_nav_sheet_summary(raw_open)
-                    opening = summary_open.get("net_asset_value")
-                    if opening is not None:
-                        entry["opening_nav_aum"] = float(opening)
-                except DiamondNavUnavailableError:
-                    pass
-                except Exception:
-                    pass
+                if entry["opening_nav_aum"] is None:
+                    try:
+                        raw_open = fetch_nav_sheet(
+                            client.base_url,
+                            fid,
+                            prior_date,
+                            auth_key=auth_key,
+                        )
+                        summary_open = parse_nav_sheet_summary(raw_open)
+                        opening = summary_open.get("net_asset_value")
+                        if opening is not None:
+                            entry["opening_nav_aum"] = float(opening)
+                            entry["opening_aum_source"] = "diamond"
+                    except DiamondNavUnavailableError:
+                        pass
+                    except Exception:
+                        pass
 
                 if entry["opening_nav_aum"] is not None and entry["closing_nav_aum"] is not None:
                     entry["sggg_nav_change_dollars"] = entry["closing_nav_aum"] - entry["opening_nav_aum"]
 
-                if (
-                    entry["estimate_nav_change_dollars"] is not None
-                    and entry["opening_nav_aum"] is not None
-                    and entry["opening_nav_aum"] != 0
-                ):
-                    entry["estimate_bps"] = int(
-                        round(
-                            (float(entry["estimate_nav_change_dollars"]) / float(entry["opening_nav_aum"]))
-                            * 10_000
-                        )
+                if entry.get("estimate_bps") is not None and entry.get("opening_nav_aum") is not None:
+                    entry["estimate_nav_change_dollars"] = float(entry["opening_nav_aum"]) * (
+                        float(entry["estimate_bps"]) / 10_000.0
                     )
+
+                if not estimate_bps_from_compliance:
+                    prior_eod = est_row.get("prior_eod_aum") or entry.get("opening_nav_aum")
+                    if (
+                        prior_eod is not None
+                        and entry.get("estimate_nav_change_dollars") is not None
+                        and float(prior_eod) != 0
+                    ):
+                        entry["estimate_bps"] = int(
+                            round(
+                                (float(entry["estimate_nav_change_dollars"]) / float(prior_eod)) * 10_000
+                            )
+                        )
                 if entry["class_i_bps"] is not None and entry["estimate_bps"] is not None:
                     entry["bps_difference"] = int(entry["class_i_bps"]) - int(entry["estimate_bps"])
                 if entry["sggg_nav_change_dollars"] is not None and entry["estimate_nav_change_dollars"] is not None:

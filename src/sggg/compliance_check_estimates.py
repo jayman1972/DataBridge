@@ -144,7 +144,7 @@ def _read_steps_grid_xlsx(workbook_path: Path, cell_range: str = "W2:AB10") -> L
         return read_sheet_range(workbook_path, "Steps", cell_range)
 
 
-def _read_steps_grid(workbook_path: Path, cell_range: str = "W2:AB10") -> List[List[Any]]:
+def _read_steps_grid(workbook_path: Path, cell_range: str = "W2:AK10") -> List[List[Any]]:
     suffix = workbook_path.suffix.lower()
     if suffix == ".xls":
         return _read_steps_grid_xls(workbook_path, cell_range)
@@ -201,8 +201,7 @@ def find_compliance_workbook(
 
 def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
     """
-    Parse Steps tab: column W = fund name, AB = Current Day Return re AD (ROR).
-    Optional: Z = Prior EOD AUM, X = Current AUM.
+    Parse Steps tab: W = fund, X = Current AUM, Z = Prior EOD AUM, AB = ROR, AF = Net Subs (reds).
     """
     grid = _read_steps_grid(workbook_path)
     if not grid:
@@ -222,7 +221,7 @@ def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
 
     out: Dict[str, Dict[str, Any]] = {}
     for row in grid[1:]:
-        cells = list(row) + [None] * (6 - len(row))
+        cells = list(row) + [None] * (10 - len(row))
         fund_raw = cells[0]
         if fund_raw is None or not str(fund_raw).strip():
             continue
@@ -234,7 +233,8 @@ def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
         fund_id = FUND_NAME_TO_ID.get(norm)
         current_aum = _parse_money(cells[1])
         prior_eod_aum = _parse_money(cells[3])
-        ror_raw = cells[5]  # AB column within W:AB
+        ror_raw = cells[5]  # AB
+        net_subs_reds = _parse_money(cells[9])  # AF Net Subs (reds); inflows positive
         estimate_bps = _return_value_to_bps(ror_raw)
         ror_display = str(ror_raw).strip() if ror_raw is not None else None
 
@@ -244,6 +244,8 @@ def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
             "ror_display": ror_display,
             "current_aum": current_aum,
             "prior_eod_aum": prior_eod_aum,
+            "net_subs_reds": net_subs_reds,
+            "aum_currency": "USD",
             "fund_id": fund_id,
         }
         if fund_id:

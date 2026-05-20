@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _return_value_to_bps(raw: Any) -> Optional[int]:
@@ -29,6 +29,121 @@ def _return_value_to_bps(raw: Any) -> Optional[int]:
         return int(round(v * 100))
     except ValueError:
         return None
+
+
+# Native fund currency for Fund Admin NAV checker (compliance Steps are USD for alts).
+FUND_NATIVE_CURRENCY: Dict[str, str] = {
+    "415a3530-3034-4536-4432-303030364337": "USD",
+    "41010000-7F7A-0A65-D559-45484608DB40": "USD",
+    "41323030-3031-4144-3637-303030364338": "USD",
+    "41010000-7F2A-D7E8-776F-45484608D91C": "USD",
+    "01010000-801A-4995-8370-45484608DE57": "CAD",
+}
+
+
+def _section_items_by_name(node: Any) -> Dict[str, Any]:
+    """Collect SectionItem Name->Value from a NAV sheet node (fund or class)."""
+    out: Dict[str, Any] = {}
+    if not isinstance(node, dict):
+        return out
+    for sec in node.get("SectionList") or []:
+        if not isinstance(sec, dict):
+            continue
+        for item in sec.get("SectionItem") or []:
+            if not isinstance(item, dict):
+                continue
+            name = (item.get("Name") or "").strip()
+            if name:
+                out[name] = item.get("Value")
+    return out
+
+
+def _parse_money_value(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    s = str(raw).strip().replace(",", "").replace("$", "")
+    if not s or s in ("-", "—"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def pick_native_net_asset_value(
+    body: Dict[str, Any],
+    fund_id: str,
+) -> Tuple[Optional[float], str]:
+    """
+    Prefer USD Net Asset Value from Diamond NAV sheet when fund is USD-denominated.
+    Returns (amount, currency_code).
+    """
+    native = FUND_NATIVE_CURRENCY.get(fund_id, "USD")
+    fund_ccy = (body.get("FundCurrency") or "").strip().upper()
+    items = _section_items_by_name(body)
+
+    usd_keys = (
+        "Net Asset Value (USD)",
+        "Net Asset Value USD",
+        "Total Net Assets (USD)",
+        "Net Assets (USD)",
+    )
+    cad_keys = (
+        "Net Asset Value (CAD)",
+        "Net Asset Value CAD",
+        "Total Net Assets (CAD)",
+    )
+
+    if native == "USD":
+        for key in usd_keys:
+            v = _parse_money_value(items.get(key))
+            if v is not None:
+                return v, "USD"
+        nav = _parse_money_value(body.get("NetAssetValue"))
+        if nav is not None and fund_ccy in ("", "USD", "US Dollar", "US$"):
+            return nav, "USD"
+        for key in cad_keys:
+            v = _parse_money_value(items.get(key))
+            if v is not None:
+                return v, "CAD"
+
+    if native == "CAD":
+        for key in cad_keys:
+            v = _parse_money_value(items.get(key))
+            if v is not None:
+                return v, "CAD"
+        nav = _parse_money_value(body.get("NetAssetValue"))
+        if nav is not None:
+            return nav, "CAD" if fund_ccy != "USD" else "USD"
+
+    nav = _parse_money_value(body.get("NetAssetValue"))
+    return nav, native if nav is not None else native
+
+
+def pick_capital_flow_adjustment(body: Dict[str, Any]) -> Optional[float]:
+    """
+    Net subscriptions/redemptions on the valuation date from Diamond NAV sheet, if present.
+    Positive = net inflow (same sign as compliance Net Subs (reds)).
+    """
+    items = _section_items_by_name(body)
+    for subs_key, reds_key in (
+        ("Subscriptions", "Redemptions"),
+        ("Subscription", "Redemption"),
+        ("Net Subscriptions", None),
+        ("Net Subs (reds)", None),
+    ):
+        if reds_key:
+            subs = _parse_money_value(items.get(subs_key)) or 0.0
+            reds = _parse_money_value(items.get(reds_key)) or 0.0
+            if subs != 0 or reds != 0:
+                return subs - abs(reds) if reds < 0 else subs + reds
+        else:
+            net = _parse_money_value(items.get(subs_key))
+            if net is not None:
+                return net
+    return None
 
 
 def _valuation_period_return(class_entry: Dict[str, Any]) -> Any:
@@ -85,6 +200,10 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
             }
         )
 
+    fund_id = (body.get("FundParentID") or "").strip()
+    nav_native, nav_ccy = pick_native_net_asset_value(body, fund_id)
+    capital_flow = pick_capital_flow_adjustment(body)
+
     has_nav = any(c.get("navpu") is not None for c in classes_out)
     return {
         "available": has_nav and len(classes_out) > 0,
@@ -92,6 +211,9 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         "fund_currency": body.get("FundCurrency"),
         "valuation_date": body.get("ValuationDate"),
         "net_asset_value": body.get("NetAssetValue"),
+        "net_asset_value_native": nav_native,
+        "native_currency": nav_ccy,
+        "capital_flow": capital_flow,
         "classes": sorted(classes_out, key=lambda x: x.get("class_id") or ""),
     }
 

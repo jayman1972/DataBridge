@@ -53,6 +53,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src
 from bloomberg import get_bloomberg_client, BloombergClientType
 from sggg.diamond_client import DiamondNavUnavailableError, fetch_nav_sheet, get_diamond_client
 from sggg.nav_sheet_parse import (
+    FUND_NATIVE_CURRENCY,
     fetch_psc_portfolio_navs,
     normalize_valuation_date,
     parse_nav_sheet_summary,
@@ -2216,11 +2217,15 @@ def sggg_diamond_nav_availability():
 
         t_prep = time.time()
         wp: Dict[str, Any] = {}
+        wp_prior: Dict[str, Any] = {}
         psc_navs: Dict[str, Dict[str, Optional[float]]] = {}
-        with ThreadPoolExecutor(max_workers=2) as prep_executor:
+        with ThreadPoolExecutor(max_workers=3) as prep_executor:
             from datetime import date as _date
 
-            fut_wp = prep_executor.submit(estimates_by_fund_id, _date.fromisoformat(valuation_date))
+            val_d = _date.fromisoformat(valuation_date)
+            prior_d = _date.fromisoformat(prior_date)
+            fut_wp = prep_executor.submit(estimates_by_fund_id, val_d)
+            fut_wp_prior = prep_executor.submit(estimates_by_fund_id, prior_d)
             fut_psc = prep_executor.submit(
                 fetch_psc_portfolio_navs, fund_ids_list, prior_date, valuation_date
             )
@@ -2228,6 +2233,10 @@ def sggg_diamond_nav_availability():
                 wp = fut_wp.result()
             except Exception as exc:
                 wp = {"available": False, "error": str(exc), "estimates_by_fund_id": {}}
+            try:
+                wp_prior = fut_wp_prior.result()
+            except Exception as exc:
+                wp_prior = {"available": False, "error": str(exc), "estimates_by_fund_id": {}}
             psc_navs = fut_psc.result()
         prep_sec = time.time() - t_prep
 
@@ -2235,6 +2244,8 @@ def sggg_diamond_nav_availability():
             fid = spec["id"]
             name = spec.get("name") or fid
             est_row = (wp.get("estimates_by_fund_id") or {}).get(fid) or {}
+            est_prior = (wp_prior.get("estimates_by_fund_id") or {}).get(fid) or {}
+            native_ccy = FUND_NATIVE_CURRENCY.get(fid, "USD")
             entry: Dict[str, Any] = {
                 "fund_id": fid,
                 "fund_name": name,
@@ -2258,9 +2269,14 @@ def sggg_diamond_nav_availability():
                 "ehp_nav_change_dollars": None,
                 "diamond_opening_aum": None,
                 "diamond_closing_aum": None,
+                "diamond_aum_currency": native_ccy,
+                "aum_currency": native_ccy,
+                "sggg_nav_change_raw": None,
+                "capital_flow_adjustment": None,
                 "sggg_nav_change_note": None,
                 "_estimate_bps_from_compliance": est_row.get("estimate_bps") is not None,
                 "_est_row": est_row,
+                "_est_prior": est_prior,
             }
             if entry["_estimate_bps_from_compliance"]:
                 entry["estimate_bps"] = int(est_row["estimate_bps"])
@@ -2271,9 +2287,11 @@ def sggg_diamond_nav_availability():
             if est_row.get("prior_eod_aum") is not None:
                 entry["opening_nav_aum"] = float(est_row["prior_eod_aum"])
                 entry["opening_aum_source"] = "compliance"
+                entry["aum_currency"] = est_row.get("aum_currency") or native_ccy
             if est_row.get("current_aum") is not None:
                 entry["closing_nav_aum"] = float(est_row["current_aum"])
                 entry["closing_aum_source"] = "compliance"
+                entry["aum_currency"] = est_row.get("aum_currency") or native_ccy
             if est_row.get("prior_eod_aum") is not None and est_row.get("current_aum") is not None:
                 entry["compliance_opening_aum"] = float(est_row["prior_eod_aum"])
                 entry["compliance_closing_aum"] = float(est_row["current_aum"])
@@ -2284,9 +2302,11 @@ def sggg_diamond_nav_availability():
             if entry["opening_nav_aum"] is None and psc_row.get("opening") is not None:
                 entry["opening_nav_aum"] = float(psc_row["opening"])
                 entry["opening_aum_source"] = "psc"
+                entry["aum_currency"] = "CAD"
             if entry["closing_nav_aum"] is None and psc_row.get("closing") is not None:
                 entry["closing_nav_aum"] = float(psc_row["closing"])
                 entry["closing_aum_source"] = "psc"
+                entry["aum_currency"] = "CAD"
             return entry
 
         entries = [_base_entry(spec) for spec in fund_specs]
@@ -2327,6 +2347,7 @@ def sggg_diamond_nav_availability():
 
         for idx, entry in enumerate(entries):
             est_row = entry.pop("_est_row", {})
+            est_prior = entry.pop("_est_prior", {})
             estimate_bps_from_compliance = entry.pop("_estimate_bps_from_compliance", False)
             summary_close = diamond_results.get((idx, "close"))
             close_err = diamond_errors.get((idx, "close"))
@@ -2343,21 +2364,45 @@ def sggg_diamond_nav_availability():
             if summary_close:
                 entry["classes"] = summary_close.get("classes") or []
                 entry["class_i_bps"] = pick_class_i_bps(entry["classes"])
-                closing_nav = summary_close.get("net_asset_value")
+                closing_nav = summary_close.get("net_asset_value_native")
+                if closing_nav is None:
+                    closing_nav = summary_close.get("net_asset_value")
                 if closing_nav is not None:
                     entry["diamond_closing_aum"] = float(closing_nav)
+                if summary_close.get("native_currency"):
+                    entry["diamond_aum_currency"] = summary_close["native_currency"]
 
             summary_open = diamond_results.get((idx, "open"))
             open_err = diamond_errors.get((idx, "open"))
             if summary_open:
-                opening_nav = summary_open.get("net_asset_value")
+                opening_nav = summary_open.get("net_asset_value_native")
+                if opening_nav is None:
+                    opening_nav = summary_open.get("net_asset_value")
                 if opening_nav is not None:
                     entry["diamond_opening_aum"] = float(opening_nav)
+                if summary_open.get("native_currency") and not summary_close:
+                    entry["diamond_aum_currency"] = summary_open["native_currency"]
+
+            capital_adj = 0.0
+            capital_adj_parts: List[str] = []
+            if est_prior.get("net_subs_reds") is not None:
+                capital_adj += float(est_prior["net_subs_reds"])
+                capital_adj_parts.append(f"prior day {prior_date}")
+            if est_row.get("net_subs_reds") is not None:
+                capital_adj += float(est_row["net_subs_reds"])
+                capital_adj_parts.append(f"report day {valuation_date}")
+            if capital_adj == 0.0 and summary_close and summary_close.get("capital_flow") is not None:
+                capital_adj = float(summary_close["capital_flow"])
+                capital_adj_parts.append("Diamond NAV sheet")
 
             if entry["diamond_opening_aum"] is not None and entry["diamond_closing_aum"] is not None:
-                entry["sggg_nav_change_dollars"] = (
-                    entry["diamond_closing_aum"] - entry["diamond_opening_aum"]
-                )
+                raw_change = entry["diamond_closing_aum"] - entry["diamond_opening_aum"]
+                entry["sggg_nav_change_raw"] = raw_change
+                if capital_adj_parts:
+                    entry["capital_flow_adjustment"] = capital_adj
+                    entry["sggg_nav_change_dollars"] = raw_change - capital_adj
+                else:
+                    entry["sggg_nav_change_dollars"] = raw_change
             else:
                 missing: List[str] = []
                 if entry["diamond_opening_aum"] is None:

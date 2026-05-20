@@ -70,7 +70,49 @@ def _file_variant(path: Path) -> str:
     return "eod"
 
 
-def _read_steps_grid(workbook_path: Path, cell_range: str = "W2:AB10") -> List[List[Any]]:
+def _read_steps_grid_xls(workbook_path: Path, cell_range: str = "W2:AB10") -> List[List[Any]]:
+    try:
+        import xlrd
+    except ImportError as e:
+        raise RuntimeError(
+            f"Cannot read legacy Excel .xls file {workbook_path.name}: "
+            "install xlrd (pip install xlrd). openpyxl only supports .xlsx."
+        ) from e
+
+    from sggg.xlsx_stdlib import _parse_range
+
+    min_col, min_row, max_col, max_row = _parse_range(cell_range)
+    book = xlrd.open_workbook(str(workbook_path), formatting_info=False)
+    sheet_name = "Steps"
+    try:
+        sheet = book.sheet_by_name(sheet_name)
+    except xlrd.biffh.XLRDError:
+        match = next((n for n in book.sheet_names() if n.upper() == "STEPS"), None)
+        if not match:
+            raise RuntimeError(f"Sheet Steps not found in {workbook_path.name}") from None
+        sheet = book.sheet_by_name(match)
+
+    def _cell_value(row: int, col: int) -> Any:
+        ctype = sheet.cell_type(row, col)
+        val = sheet.cell_value(row, col)
+        if ctype == xlrd.XL_CELL_DATE:
+            from xlrd.xldate import xldate_as_datetime
+
+            return xldate_as_datetime(val, book.datemode)
+        if ctype == xlrd.XL_CELL_EMPTY:
+            return None
+        if ctype == xlrd.XL_CELL_TEXT:
+            s = str(val).strip()
+            return s or None
+        return val
+
+    return [
+        [_cell_value(r, c) for c in range(min_col - 1, max_col)]
+        for r in range(min_row - 1, max_row)
+    ]
+
+
+def _read_steps_grid_xlsx(workbook_path: Path, cell_range: str = "W2:AB10") -> List[List[Any]]:
     try:
         import openpyxl  # noqa: F401
 
@@ -102,6 +144,17 @@ def _read_steps_grid(workbook_path: Path, cell_range: str = "W2:AB10") -> List[L
         return read_sheet_range(workbook_path, "Steps", cell_range)
 
 
+def _read_steps_grid(workbook_path: Path, cell_range: str = "W2:AB10") -> List[List[Any]]:
+    suffix = workbook_path.suffix.lower()
+    if suffix == ".xls":
+        return _read_steps_grid_xls(workbook_path, cell_range)
+    if suffix == ".xlsx":
+        return _read_steps_grid_xlsx(workbook_path, cell_range)
+    raise RuntimeError(
+        f"Unsupported workbook format {suffix!r} for {workbook_path.name}; expected .xls or .xlsx"
+    )
+
+
 def find_compliance_workbook(
     valuation_date: date,
     root: Optional[str] = None,
@@ -115,8 +168,10 @@ def find_compliance_workbook(
         return None, f"Compliance check root not found: {base}"
 
     matches: List[Tuple[float, Path]] = []
-    for path in base.rglob("EHP Alt Funds - compliance check*.xlsx"):
+    for path in base.rglob("EHP Alt Funds - compliance check*"):
         if path.name.startswith("~$"):
+            continue
+        if path.suffix.lower() not in (".xls", ".xlsx"):
             continue
         file_date = _parse_workbook_date(path)
         if file_date != valuation_date:

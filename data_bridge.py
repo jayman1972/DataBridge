@@ -2256,6 +2256,9 @@ def sggg_diamond_nav_availability():
                 "compliance_opening_aum": None,
                 "compliance_closing_aum": None,
                 "ehp_nav_change_dollars": None,
+                "diamond_opening_aum": None,
+                "diamond_closing_aum": None,
+                "sggg_nav_change_note": None,
                 "_estimate_bps_from_compliance": est_row.get("estimate_bps") is not None,
                 "_est_row": est_row,
             }
@@ -2288,13 +2291,12 @@ def sggg_diamond_nav_availability():
 
         entries = [_base_entry(spec) for spec in fund_specs]
 
-        # Flat pool: every fund needs closing NAV sheet (class NAVPU/BPS); opening only if AUM still missing.
+        # Flat pool: closing NAV sheet (class NAVPU/BPS) + prior-day sheet for Diamond fund AUM / SGGG day change.
         diamond_tasks: List[tuple] = []
         for idx, entry in enumerate(entries):
             fid = entry["fund_id"]
             diamond_tasks.append((idx, fid, valuation_date, "close"))
-            if entry["opening_nav_aum"] is None:
-                diamond_tasks.append((idx, fid, prior_date, "open"))
+            diamond_tasks.append((idx, fid, prior_date, "open"))
 
         diamond_workers = min(
             int(os.environ.get("SGGG_DIAMOND_NAV_MAX_WORKERS", "12")),
@@ -2341,21 +2343,37 @@ def sggg_diamond_nav_availability():
             if summary_close:
                 entry["classes"] = summary_close.get("classes") or []
                 entry["class_i_bps"] = pick_class_i_bps(entry["classes"])
-                if entry["closing_nav_aum"] is None:
-                    closing = summary_close.get("net_asset_value")
-                    if closing is not None:
-                        entry["closing_nav_aum"] = float(closing)
-                        entry["closing_aum_source"] = "diamond"
+                closing_nav = summary_close.get("net_asset_value")
+                if closing_nav is not None:
+                    entry["diamond_closing_aum"] = float(closing_nav)
 
             summary_open = diamond_results.get((idx, "open"))
-            if summary_open and entry["opening_nav_aum"] is None:
-                opening = summary_open.get("net_asset_value")
-                if opening is not None:
-                    entry["opening_nav_aum"] = float(opening)
-                    entry["opening_aum_source"] = "diamond"
+            open_err = diamond_errors.get((idx, "open"))
+            if summary_open:
+                opening_nav = summary_open.get("net_asset_value")
+                if opening_nav is not None:
+                    entry["diamond_opening_aum"] = float(opening_nav)
 
-            if entry["opening_nav_aum"] is not None and entry["closing_nav_aum"] is not None:
-                entry["sggg_nav_change_dollars"] = entry["closing_nav_aum"] - entry["opening_nav_aum"]
+            if entry["diamond_opening_aum"] is not None and entry["diamond_closing_aum"] is not None:
+                entry["sggg_nav_change_dollars"] = (
+                    entry["diamond_closing_aum"] - entry["diamond_opening_aum"]
+                )
+            else:
+                missing: List[str] = []
+                if entry["diamond_opening_aum"] is None:
+                    if isinstance(open_err, DiamondNavUnavailableError):
+                        missing.append(open_err.user_message)
+                    else:
+                        missing.append(f"prior day ({prior_date})")
+                if entry["diamond_closing_aum"] is None:
+                    if isinstance(close_err, DiamondNavUnavailableError):
+                        missing.append(close_err.user_message)
+                    else:
+                        missing.append(f"report day ({valuation_date})")
+                if missing:
+                    entry["sggg_nav_change_note"] = (
+                        "Diamond fund AUM not available yet: " + "; ".join(missing)
+                    )
 
             if entry.get("estimate_bps") is not None and entry.get("opening_nav_aum") is not None:
                 entry["estimate_nav_change_dollars"] = float(entry["opening_nav_aum"]) * (

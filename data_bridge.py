@@ -2253,6 +2253,9 @@ def sggg_diamond_nav_availability():
                 "nav_change_difference_dollars": None,
                 "opening_aum_source": None,
                 "closing_aum_source": None,
+                "compliance_opening_aum": None,
+                "compliance_closing_aum": None,
+                "ehp_nav_change_dollars": None,
                 "_estimate_bps_from_compliance": est_row.get("estimate_bps") is not None,
                 "_est_row": est_row,
             }
@@ -2268,6 +2271,12 @@ def sggg_diamond_nav_availability():
             if est_row.get("current_aum") is not None:
                 entry["closing_nav_aum"] = float(est_row["current_aum"])
                 entry["closing_aum_source"] = "compliance"
+            if est_row.get("prior_eod_aum") is not None and est_row.get("current_aum") is not None:
+                entry["compliance_opening_aum"] = float(est_row["prior_eod_aum"])
+                entry["compliance_closing_aum"] = float(est_row["current_aum"])
+                entry["ehp_nav_change_dollars"] = (
+                    entry["compliance_closing_aum"] - entry["compliance_opening_aum"]
+                )
             psc_row = psc_navs.get(fid) or {}
             if entry["opening_nav_aum"] is None and psc_row.get("opening") is not None:
                 entry["opening_nav_aum"] = float(psc_row["opening"])

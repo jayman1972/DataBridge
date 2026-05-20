@@ -52,7 +52,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src
 
 from bloomberg import get_bloomberg_client, BloombergClientType
 from sggg.diamond_client import DiamondNavUnavailableError, fetch_nav_sheet, get_diamond_client
-from sggg.nav_sheet_parse import normalize_valuation_date, parse_nav_sheet_summary
+from sggg.nav_sheet_parse import (
+    normalize_valuation_date,
+    parse_nav_sheet_summary,
+    prior_business_day_iso,
+    pick_class_i_bps,
+)
+from sggg.nav_working_paper import estimates_by_fund_id
 
 from supabase import create_client, Client
 
@@ -2205,6 +2211,15 @@ def sggg_diamond_nav_availability():
         started = time.time()
         results: List[Dict[str, Any]] = [None] * len(fund_specs)  # type: ignore[list-item]
 
+        prior_date = prior_business_day_iso(valuation_date)
+        wp: Dict[str, Any] = {}
+        try:
+            from datetime import date as _date
+
+            wp = estimates_by_fund_id(_date.fromisoformat(valuation_date))
+        except Exception as exc:
+            wp = {"available": False, "error": str(exc), "estimates_by_fund_id": {}}
+
         def _fetch_one_parallel(spec: Dict[str, str]) -> Dict[str, Any]:
             fid = spec["id"]
             name = spec.get("name") or fid
@@ -2215,17 +2230,73 @@ def sggg_diamond_nav_availability():
                 "error": None,
                 "message": None,
                 "classes": [],
+                "prior_valuation_date": prior_date,
+                "opening_nav_aum": None,
+                "closing_nav_aum": None,
+                "sggg_nav_change_dollars": None,
+                "class_i_bps": None,
+                "estimate_nav_change_dollars": None,
+                "estimate_bps": None,
+                "bps_difference": None,
+                "nav_change_difference_dollars": None,
             }
+            est_row = (wp.get("estimates_by_fund_id") or {}).get(fid) or {}
+            if est_row.get("estimate_nav_change_dollars") is not None:
+                entry["estimate_nav_change_dollars"] = est_row["estimate_nav_change_dollars"]
+                entry["spreadsheet_label"] = est_row.get("spreadsheet_label")
+
             try:
-                raw = fetch_nav_sheet(
+                raw_close = fetch_nav_sheet(
                     client.base_url,
                     fid,
                     valuation_date,
                     auth_key=auth_key,
                 )
-                summary = parse_nav_sheet_summary(raw)
-                entry["classes"] = summary.get("classes") or []
-                entry["status"] = "available" if summary.get("available") else "unavailable"
+                summary_close = parse_nav_sheet_summary(raw_close)
+                entry["classes"] = summary_close.get("classes") or []
+                entry["class_i_bps"] = pick_class_i_bps(entry["classes"])
+                closing = summary_close.get("net_asset_value")
+                if closing is not None:
+                    entry["closing_nav_aum"] = float(closing)
+
+                try:
+                    raw_open = fetch_nav_sheet(
+                        client.base_url,
+                        fid,
+                        prior_date,
+                        auth_key=auth_key,
+                    )
+                    summary_open = parse_nav_sheet_summary(raw_open)
+                    opening = summary_open.get("net_asset_value")
+                    if opening is not None:
+                        entry["opening_nav_aum"] = float(opening)
+                except DiamondNavUnavailableError:
+                    pass
+                except Exception:
+                    pass
+
+                if entry["opening_nav_aum"] is not None and entry["closing_nav_aum"] is not None:
+                    entry["sggg_nav_change_dollars"] = entry["closing_nav_aum"] - entry["opening_nav_aum"]
+
+                if (
+                    entry["estimate_nav_change_dollars"] is not None
+                    and entry["opening_nav_aum"] is not None
+                    and entry["opening_nav_aum"] != 0
+                ):
+                    entry["estimate_bps"] = int(
+                        round(
+                            (float(entry["estimate_nav_change_dollars"]) / float(entry["opening_nav_aum"]))
+                            * 10_000
+                        )
+                    )
+                if entry["class_i_bps"] is not None and entry["estimate_bps"] is not None:
+                    entry["bps_difference"] = int(entry["class_i_bps"]) - int(entry["estimate_bps"])
+                if entry["sggg_nav_change_dollars"] is not None and entry["estimate_nav_change_dollars"] is not None:
+                    entry["nav_change_difference_dollars"] = (
+                        float(entry["sggg_nav_change_dollars"]) - float(entry["estimate_nav_change_dollars"])
+                    )
+
+                entry["status"] = "available" if summary_close.get("available") else "unavailable"
             except DiamondNavUnavailableError as exc:
                 entry["status"] = "unavailable"
                 entry["message"] = exc.user_message
@@ -2250,7 +2321,19 @@ def sggg_diamond_nav_availability():
             max_workers,
         )
 
-        return jsonify({"valuation_date": valuation_date, "funds": results})
+        return jsonify(
+            {
+                "valuation_date": valuation_date,
+                "prior_valuation_date": prior_date,
+                "working_paper": {
+                    "available": wp.get("available", False),
+                    "workbook_path": wp.get("workbook_path"),
+                    "note": wp.get("note"),
+                    "error": wp.get("error"),
+                },
+                "funds": results,
+            }
+        )
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

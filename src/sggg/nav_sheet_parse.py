@@ -96,6 +96,29 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
     }
 
 
+def prior_business_day_iso(valuation_date: str) -> str:
+    """Previous business day relative to yyyy-mm-dd valuation date."""
+    from datetime import date, timedelta
+
+    d = date.fromisoformat(normalize_valuation_date(valuation_date))
+    d = d - timedelta(days=1)
+    while d.weekday() >= 5:
+        d = d - timedelta(days=1)
+    return d.isoformat()
+
+
+def pick_class_i_bps(classes: List[Dict[str, Any]]) -> Optional[int]:
+    """Return valuation-period return (bps) for Class I share class."""
+    for cls in classes or []:
+        cid = (cls.get("class_id") or "").strip()
+        code = (cls.get("class_code") or "").strip()
+        if cid.upper() in ("I", "CLASS I") or code.upper() in ("I", "CLASS I"):
+            return cls.get("bps")
+        if re.match(r"^class\s*i\b", cid, re.IGNORECASE):
+            return cls.get("bps")
+    return None
+
+
 def normalize_valuation_date(raw: str) -> str:
     s = (raw or "").strip()
     if not s:

@@ -221,43 +221,24 @@ def fund_aum_from_summary(summary: Dict[str, Any]) -> Optional[float]:
     return _parse_money_value(summary.get("net_asset_value"))
 
 
-_FX_NAME_RE = re.compile(r"exchange|fx|\busd\b.*\bcad\b|\bcad\b.*\busd\b", re.IGNORECASE)
-_CAPITAL_ITEM_RE = re.compile(
-    r"(^net\s+)?(subs|subscr|redemp|capital\s+flow|contributions?|withdrawals?|net\s+capital)",
-    re.IGNORECASE,
-)
-
-
-def pick_usd_to_cad_fx(body: Dict[str, Any]) -> Optional[float]:
-    """USD/CAD multiplier from fund-level NAV sheet (1 USD = rate CAD)."""
-    items = _section_items_by_name(body)
-    for name, raw in items.items():
-        if not _FX_NAME_RE.search(name or ""):
+def sum_class_net_assets_cad(body: Dict[str, Any], fund_id: str) -> Optional[float]:
+    """Sum per-class net assets for CAD series only (USD series excluded)."""
+    base = FUND_NATIVE_CURRENCY.get(fund_id, "CAD")
+    raw_classes = body.get("ClassSeriesFundList")
+    if not isinstance(raw_classes, list):
+        return None
+    total = 0.0
+    found = 0
+    for entry in raw_classes:
+        if not isinstance(entry, dict):
             continue
-        rate = _parse_money_value(raw)
-        if rate is None or rate <= 0:
+        class_code = (entry.get("ClassCode") or "").strip()
+        class_id = (entry.get("FundID") or "").strip()
+        if base == "CAD" and _is_usd_share_class(class_code, class_id):
             continue
-        if 0.5 <= rate <= 2.5:
-            return rate
-        if rate > 2.5:
-            return 1.0 / rate
-    return None
-
-
-def _class_net_assets_native(entry: Dict[str, Any], *, want_usd: bool) -> Optional[float]:
-    items = _section_items_by_name(entry)
-    if want_usd:
-        keys = (
-            "Net Asset Value (USD)",
-            "Net Asset Value USD",
-            "Total Net Assets (USD)",
-            "Net Assets (USD)",
-            "Net Asset Value",
-            "Total Net Assets",
-            "Net Assets",
-        )
-    else:
-        keys = (
+        items = _section_items_by_name(entry)
+        class_nav = None
+        for key in (
             "Net Asset Value (CAD)",
             "Net Asset Value CAD",
             "Total Net Assets (CAD)",
@@ -265,49 +246,129 @@ def _class_net_assets_native(entry: Dict[str, Any], *, want_usd: bool) -> Option
             "Net Asset Value",
             "Total Net Assets",
             "Net Assets",
-        )
-    for key in keys:
-        val = _parse_money_value(items.get(key))
-        if val is not None:
-            return val
-    return _parse_money_value(entry.get("NetAssetValue"))
+        ):
+            class_nav = _parse_money_value(items.get(key))
+            if class_nav is not None:
+                break
+        if class_nav is None:
+            class_nav = _parse_money_value(entry.get("NetAssetValue"))
+        if class_nav is not None:
+            total += class_nav
+            found += 1
+    return total if found else None
 
 
-def sum_class_net_assets_cad(body: Dict[str, Any], fund_id: str) -> Optional[float]:
-    """
-    Sum per-class net assets in CAD equivalent (CAD series + USD series converted at sheet FX).
-    """
-    base = FUND_NATIVE_CURRENCY.get(fund_id, "CAD")
-    raw_classes = body.get("ClassSeriesFundList")
-    if not isinstance(raw_classes, list):
-        return None
-    fx = pick_usd_to_cad_fx(body) if base == "CAD" else None
-    total = 0.0
-    found = 0
-    missing_usd = 0
-    for entry in raw_classes:
+def _is_capital_flow_item(name: str) -> bool:
+    """True for subscription/redemption dollar lines (not NAV-before-fee rows)."""
+    upper = (name or "").upper()
+    if not upper:
+        return False
+    if "NET ASSET" in upper or " BEFORE " in upper or "NAVPU" in upper:
+        return False
+    # Diamond class-level lines (Alpha May 2026): positive = inflow, negative = outflow.
+    if re.search(r"ADJUSTED\s+OPENING\s+EQUITY\s+(CONTRIBUTIONS|REDEMPTIONS)", upper):
+        return True
+    if re.search(r"UNITS\s+(CONTRIBUTIONS|REDEMPTIONS)", upper):
+        return True
+    if "SUBSCRIPTION" in upper or "CONTRIBUTION" in upper:
+        return "EQUITY" in upper or "UNITS" in upper or upper in ("SUBSCRIPTIONS", "SUBSCRIPTION")
+    if "REDEMPTION" in upper or "WITHDRAWAL" in upper:
+        return "EQUITY" in upper or "UNITS" in upper or upper in ("REDEMPTIONS", "REDEMPTION")
+    if "NET SUBS" in upper or "NET CAPITAL" in upper or "CAPITAL FLOW" in upper:
+        return True
+    return False
+
+
+def list_capital_flow_candidates(body: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """All subs/redemption-like lines on the NAV sheet (for debugging / UI)."""
+    out: List[Dict[str, Any]] = []
+    for scope, node in (("fund", body),):
+        items = _section_items_by_name(node)
+        for name, raw in sorted(items.items()):
+            if not _is_capital_flow_item(name):
+                continue
+            val = _parse_money_value(raw)
+            if val is not None:
+                out.append({"scope": scope, "class_code": None, "name": name, "amount": val})
+    for entry in body.get("ClassSeriesFundList") or []:
         if not isinstance(entry, dict):
             continue
-        class_code = (entry.get("ClassCode") or "").strip()
-        class_id = (entry.get("FundID") or "").strip()
-        is_usd = base == "CAD" and _is_usd_share_class(class_code, class_id)
-        class_nav = _class_net_assets_native(entry, want_usd=is_usd)
-        if class_nav is None:
-            if is_usd:
-                missing_usd += 1
-            continue
-        if is_usd:
-            if fx is None:
-                missing_usd += 1
-                continue
-            class_nav = class_nav * fx
-        total += class_nav
-        found += 1
-    if found == 0:
-        return None
-    if missing_usd and fx is None:
-        return None
-    return total
+        code = (entry.get("ClassCode") or "").strip() or None
+        for sec in entry.get("SectionList") or []:
+            sec_name = (sec.get("SectionName") or "").strip()
+            for item in sec.get("SectionItem") or []:
+                name = (item.get("Name") or "").strip()
+                if not _is_capital_flow_item(name):
+                    continue
+                val = _parse_money_value(item.get("Value"))
+                if val is not None:
+                    out.append(
+                        {
+                            "scope": "class",
+                            "class_code": code,
+                            "section": sec_name or None,
+                            "name": name,
+                            "amount": val,
+                        }
+                    )
+    return out
+
+
+def pick_fund_aum_for_role(
+    body: Dict[str, Any],
+    fund_id: str,
+    role: str,
+) -> Tuple[Optional[float], Optional[str]]:
+    """
+    Fund AUM from GetNAVSheet for opening vs closing on the sheet's valuation date.
+    role: 'closing' (EOD / end of period) or 'opening' (start of period).
+    """
+    items = _section_items_by_name(body)
+    root_nav = _parse_money_value(body.get("NetAssetValue"))
+
+    if role == "closing":
+        for key in (
+            "Closing Net Asset Value",
+            "Closing Net Asset Value (CAD)",
+            "Ending Net Asset Value",
+            "Net Asset Value (CAD)",
+            "Net Asset Value",
+            "Total Net Assets",
+            "Fund Net Asset Value",
+        ):
+            v = _parse_money_value(items.get(key))
+            if v is not None:
+                return v, key
+        if root_nav is not None:
+            return root_nav, "NetAssetValue"
+        class_sum = sum_class_net_assets_cad(body, fund_id)
+        if class_sum is not None:
+            return class_sum, "class_sum_cad"
+        return None, None
+
+    for key in (
+        "Opening Net Asset Value",
+        "Opening Net Asset Value (CAD)",
+        "Beginning Net Asset Value",
+        "Opening Net Assets",
+        "Beginning Net Assets",
+    ):
+        v = _parse_money_value(items.get(key))
+        if v is not None:
+            return v, key
+    for name, raw in items.items():
+        upper = (name or "").upper()
+        if "OPENING" in upper or "BEGINNING" in upper:
+            if "NET ASSET" in upper or "NAV" in upper:
+                v = _parse_money_value(raw)
+                if v is not None:
+                    return v, name
+    if root_nav is not None:
+        return root_nav, "NetAssetValue"
+    class_sum = sum_class_net_assets_cad(body, fund_id)
+    if class_sum is not None:
+        return class_sum, "class_sum_cad"
+    return None, None
 
 
 def pick_fund_net_asset_value(
@@ -342,9 +403,9 @@ def pick_fund_net_asset_value(
 
 def pick_capital_flow_adjustment(body: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
     """
-    Net subscriptions/redemptions on the valuation date from Diamond NAV sheet, if present.
+    Net subscriptions/redemptions on the valuation date from Diamond NAV sheet.
     Positive = net inflow (same sign as compliance Net Subs (reds)).
-    Returns (amount, label) where label is the sheet line used.
+    Sums class-level Adjusted Opening Equity Contributions/Redemptions and Units Contributions/Redemptions.
     """
     items = _section_items_by_name(body)
     for subs_key, reds_key in (
@@ -359,48 +420,26 @@ def pick_capital_flow_adjustment(body: Dict[str, Any]) -> Tuple[Optional[float],
             subs = _parse_money_value(items.get(subs_key)) or 0.0
             reds = _parse_money_value(items.get(reds_key)) or 0.0
             if subs != 0 or reds != 0:
-                net = subs - abs(reds) if reds < 0 else subs + reds
+                net = subs + reds
                 return net, f"{subs_key} / {reds_key}"
         else:
             net = _parse_money_value(items.get(subs_key))
             if net is not None:
                 return net, subs_key
 
-    for name, raw in items.items():
-        if not _CAPITAL_ITEM_RE.search(name or ""):
+    total = 0.0
+    labels: List[str] = []
+    for row in list_capital_flow_candidates(body):
+        if row.get("scope") != "class":
             continue
-        net = _parse_money_value(raw)
-        if net is not None and net != 0:
-            return net, name
-
-    class_subs = 0.0
-    class_reds = 0.0
-    class_found = False
-    for entry in body.get("ClassSeriesFundList") or []:
-        if not isinstance(entry, dict):
+        amt = float(row["amount"])
+        if amt == 0:
             continue
-        citems = _section_items_by_name(entry)
-        subs = _parse_money_value(citems.get("Subscriptions")) or _parse_money_value(
-            citems.get("Subscription")
-        )
-        reds = _parse_money_value(citems.get("Redemptions")) or _parse_money_value(
-            citems.get("Redemption")
-        )
-        if subs is not None or reds is not None:
-            class_subs += subs or 0.0
-            class_reds += reds or 0.0
-            class_found = True
-        for name, raw in citems.items():
-            if not _CAPITAL_ITEM_RE.search(name or ""):
-                continue
-            net = _parse_money_value(raw)
-            if net is not None and net != 0:
-                class_subs += net
-                class_found = True
-    if class_found and (class_subs != 0 or class_reds != 0):
-        net = class_subs - abs(class_reds) if class_reds < 0 else class_subs + class_reds
-        return net, "class-level subs/reds"
-
+        total += amt
+        code = row.get("class_code") or "?"
+        labels.append(f"{code}:{row.get('name')}")
+    if labels:
+        return total, "; ".join(labels[:6]) + ("…" if len(labels) > 6 else "")
     return None, None
 
 
@@ -476,9 +515,11 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
     header_nav, nav_ccy = pick_fund_net_asset_value(body, fund_id)
     root_nav = _parse_money_value(body.get("NetAssetValue"))
     class_sum = sum_class_net_assets_cad(body, fund_id)
-    candidates = [v for v in (root_nav, header_nav, class_sum) if v is not None]
-    nav_native = max(candidates) if candidates else None
+    aum_closing, closing_label = pick_fund_aum_for_role(body, fund_id, "closing")
+    aum_opening, opening_label = pick_fund_aum_for_role(body, fund_id, "opening")
+    nav_native = aum_closing
     capital_flow, capital_flow_label = pick_capital_flow_adjustment(body)
+    sheet_date = normalize_diamond_sheet_date(body.get("ValuationDate"))
 
     has_nav = any(c.get("navpu") is not None for c in classes_out)
     return {
@@ -486,19 +527,25 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         "fund_parent_id": body.get("FundParentID"),
         "fund_currency": body.get("FundCurrency"),
         "valuation_date": body.get("ValuationDate"),
+        "sheet_valuation_date": sheet_date,
         "net_asset_value": body.get("NetAssetValue"),
         "net_asset_value_native": nav_native,
+        "fund_aum_closing": aum_closing,
+        "fund_aum_closing_label": closing_label,
+        "fund_aum_opening": aum_opening,
+        "fund_aum_opening_label": opening_label,
         "native_currency": nav_ccy,
         "capital_flow": capital_flow,
         "capital_flow_label": capital_flow_label,
-        "aum_parse_version": 4,
+        "capital_flow_candidates": list_capital_flow_candidates(body),
+        "aum_parse_version": 5,
         "aum_from_class_sum": class_sum is not None and nav_native == class_sum,
         "diamond_aum_components": {
             "root_net_asset_value": root_nav,
             "header_section_cad": header_nav,
-            "class_sum_cad_equiv": class_sum,
-            "usd_to_cad_fx": pick_usd_to_cad_fx(body),
-            "capital_flow_label": capital_flow_label,
+            "class_sum_cad": class_sum,
+            "closing_label": closing_label,
+            "opening_label": opening_label,
         },
         "classes": sorted(classes_out, key=lambda x: x.get("class_id") or ""),
     }

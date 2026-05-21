@@ -318,6 +318,7 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
                 "display_class": display_class,
                 "navpu": navpu,
                 "nav_currency": class_ccy,
+                "nav_source": "diamond",
                 "bps": _return_value_to_bps(ret_raw),
                 "return_display": str(ret_raw).strip() if ret_raw is not None else None,
             }

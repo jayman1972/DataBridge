@@ -155,6 +155,9 @@ def _read_steps_grid(workbook_path: Path, cell_range: str = "W2:AK10") -> List[L
     )
 
 
+_workbook_path_cache: Dict[str, Tuple[Optional[Path], Optional[str]]] = {}
+
+
 def find_compliance_workbook(
     valuation_date: date,
     root: Optional[str] = None,
@@ -164,8 +167,13 @@ def find_compliance_workbook(
     whose filename date equals valuation_date. No cross-date fallback.
     """
     base = Path(root or os.environ.get("COMPLIANCE_CHECK_ROOT", DEFAULT_ROOT))
+    cache_key = f"{base.resolve()}:{valuation_date.isoformat()}"
+    if cache_key in _workbook_path_cache:
+        return _workbook_path_cache[cache_key]
     if not base.exists():
-        return None, f"Compliance check root not found: {base}"
+        miss = (None, f"Compliance check root not found: {base}")
+        _workbook_path_cache[cache_key] = miss
+        return miss
 
     # Date in filename — glob only that day (faster than rglob + parse every file).
     date_token = valuation_date.strftime("%Y.%m.%d")
@@ -187,16 +195,21 @@ def find_compliance_workbook(
             continue
 
     if not matches:
-        return None, (
-            f"No compliance check workbook found for {valuation_date.isoformat()} under {base}"
+        miss = (
+            None,
+            f"No compliance check workbook found for {valuation_date.isoformat()} under {base}",
         )
+        _workbook_path_cache[cache_key] = miss
+        return miss
 
     matches.sort(key=lambda t: t[0], reverse=True)
     chosen = matches[0][1]
     note = None
     if len(matches) > 1:
         note = f"Using latest save on {valuation_date.isoformat()} ({len(matches)} files that day)"
-    return chosen, note
+    result = (chosen, note)
+    _workbook_path_cache[cache_key] = result
+    return result
 
 
 def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:

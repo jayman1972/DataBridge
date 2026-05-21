@@ -178,7 +178,8 @@ def _diamond_post(
         "AuthKey": auth_key,
         "Content-Type": "application/json",
     }
-    resp = _get_http_session().post(url, json=payload, headers=headers, timeout=120)
+    timeout_sec = int(os.environ.get("SGGG_DIAMOND_HTTP_TIMEOUT", "45"))
+    resp = _get_http_session().post(url, json=payload, headers=headers, timeout=timeout_sec)
     try:
         resp.raise_for_status()
     except Exception as e:

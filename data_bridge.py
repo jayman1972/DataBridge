@@ -2216,37 +2216,19 @@ def sggg_diamond_nav_availability():
         prior_date = prior_business_day_iso(valuation_date)
         fund_ids_list = [spec["id"] for spec in fund_specs]
 
-        t_prep = time.time()
-        wp: Dict[str, Any] = {}
-        wp_prior: Dict[str, Any] = {}
-        psc_navs: Dict[str, Dict[str, Optional[float]]] = {}
-        with ThreadPoolExecutor(max_workers=3) as prep_executor:
-            from datetime import date as _date
+        include_prior_diamond = os.environ.get("SGGG_NAV_CHECKER_PRIOR_DIAMOND", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        use_psc = os.environ.get("SGGG_NAV_CHECKER_USE_PSC", "0").strip().lower() in ("1", "true", "yes")
 
-            val_d = _date.fromisoformat(valuation_date)
-            prior_d = _date.fromisoformat(prior_date)
-            fut_wp = prep_executor.submit(estimates_by_fund_id, val_d)
-            fut_wp_prior = prep_executor.submit(estimates_by_fund_id, prior_d)
-            fut_psc = prep_executor.submit(
-                fetch_psc_portfolio_navs, fund_ids_list, prior_date, valuation_date
-            )
-            try:
-                wp = fut_wp.result()
-            except Exception as exc:
-                wp = {"available": False, "error": str(exc), "estimates_by_fund_id": {}}
-            try:
-                wp_prior = fut_wp_prior.result()
-            except Exception as exc:
-                wp_prior = {"available": False, "error": str(exc), "estimates_by_fund_id": {}}
-            psc_navs = fut_psc.result()
-        prep_sec = time.time() - t_prep
-
-        def _base_entry(spec: Dict[str, str]) -> Dict[str, Any]:
+        def _base_entry(spec: Dict[str, str], wp: Dict[str, Any], wp_prior: Dict[str, Any], psc_navs: Dict) -> Dict[str, Any]:
             fid = spec["id"]
             name = spec.get("name") or fid
             est_row = (wp.get("estimates_by_fund_id") or {}).get(fid) or {}
             est_prior = (wp_prior.get("estimates_by_fund_id") or {}).get(fid) or {}
-            native_ccy = FUND_NATIVE_CURRENCY.get(fid, "USD")
+            native_ccy = FUND_NATIVE_CURRENCY.get(fid, "CAD")
             entry: Dict[str, Any] = {
                 "fund_id": fid,
                 "fund_name": name,
@@ -2310,41 +2292,94 @@ def sggg_diamond_nav_availability():
                 entry["aum_currency"] = "CAD"
             return entry
 
-        entries = [_base_entry(spec) for spec in fund_specs]
-
-        # Flat pool: closing NAV sheet (class NAVPU/BPS) + prior-day sheet for Diamond fund AUM / SGGG day change.
+        # Diamond (class NAVPU/BPS) + compliance + optional PSC in one pool so Diamond is not blocked by P: reads.
         diamond_tasks: List[tuple] = []
-        for idx, entry in enumerate(entries):
-            fid = entry["fund_id"]
+        for idx, spec in enumerate(fund_specs):
+            fid = spec["id"]
             diamond_tasks.append((idx, fid, valuation_date, "close"))
-            diamond_tasks.append((idx, fid, prior_date, "open"))
+            if include_prior_diamond:
+                diamond_tasks.append((idx, fid, prior_date, "open"))
 
         diamond_workers = min(
             int(os.environ.get("SGGG_DIAMOND_NAV_MAX_WORKERS", "12")),
             max(1, len(diamond_tasks)),
         )
+        prep_slots = 3 if use_psc else 2
+        pool_workers = max(diamond_workers, prep_slots)
+
+        wp: Dict[str, Any] = {}
+        wp_prior: Dict[str, Any] = {}
+        psc_navs: Dict[str, Dict[str, Optional[float]]] = {}
         diamond_results: Dict[tuple, Dict[str, Any]] = {}
         diamond_errors: Dict[tuple, Any] = {}
+        diamond_call_secs: List[float] = []
+        compliance_sec = 0.0
+        compliance_prior_sec = 0.0
+        psc_sec = 0.0
 
         def _fetch_nav_task(task: tuple) -> tuple:
+            t0 = time.time()
             idx, fid, vdate, role = task
             raw = fetch_nav_sheet(client.base_url, fid, vdate, auth_key=auth_key)
-            return (idx, role, parse_nav_sheet_summary(raw))
+            return (idx, role, parse_nav_sheet_summary(raw), time.time() - t0)
 
-        t_diamond = time.time()
-        with ThreadPoolExecutor(max_workers=diamond_workers) as diamond_executor:
-            future_map = {diamond_executor.submit(_fetch_nav_task, t): t for t in diamond_tasks}
-            for future in as_completed(future_map):
-                task = future_map[future]
-                key = (task[0], task[3])
-                try:
-                    idx, role, summary = future.result()
-                    diamond_results[(idx, role)] = summary
-                except DiamondNavUnavailableError as exc:
-                    diamond_errors[key] = exc
-                except Exception as exc:
-                    diamond_errors[key] = exc
-        diamond_sec = time.time() - t_diamond
+        def _timed_estimates(val_d):
+            t0 = time.time()
+            try:
+                return estimates_by_fund_id(val_d), time.time() - t0
+            except Exception as exc:
+                return (
+                    {"available": False, "error": str(exc), "estimates_by_fund_id": {}},
+                    time.time() - t0,
+                )
+
+        def _timed_psc():
+            t0 = time.time()
+            try:
+                return fetch_psc_portfolio_navs(fund_ids_list, prior_date, valuation_date), time.time() - t0
+            except Exception:
+                return {}, time.time() - t0
+
+        from datetime import date as _date
+
+        val_d = _date.fromisoformat(valuation_date)
+        prior_d = _date.fromisoformat(prior_date)
+
+        t_parallel = time.time()
+        with ThreadPoolExecutor(max_workers=pool_workers) as executor:
+            future_kind: Dict[Any, tuple] = {}
+            for task in diamond_tasks:
+                future_kind[executor.submit(_fetch_nav_task, task)] = ("diamond", task)
+            future_kind[executor.submit(_timed_estimates, val_d)] = ("wp", None)
+            future_kind[executor.submit(_timed_estimates, prior_d)] = ("wp_prior", None)
+            if use_psc:
+                future_kind[executor.submit(_timed_psc)] = ("psc", None)
+
+            for future in as_completed(future_kind):
+                kind, tag = future_kind[future]
+                if kind == "diamond":
+                    key = (tag[0], tag[3])
+                    try:
+                        idx, role, summary, call_sec = future.result()
+                        diamond_call_secs.append(call_sec)
+                        diamond_results[(idx, role)] = summary
+                    except DiamondNavUnavailableError as exc:
+                        diamond_errors[key] = exc
+                    except Exception as exc:
+                        diamond_errors[key] = exc
+                elif kind == "wp":
+                    wp, compliance_sec = future.result()
+                elif kind == "wp_prior":
+                    wp_prior, compliance_prior_sec = future.result()
+                elif kind == "psc":
+                    psc_navs, psc_sec = future.result()
+        parallel_wall_sec = time.time() - t_parallel
+        diamond_wall_sec = max(diamond_call_secs) if diamond_call_secs else 0.0
+        diamond_avg_sec = (
+            sum(diamond_call_secs) / len(diamond_call_secs) if diamond_call_secs else 0.0
+        )
+
+        entries = [_base_entry(spec, wp, wp_prior, psc_navs) for spec in fund_specs]
 
         for idx, entry in enumerate(entries):
             est_row = entry.pop("_est_row", {})
@@ -2364,6 +2399,7 @@ def sggg_diamond_nav_availability():
 
             if summary_close:
                 entry["classes"] = summary_close.get("classes") or []
+                entry["class_nav_source"] = "diamond"
                 entry["class_i_bps"] = pick_class_i_bps(entry["classes"])
                 entry["diamond_nav_requested_date"] = valuation_date
                 sheet_date = normalize_diamond_sheet_date(summary_close.get("valuation_date"))
@@ -2457,15 +2493,33 @@ def sggg_diamond_nav_availability():
             results[idx] = entry
 
         elapsed = time.time() - started
+        bottleneck_hint = None
+        if parallel_wall_sec > diamond_wall_sec + 2:
+            if max(compliance_sec, compliance_prior_sec) >= diamond_wall_sec:
+                bottleneck_hint = (
+                    "Compliance workbook reads on P: (two dates) dominated wall time; "
+                    "Diamond calls now run in parallel with those reads."
+                )
+            elif use_psc and psc_sec >= diamond_wall_sec:
+                bottleneck_hint = "PSC ODBC queries dominated wall time (disable with SGGG_NAV_CHECKER_USE_PSC=0)."
+        if not bottleneck_hint and diamond_avg_sec >= 12:
+            bottleneck_hint = (
+                f"Diamond GetNAVSheet averaged {diamond_avg_sec:.1f}s per call "
+                f"(slowest {diamond_wall_sec:.1f}s); network/API latency, not request count."
+            )
+
         logging.getLogger(__name__).info(
             "nav-availability: %d funds, %d diamond calls in %.2fs "
-            "(prep=%.2fs diamond=%.2fs workers=%d)",
+            "(parallel=%.2fs compliance=%.2fs/%.2fs diamond_wall=%.2fs workers=%d psc=%s)",
             len(fund_specs),
             len(diamond_tasks),
             elapsed,
-            prep_sec,
-            diamond_sec,
+            parallel_wall_sec,
+            compliance_sec,
+            compliance_prior_sec,
+            diamond_wall_sec,
             diamond_workers,
+            use_psc,
         )
 
         compliance_meta = {
@@ -2487,10 +2541,17 @@ def sggg_diamond_nav_availability():
                 "funds": results,
                 "timing": {
                     "total_sec": round(elapsed, 2),
-                    "prep_sec": round(prep_sec, 2),
-                    "diamond_sec": round(diamond_sec, 2),
+                    "parallel_wall_sec": round(parallel_wall_sec, 2),
+                    "compliance_sec": round(compliance_sec, 2),
+                    "compliance_prior_sec": round(compliance_prior_sec, 2),
+                    "psc_sec": round(psc_sec, 2) if use_psc else None,
+                    "psc_enabled": use_psc,
+                    "diamond_wall_sec": round(diamond_wall_sec, 2),
+                    "diamond_slowest_sec": round(diamond_wall_sec, 2),
+                    "diamond_avg_sec": round(diamond_avg_sec, 2),
                     "diamond_requests": len(diamond_tasks),
                     "diamond_workers": diamond_workers,
+                    "bottleneck_hint": bottleneck_hint,
                 },
             }
         )

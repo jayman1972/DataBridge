@@ -6,6 +6,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sggg.nav_sheet_parse import (  # noqa: E402
+    _display_class_label,
+    _infer_fund_series_prefix,
     prior_business_day_iso,
     prior_business_days_for_lookup,
     prior_open_sheet_is_usable,
@@ -29,7 +31,18 @@ def test_prior_sheet_usable() -> None:
     assert prior_open_sheet_is_usable(None, val, "2026-05-18")[0] is False
 
 
+def test_usd_display_class_prefix() -> None:
+    codes = ["200A", "200F", "200I", "200O", "UA", "UO"]
+    prefix = _infer_fund_series_prefix(codes)
+    assert prefix == "200"
+    assert _display_class_label("UA", "", prefix) == "200UA"
+    assert _display_class_label("UO", "", prefix) == "200UO"
+    assert _display_class_label("200A", "", prefix) == "200A"
+    assert _display_class_label("550UF", "", "550") == "550UF"
+
+
 if __name__ == "__main__":
     test_may_19_holiday_prior_chain()
     test_prior_sheet_usable()
+    test_usd_display_class_prefix()
     print("ok")

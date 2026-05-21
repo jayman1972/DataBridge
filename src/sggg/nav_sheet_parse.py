@@ -83,6 +83,9 @@ def _normalize_currency_code(raw: Any, default: str = "CAD") -> str:
 
 
 _SERIES_CODE_RE = re.compile(r"^[A-Z0-9]{2,8}$")
+_FUND_SERIES_PREFIX_RE = re.compile(r"^(\d{2,4})")
+# Diamond sometimes returns USD ClassCode without fund digits (UA, UO, UF).
+_USD_CLASS_SUFFIX_RE = re.compile(r"^U[A-Z]{1,2}$")
 
 # Section labels that are not closing NAVPU (often prior-day or change fields).
 _NAVPU_SKIP_NAME_FRAGMENTS = (
@@ -110,6 +113,36 @@ def _class_series_token(class_code: str, class_id: str) -> str:
     if _SERIES_CODE_RE.match(code):
         return code
     return ""
+
+
+def _infer_fund_series_prefix(class_codes: List[str]) -> str:
+    """Numeric fund series prefix from CAD classes (e.g. 200 from 200A, 200I)."""
+    counts: Dict[str, int] = {}
+    for raw in class_codes:
+        code = (raw or "").strip().upper()
+        m = _FUND_SERIES_PREFIX_RE.match(code)
+        if m:
+            p = m.group(1)
+            counts[p] = counts.get(p, 0) + 1
+    if not counts:
+        return ""
+    return max(counts, key=counts.get)
+
+
+def _display_class_label(class_code: str, class_id: str, fund_prefix: str) -> str:
+    """Human-readable class code; prefix USD suffixes (UA → 200UA) when Diamond omits digits."""
+    token = _class_series_token(class_code, class_id)
+    code = (class_code or "").strip().upper()
+    label = token or code
+    if not label:
+        return (class_id or "").strip()
+    if (
+        fund_prefix
+        and _USD_CLASS_SUFFIX_RE.match(label)
+        and not label.startswith(fund_prefix)
+    ):
+        return f"{fund_prefix}{label}"
+    return label
 
 
 def _is_usd_share_class(class_code: str, class_id: str) -> bool:
@@ -660,6 +693,13 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
             "classes": [],
         }
 
+    class_codes_for_prefix = [
+        (e.get("ClassCode") or "").strip()
+        for e in raw_classes
+        if isinstance(e, dict)
+    ]
+    fund_series_prefix = _infer_fund_series_prefix(class_codes_for_prefix)
+
     classes_out: List[Dict[str, Any]] = []
     for entry in raw_classes:
         if not isinstance(entry, dict):
@@ -672,7 +712,7 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         fund_base = FUND_NATIVE_CURRENCY.get(fund_parent_id, "CAD")
         navpu, class_ccy = _parse_class_navpu(entry, fund_base)
         ret_raw = _valuation_period_return(entry)
-        display_class = _class_series_token(class_code, class_id) or class_code or class_id
+        display_class = _display_class_label(class_code, class_id, fund_series_prefix)
         classes_out.append(
             {
                 "class_id": class_id,

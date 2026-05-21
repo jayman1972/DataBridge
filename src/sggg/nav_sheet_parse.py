@@ -516,13 +516,30 @@ def capital_flow_net_from_summary(
     )
 
 
+def prior_flows_for_opening_basis(summary_prior: Dict[str, Any]) -> float:
+    """
+    Flows on the prior sheet that adjust opening AUM before the report day.
+
+    Exclude Adjusted Opening Equity Contributions/Redemptions: those are already
+    reflected in prior EOD closing NAV (e.g. May 20 close includes the May 19 sub).
+    """
+    cands = summary_prior.get("capital_flow_candidates") or []
+    return sum(
+        float(r["amount"])
+        for r in cands
+        if r.get("scope") == "class" and not _opening_equity_flow_row(r)
+    )
+
+
 def sggg_opening_aum_from_prior_summary(
     summary_prior: Dict[str, Any],
     prior_date: str,
 ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[str]]:
     """
-    Economic opening AUM for report day = prior sheet EOD + prior-day net flows.
-    prior_raw_eod: fund AUM on prior valuation date sheet; prior_flow: net subs/reds that day.
+    SGGG opening AUM = prior GetNAVSheet EOD closing + prior-day flows (excl. opening-equity).
+
+    Opening-equity subs/reds on the prior sheet are stripped from the opening basis
+    and handled on the report-day sheet instead.
     """
     if not summary_prior:
         return None, None, None, None
@@ -531,10 +548,12 @@ def sggg_opening_aum_from_prior_summary(
         prior_eod = summary_prior.get("net_asset_value_native")
     if prior_eod is None:
         return None, None, None, None
-    prior_flow, _ = capital_flow_net_from_summary(summary_prior, opening_equity_only=False)
-    flow = float(prior_flow) if prior_flow is not None else 0.0
+    flow = prior_flows_for_opening_basis(summary_prior)
     opening = float(prior_eod) + flow
-    return opening, float(prior_eod), flow, f"GetNAVSheet {prior_date} EOD + prior-day Diamond subs/reds"
+    src = f"GetNAVSheet {prior_date} EOD"
+    if flow != 0:
+        src += " + prior-day flows (excl. opening-equity)"
+    return opening, float(prior_eod), flow, src
 
 
 def _capital_flow_from_candidates(

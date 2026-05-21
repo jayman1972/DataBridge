@@ -2667,8 +2667,14 @@ def sggg_diamond_nav_availability():
             report_flow_label: Optional[str] = None
             if summary_close:
                 diamond_capital_flow, report_flow_label = capital_flow_net_from_summary(
-                    summary_close
+                    summary_close,
+                    opening_equity_only=True,
                 )
+                if diamond_capital_flow is None:
+                    diamond_capital_flow, report_flow_label = capital_flow_net_from_summary(
+                        summary_close,
+                        opening_equity_only=False,
+                    )
                 if report_flow_label:
                     entry["capital_flow_adjustment_label"] = (
                         f"report day {valuation_date}: {report_flow_label}"
@@ -2817,7 +2823,7 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
-                    "nav_checker_build": "sggg-prior-flow-v7",
+                    "nav_checker_build": "sggg-section-flow-v8",
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),
                     "compliance_sec": round(compliance_sec, 2),

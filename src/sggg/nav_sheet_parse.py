@@ -268,6 +268,22 @@ def sum_class_net_assets_cad(body: Dict[str, Any], fund_id: str) -> Optional[flo
     return total if found else None
 
 
+def _capital_flow_label(section_name: str, item_name: str) -> str:
+    """
+    Diamond often splits flows across SectionName + SectionItem Name, e.g.
+    section 'Adjusted Opening Equity' + item 'Contributions'.
+    """
+    sec = (section_name or "").strip()
+    item = (item_name or "").strip()
+    if sec and item:
+        if item.upper() in sec.upper():
+            return sec
+        if sec.upper() in item.upper():
+            return item
+        return f"{sec} {item}"
+    return sec or item
+
+
 def _is_capital_flow_item(name: str) -> bool:
     """True for subscription/redemption dollar lines (not NAV-before-fee rows)."""
     upper = (name or "").upper()
@@ -280,6 +296,8 @@ def _is_capital_flow_item(name: str) -> bool:
         return True
     if re.search(r"UNITS\s+(CONTRIBUTIONS|REDEMPTIONS)", upper):
         return True
+    if upper in ("CONTRIBUTIONS", "CONTRIBUTION", "REDEMPTIONS", "REDEMPTION"):
+        return True
     if "SUBSCRIPTION" in upper or "CONTRIBUTION" in upper:
         return "EQUITY" in upper or "UNITS" in upper or upper in ("SUBSCRIPTIONS", "SUBSCRIPTION")
     if "REDEMPTION" in upper or "WITHDRAWAL" in upper:
@@ -287,6 +305,10 @@ def _is_capital_flow_item(name: str) -> bool:
     if "NET SUBS" in upper or "NET CAPITAL" in upper or "CAPITAL FLOW" in upper:
         return True
     return False
+
+
+def _is_capital_flow_section_item(section_name: str, item_name: str) -> bool:
+    return _is_capital_flow_item(_capital_flow_label(section_name, item_name))
 
 
 def _iter_section_items(section: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -308,7 +330,8 @@ def list_capital_flow_candidates(body: Dict[str, Any]) -> List[Dict[str, Any]]:
         sec_name = (sec.get("SectionName") or "").strip()
         for item in _iter_section_items(sec):
             name = (item.get("Name") or "").strip()
-            if not _is_capital_flow_item(name):
+            label = _capital_flow_label(sec_name, name)
+            if not _is_capital_flow_section_item(sec_name, name):
                 continue
             val = _parse_money_value(item.get("Value"))
             if val is not None:
@@ -317,7 +340,7 @@ def list_capital_flow_candidates(body: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "scope": "fund",
                         "class_code": None,
                         "section": sec_name or None,
-                        "name": name,
+                        "name": label,
                         "amount": val,
                     }
                 )
@@ -331,16 +354,17 @@ def list_capital_flow_candidates(body: Dict[str, Any]) -> List[Dict[str, Any]]:
             sec_name = (sec.get("SectionName") or "").strip()
             for item in _iter_section_items(sec):
                 name = (item.get("Name") or "").strip()
-                if not _is_capital_flow_item(name):
+                label = _capital_flow_label(sec_name, name)
+                if not _is_capital_flow_section_item(sec_name, name):
                     continue
                 val = _parse_money_value(item.get("Value"))
-                if val is not None:
+                if val is not None and val != 0:
                     out.append(
                         {
                             "scope": "class",
                             "class_code": code,
                             "section": sec_name or None,
-                            "name": name,
+                            "name": label,
                             "amount": val,
                         }
                     )
@@ -434,15 +458,62 @@ def pick_fund_net_asset_value(
     return None, base
 
 
-def capital_flow_net_from_summary(summary: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
+def _opening_equity_flow_row(row: Dict[str, Any]) -> bool:
+    name = (row.get("name") or "").upper()
+    return "ADJUSTED OPENING EQUITY" in name and (
+        "CONTRIBUTION" in name or "REDEMPTION" in name
+    )
+
+
+def _capital_flow_from_candidates_filtered(
+    candidates: List[Dict[str, Any]],
+    *,
+    opening_equity_only: bool,
+) -> Tuple[Optional[float], Optional[str]]:
+    class_rows = [r for r in candidates if r.get("scope") == "class"]
+    if opening_equity_only:
+        class_rows = [r for r in class_rows if _opening_equity_flow_row(r)]
+    if not class_rows:
+        fund_rows = [r for r in candidates if r.get("scope") == "fund"]
+        if fund_rows and not opening_equity_only:
+            total = sum(float(r["amount"]) for r in fund_rows)
+            names = "; ".join(r["name"] for r in fund_rows[:4])
+            return total, names
+        return None, None
+    total = sum(float(r["amount"]) for r in class_rows)
+    labels: List[str] = []
+    for row in class_rows:
+        if float(row["amount"]) == 0:
+            continue
+        code = row.get("class_code") or "?"
+        labels.append(f"{code}:{row.get('name')}")
+    if not labels:
+        return None, None
+    label = "; ".join(labels[:6]) + ("…" if len(labels) > 6 else "")
+    n_class = len({r.get("class_code") for r in class_rows})
+    if n_class > 1:
+        label = f"all classes ({n_class}): {label}"
+    if opening_equity_only:
+        label = f"opening equity flows: {label}"
+    return total, label
+
+
+def capital_flow_net_from_summary(
+    summary: Dict[str, Any],
+    *,
+    opening_equity_only: bool = False,
+) -> Tuple[Optional[float], Optional[str]]:
     """Net subs/reds on a single GetNAVSheet summary (one valuation date)."""
     if not summary:
         return None, None
-    flow = summary.get("capital_flow")
-    if flow is not None:
-        return float(flow), summary.get("capital_flow_label")
+    if not opening_equity_only:
+        flow = summary.get("capital_flow")
+        if flow is not None:
+            return float(flow), summary.get("capital_flow_label")
     cands = summary.get("capital_flow_candidates") or []
-    return _capital_flow_from_candidates(cands)
+    return _capital_flow_from_candidates_filtered(
+        cands, opening_equity_only=opening_equity_only
+    )
 
 
 def sggg_opening_aum_from_prior_summary(
@@ -460,7 +531,7 @@ def sggg_opening_aum_from_prior_summary(
         prior_eod = summary_prior.get("net_asset_value_native")
     if prior_eod is None:
         return None, None, None, None
-    prior_flow, _ = capital_flow_net_from_summary(summary_prior)
+    prior_flow, _ = capital_flow_net_from_summary(summary_prior, opening_equity_only=False)
     flow = float(prior_flow) if prior_flow is not None else 0.0
     opening = float(prior_eod) + flow
     return opening, float(prior_eod), flow, f"GetNAVSheet {prior_date} EOD + prior-day Diamond subs/reds"
@@ -472,18 +543,12 @@ def _capital_flow_from_candidates(
     """Net flow from parsed candidate rows (class lines summed across all series)."""
     class_rows = [r for r in candidates if r.get("scope") == "class"]
     if class_rows:
-        seen: set = set()
-        total = 0.0
+        total = sum(float(r["amount"]) for r in class_rows)
         labels: List[str] = []
         for row in class_rows:
-            key = (row.get("class_code"), row.get("name"))
-            if key in seen:
-                continue
-            seen.add(key)
             amt = float(row["amount"])
             if amt == 0:
                 continue
-            total += amt
             code = row.get("class_code") or "?"
             labels.append(f"{code}:{row.get('name')}")
         if not labels:
@@ -629,7 +694,7 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         "capital_flow": capital_flow,
         "capital_flow_label": capital_flow_label,
         "capital_flow_candidates": list_capital_flow_candidates(body),
-        "aum_parse_version": 7,
+        "aum_parse_version": 8,
         "aum_from_class_sum": class_sum is not None and nav_native == class_sum,
         "diamond_aum_components": {
             "root_net_asset_value": root_nav,

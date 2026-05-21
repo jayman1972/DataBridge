@@ -2291,6 +2291,9 @@ def sggg_diamond_nav_availability():
                 "sggg_nav_change_raw": None,
                 "capital_flow_adjustment": None,
                 "capital_flow_adjustment_source": None,
+                "capital_flow_adjustment_label": None,
+                "diamond_open_aum_components": None,
+                "diamond_close_aum_components": None,
                 "sggg_nav_change_note": None,
                 "_estimate_bps_from_compliance": est_row.get("estimate_bps") is not None,
                 "_est_row": est_row,
@@ -2611,27 +2614,40 @@ def sggg_diamond_nav_availability():
                 if summary_open.get("native_currency") and not summary_close:
                     entry["diamond_aum_currency"] = summary_open["native_currency"]
 
+            if summary_open and summary_open.get("diamond_aum_components"):
+                entry["diamond_open_aum_components"] = summary_open["diamond_aum_components"]
+            if summary_close and summary_close.get("diamond_aum_components"):
+                entry["diamond_close_aum_components"] = summary_close["diamond_aum_components"]
+
             # SGGG: adjust only with subs/reds from the Diamond NAV sheet (not compliance AF).
-            capital_adj = 0.0
             diamond_capital_flow: Optional[float] = None
             if summary_close and summary_close.get("capital_flow") is not None:
                 diamond_capital_flow = float(summary_close["capital_flow"])
+                entry["capital_flow_adjustment_label"] = summary_close.get("capital_flow_label")
 
             if entry["diamond_opening_aum"] is not None and entry["diamond_closing_aum"] is not None:
                 raw_change = entry["diamond_closing_aum"] - entry["diamond_opening_aum"]
                 entry["sggg_nav_change_raw"] = raw_change
                 if diamond_capital_flow is not None:
-                    capital_adj = diamond_capital_flow
-                    entry["capital_flow_adjustment"] = capital_adj
+                    entry["capital_flow_adjustment"] = diamond_capital_flow
                     entry["capital_flow_adjustment_source"] = "diamond"
-                    entry["sggg_nav_change_dollars"] = raw_change - capital_adj
+                    entry["sggg_nav_change_dollars"] = raw_change - diamond_capital_flow
                 else:
                     entry["sggg_nav_change_dollars"] = raw_change
+                    open_comp = entry.get("diamond_open_aum_components") or {}
+                    close_comp = entry.get("diamond_close_aum_components") or {}
+                    open_hdr = open_comp.get("header_section_cad")
+                    open_cls = open_comp.get("class_sum_cad_equiv")
                     if (
-                        est_row.get("net_subs_reds") is not None
-                        and abs(float(est_row["net_subs_reds"])) > 1000
-                        and abs(raw_change) > 100_000
+                        open_hdr is not None
+                        and open_cls is not None
+                        and open_hdr > open_cls * 1.05
                     ):
+                        entry["sggg_nav_change_note"] = (
+                            "No Diamond subs/reds line on the report-day sheet; "
+                            "day change is close − open AUM (USD series now included in open/close)."
+                        )
+                    elif abs(raw_change) > 100_000:
                         entry["sggg_nav_change_note"] = (
                             "Diamond NAV sheet has no subs/reds line; "
                             "SGGG day change is unadjusted (compliance AF is not applied to SGGG)."
@@ -2765,7 +2781,7 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
-                    "nav_checker_build": "sggg-diamond-flows-v3",
+                    "nav_checker_build": "sggg-usd-aum-v4",
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),
                     "compliance_sec": round(compliance_sec, 2),

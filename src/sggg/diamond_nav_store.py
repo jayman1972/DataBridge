@@ -17,7 +17,7 @@ def _parse_sheet_date(raw: Any) -> Optional[str]:
     return s[:10] if len(s) >= 10 else None
 
 
-_AUM_PARSE_VERSION = 3
+_AUM_PARSE_VERSION = 4
 
 
 def snapshot_usable(summary: Dict[str, Any]) -> bool:

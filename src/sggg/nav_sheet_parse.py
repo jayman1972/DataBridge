@@ -82,20 +82,49 @@ def _normalize_currency_code(raw: Any, default: str = "CAD") -> str:
     return default
 
 
+_SERIES_CODE_RE = re.compile(r"^[A-Z0-9]{2,8}$")
+
+# Section labels that are not closing NAVPU (often prior-day or change fields).
+_NAVPU_SKIP_NAME_FRAGMENTS = (
+    "PRIOR",
+    "PREVIOUS",
+    "OPENING",
+    "BEGIN",
+    "CHANGE",
+    "DELTA",
+    "VARIANCE",
+    "DIFFERENCE",
+    "RETURN",
+    "BPS",
+    "%",
+)
+
+
 def _class_series_token(class_code: str, class_id: str) -> str:
-    """Best-effort series label (e.g. 500UO) from Diamond class entry."""
+    """Series label (e.g. 500UO, 200I) — not a Diamond parent-fund GUID."""
     for raw in (class_code, class_id):
         token = (raw or "").strip().upper()
-        if not token:
-            continue
-        if re.match(r"^[A-Z0-9]{2,8}$", token):
+        if _SERIES_CODE_RE.match(token):
             return token
-    return (class_code or class_id or "").strip().upper()
+    code = (class_code or "").strip().upper()
+    if _SERIES_CODE_RE.match(code):
+        return code
+    return ""
 
 
 def _is_usd_share_class(class_code: str, class_id: str) -> bool:
-    """USD series codes include the letter U (500UO, 550UF, 200UA, etc.)."""
-    return "U" in _class_series_token(class_code, class_id)
+    """USD series codes include U (500UO, 550UF). Ignore GUIDs that happen to contain U."""
+    series = _class_series_token(class_code, class_id)
+    if not series:
+        return False
+    return "U" in series
+
+
+def _is_navpu_section_name(name: str) -> bool:
+    upper = (name or "").upper()
+    if any(frag in upper for frag in _NAVPU_SKIP_NAME_FRAGMENTS):
+        return False
+    return "NAV" in upper or "PRICE" in upper or "UNIT" in upper or " PU" in upper or upper.endswith("PU")
 
 
 def _navpu_from_section_items(
@@ -103,15 +132,15 @@ def _navpu_from_section_items(
     *,
     want_usd: bool,
 ) -> Optional[float]:
-    """Scan NAV sheet section labels for currency-specific NAVPU."""
-    preferred: List[str] = []
-    fallback: List[str] = []
+    """Scan NAV sheet section labels for currency-specific closing NAVPU."""
+    preferred: List[float] = []
+    fallback: List[float] = []
     for name, raw in items.items():
-        upper = (name or "").upper()
-        if "NAV" not in upper and "PRICE" not in upper and "UNIT" not in upper and "PU" not in upper:
+        if not _is_navpu_section_name(name):
             continue
+        upper = (name or "").upper()
         val = _parse_money_value(raw)
-        if val is None:
+        if val is None or val <= 0:
             continue
         if want_usd:
             if "USD" in upper or "U.S." in upper:
@@ -128,13 +157,25 @@ def _navpu_from_section_items(
     return fallback[0] if fallback else None
 
 
+def _entry_navpu(entry: Dict[str, Any], *, want_usd: bool) -> Optional[float]:
+    """Top-level NAVPU on the class entry (authoritative when present)."""
+    if want_usd:
+        keys = ("NAVPU", "Price", "NAV per Unit (USD)", "NAV Per Unit (USD)")
+    else:
+        keys = ("NAVPU", "Price", "NAV per Unit", "NAV Per Unit")
+    for key in keys:
+        val = _parse_money_value(entry.get(key))
+        if val is not None and val > 0:
+            return val
+    return None
+
+
 def _parse_class_navpu(entry: Dict[str, Any], fund_base_ccy: str) -> Tuple[Optional[float], str]:
     """
     Per-class NAVPU in the class's own currency. USD series (code contains U) use USD NAVPU fields.
     """
     class_code = (entry.get("ClassCode") or "").strip()
     class_id = (entry.get("FundID") or "").strip()
-    series = _class_series_token(class_code, class_id)
     raw_ccy = entry.get("Currency") or entry.get("ClassCurrency")
     if raw_ccy:
         class_ccy = _normalize_currency_code(raw_ccy, default=fund_base_ccy)
@@ -143,34 +184,33 @@ def _parse_class_navpu(entry: Dict[str, Any], fund_base_ccy: str) -> Tuple[Optio
     else:
         class_ccy = fund_base_ccy
 
-    items = _section_items_by_name(entry)
-    navpu: Optional[float] = None
-
-    if class_ccy == "USD":
-        navpu = _navpu_from_section_items(items, want_usd=True)
-        if navpu is None:
-            for key in (
-                "NAV per Unit (USD)",
-                "NAV Per Unit (USD)",
-                "NAVPU (USD)",
-                "Price (USD)",
-                "NAVPU",
-                "Price",
-            ):
-                navpu = _parse_money_value(entry.get(key)) or _parse_money_value(items.get(key))
-                if navpu is not None:
-                    break
-    else:
-        navpu = _navpu_from_section_items(items, want_usd=False)
-        if navpu is None:
-            navpu = _parse_money_value(entry.get("NAVPU"))
-        if navpu is None:
-            for key in ("NAVPU", "NAV per Unit", "Price"):
-                navpu = _parse_money_value(items.get(key)) or _parse_money_value(items.get(key))
-                if navpu is not None:
-                    break
+    want_usd = class_ccy == "USD"
+    navpu = _entry_navpu(entry, want_usd=want_usd)
+    if navpu is None:
+        items = _section_items_by_name(entry)
+        navpu = _navpu_from_section_items(items, want_usd=want_usd)
 
     return navpu, class_ccy
+
+
+def normalize_diamond_sheet_date(raw: Any) -> Optional[str]:
+    """Normalize ValuationDate from GetNAVSheet response to yyyy-mm-dd."""
+    if raw is None:
+        return None
+    if hasattr(raw, "date"):
+        try:
+            return raw.date().isoformat()
+        except Exception:
+            pass
+    s = str(raw).strip()
+    if not s:
+        return None
+    if re.match(r"^\d{4}-\d{2}-\d{2}", s):
+        return s[:10]
+    compact = s.replace("-", "")[:8]
+    if len(compact) == 8 and compact.isdigit():
+        return f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
+    return None
 
 
 def pick_fund_net_asset_value(
@@ -270,7 +310,7 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         fund_base = FUND_NATIVE_CURRENCY.get(fund_parent_id, "CAD")
         navpu, class_ccy = _parse_class_navpu(entry, fund_base)
         ret_raw = _valuation_period_return(entry)
-        display_class = _class_series_token(class_code, class_id) or class_id
+        display_class = _class_series_token(class_code, class_id) or class_code or class_id
         classes_out.append(
             {
                 "class_id": class_id,

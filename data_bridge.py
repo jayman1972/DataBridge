@@ -55,6 +55,7 @@ from sggg.diamond_client import DiamondNavUnavailableError, fetch_nav_sheet, get
 from sggg.nav_sheet_parse import (
     FUND_NATIVE_CURRENCY,
     fetch_psc_portfolio_navs,
+    normalize_diamond_sheet_date,
     normalize_valuation_date,
     parse_nav_sheet_summary,
     prior_business_day_iso,
@@ -2364,6 +2365,13 @@ def sggg_diamond_nav_availability():
             if summary_close:
                 entry["classes"] = summary_close.get("classes") or []
                 entry["class_i_bps"] = pick_class_i_bps(entry["classes"])
+                entry["diamond_nav_requested_date"] = valuation_date
+                sheet_date = normalize_diamond_sheet_date(summary_close.get("valuation_date"))
+                entry["diamond_nav_sheet_date"] = sheet_date
+                if sheet_date and sheet_date != valuation_date:
+                    entry["diamond_date_warning"] = (
+                        f"Diamond NAV sheet is dated {sheet_date}; requested {valuation_date}"
+                    )
                 closing_nav = summary_close.get("net_asset_value_native")
                 if closing_nav is None:
                     closing_nav = summary_close.get("net_asset_value")

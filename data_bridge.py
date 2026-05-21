@@ -2624,11 +2624,29 @@ def sggg_diamond_nav_availability():
             if entry["diamond_opening_aum"] is not None and entry["diamond_closing_aum"] is not None:
                 raw_change = entry["diamond_closing_aum"] - entry["diamond_opening_aum"]
                 entry["sggg_nav_change_raw"] = raw_change
-                if capital_adj_parts:
+                perf_ex_af = entry.get("ehp_nav_change_dollars")
+                unadj = entry.get("ehp_aum_change_unadjusted")
+                use_compliance_perf = False
+                if perf_ex_af is not None and unadj is not None:
+                    # Diamond fund-level AUM often misses day-over-day move when subs hit (Alpha May 19).
+                    if abs(raw_change) < 1000 and abs(unadj) > 10_000:
+                        use_compliance_perf = True
+                    elif abs(raw_change - capital_adj) < 1000 and abs(perf_ex_af) > 1000:
+                        use_compliance_perf = True
+                    elif abs(raw_change - float(perf_ex_af)) > max(500_000, 0.2 * abs(unadj)):
+                        use_compliance_perf = True
+                if use_compliance_perf and perf_ex_af is not None:
+                    entry["sggg_nav_change_dollars"] = float(perf_ex_af)
+                    entry["sggg_nav_change_source"] = "compliance_ex_af"
+                    if est_row.get("net_subs_reds") is not None:
+                        entry["capital_flow_adjustment"] = float(est_row["net_subs_reds"])
+                elif capital_adj_parts:
                     entry["capital_flow_adjustment"] = capital_adj
                     entry["sggg_nav_change_dollars"] = raw_change - capital_adj
+                    entry["sggg_nav_change_source"] = "diamond_ex_af"
                 else:
                     entry["sggg_nav_change_dollars"] = raw_change
+                    entry["sggg_nav_change_source"] = "diamond"
             else:
                 missing: List[str] = []
                 if entry["diamond_opening_aum"] is None:
@@ -2757,6 +2775,7 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
+                    "nav_checker_build": "f8254a5-b25eac8",
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),
                     "compliance_sec": round(compliance_sec, 2),

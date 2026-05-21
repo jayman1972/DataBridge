@@ -2566,15 +2566,14 @@ def sggg_diamond_nav_availability():
                 if summary_open.get("native_currency") and not summary_close:
                     entry["diamond_aum_currency"] = summary_open["native_currency"]
 
+            # Strip report-day subs/reds only: Diamond open is prior EOD (flows on prior_date
+            # are already in that NAV). Same as Steps AB using AF on the report date row.
             capital_adj = 0.0
             capital_adj_parts: List[str] = []
-            if est_prior.get("net_subs_reds") is not None:
-                capital_adj += float(est_prior["net_subs_reds"])
-                capital_adj_parts.append(f"prior day {prior_date}")
             if est_row.get("net_subs_reds") is not None:
-                capital_adj += float(est_row["net_subs_reds"])
-                capital_adj_parts.append(f"report day {valuation_date}")
-            if capital_adj == 0.0 and summary_close and summary_close.get("capital_flow") is not None:
+                capital_adj = float(est_row["net_subs_reds"])
+                capital_adj_parts.append(f"report day {valuation_date} AF")
+            elif summary_close and summary_close.get("capital_flow") is not None:
                 capital_adj = float(summary_close["capital_flow"])
                 capital_adj_parts.append("Diamond NAV sheet")
 

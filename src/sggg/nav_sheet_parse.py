@@ -84,8 +84,8 @@ def _normalize_currency_code(raw: Any, default: str = "CAD") -> str:
 
 _SERIES_CODE_RE = re.compile(r"^[A-Z0-9]{2,8}$")
 _FUND_SERIES_PREFIX_RE = re.compile(r"^(\d{2,4})")
-# Diamond sometimes returns USD ClassCode without fund digits (UA, UO, UF).
-_USD_CLASS_SUFFIX_RE = re.compile(r"^U[A-Z]{1,2}$")
+# Diamond sometimes returns ClassCode without fund digits (UA, FD, UF, …).
+_SUFFIX_ONLY_CLASS_RE = re.compile(r"^[A-Z]{1,4}$")
 
 # Section labels that are not closing NAVPU (often prior-day or change fields).
 _NAVPU_SKIP_NAME_FRAGMENTS = (
@@ -129,18 +129,26 @@ def _infer_fund_series_prefix(class_codes: List[str]) -> str:
     return max(counts, key=counts.get)
 
 
+def _class_code_missing_fund_prefix(label: str, fund_prefix: str) -> bool:
+    """True when Diamond returned a short letter-only code without the fund series digits."""
+    if not fund_prefix or not label:
+        return False
+    upper = label.strip().upper()
+    if upper.startswith(fund_prefix):
+        return False
+    if any(ch.isdigit() for ch in upper):
+        return False
+    return bool(_SUFFIX_ONLY_CLASS_RE.match(upper))
+
+
 def _display_class_label(class_code: str, class_id: str, fund_prefix: str) -> str:
-    """Human-readable class code; prefix USD suffixes (UA → 200UA) when Diamond omits digits."""
+    """Human-readable class code; prefix suffix-only codes (UA → 200UA, FD → 800FD)."""
     token = _class_series_token(class_code, class_id)
     code = (class_code or "").strip().upper()
     label = token or code
     if not label:
         return (class_id or "").strip()
-    if (
-        fund_prefix
-        and _USD_CLASS_SUFFIX_RE.match(label)
-        and not label.startswith(fund_prefix)
-    ):
+    if fund_prefix and _class_code_missing_fund_prefix(label, fund_prefix):
         return f"{fund_prefix}{label}"
     return label
 

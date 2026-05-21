@@ -73,10 +73,10 @@ def should_skip_diamond_early_for_today(valuation_date: str) -> Optional[str]:
     val = date.fromisoformat(normalize_valuation_date(valuation_date))
     if val != now.date():
         return None
-    if (now.hour, now.minute) >= (17, 30):
+    if (now.hour, now.minute) >= (16, 30):
         return None
     return (
-        f"NAV for {valuation_date} is usually not published until after 5:30pm Eastern. "
+        f"NAV for {valuation_date} is usually not published until after 4:30pm Eastern. "
         "Diamond was not called (use force check to query SGGG anyway)."
     )
 

@@ -2336,15 +2336,75 @@ def sggg_diamond_nav_availability():
         diamond_results: Dict[tuple, Dict[str, Any]] = {}
         diamond_errors: Dict[tuple, Any] = {}
         diamond_call_secs: List[float] = []
+        diamond_calls_detail: List[Dict[str, Any]] = []
         compliance_sec = 0.0
         compliance_prior_sec = 0.0
         psc_sec = 0.0
+        diamond_api_base = client.base_url.rstrip("/")
 
-        def _fetch_nav_task(task: tuple) -> tuple:
+        def _diamond_call_purpose(role: str) -> str:
+            if role == "close":
+                return (
+                    "Report-day GetNAVSheet: per-class NAVPU, daily return (bps), "
+                    "Class I return, closing fund NetAssetValue"
+                )
+            return (
+                "Prior business day GetNAVSheet: opening fund NetAssetValue for "
+                "SGGG day-change (close AUM minus open AUM, net of subs)"
+            )
+
+        def _fetch_nav_task(task: tuple) -> Dict[str, Any]:
             t0 = time.time()
             idx, fid, vdate, role = task
-            raw = fetch_nav_sheet(client.base_url, fid, vdate, auth_key=auth_key)
-            return (idx, role, parse_nav_sheet_summary(raw), time.time() - t0)
+            fund_name = (fund_specs[idx].get("name") or "").strip() if idx < len(fund_specs) else fid
+            log: Dict[str, Any] = {
+                "fund_index": idx,
+                "fund_id": fid,
+                "fund_name": fund_name or fid,
+                "role": role,
+                "purpose": _diamond_call_purpose(role),
+                "http_method": "POST",
+                "endpoint_path": "/api/v1/GetNAVSheet/",
+                "url": f"{diamond_api_base}/GetNAVSheet/",
+                "request_headers_note": "Authorization: AuthKey <token>; AuthKey: <token>; Content-Type: application/json",
+                "request_body": {"FundID": fid, "ValuationDate": vdate},
+            }
+            try:
+                raw = fetch_nav_sheet(diamond_api_base, fid, vdate, auth_key=auth_key)
+                elapsed = time.time() - t0
+                summary = parse_nav_sheet_summary(raw)
+                log.update(
+                    {
+                        "duration_sec": round(elapsed, 2),
+                        "http_status": 200,
+                        "status": "available" if summary.get("available") else "response_ok_no_class_nav",
+                        "response_valuation_date": summary.get("valuation_date"),
+                        "class_count": len(summary.get("classes") or []),
+                    }
+                )
+                return {"idx": idx, "role": role, "summary": summary, "log": log, "error": None}
+            except DiamondNavUnavailableError as exc:
+                elapsed = time.time() - t0
+                log.update(
+                    {
+                        "duration_sec": round(elapsed, 2),
+                        "http_status": 400,
+                        "status": "not_finalized",
+                        "error_message": exc.user_message,
+                        "diamond_end_date": exc.end_date,
+                    }
+                )
+                return {"idx": idx, "role": role, "summary": None, "log": log, "error": exc}
+            except Exception as exc:
+                elapsed = time.time() - t0
+                log.update(
+                    {
+                        "duration_sec": round(elapsed, 2),
+                        "status": "error",
+                        "error_message": str(exc)[:2000],
+                    }
+                )
+                return {"idx": idx, "role": role, "summary": None, "log": log, "error": exc}
 
         def _timed_estimates(val_d):
             t0 = time.time()
@@ -2386,9 +2446,19 @@ def sggg_diamond_nav_availability():
                 kind, tag = future_kind[future]
                 if kind == "diamond":
                     key = (tag[0], tag[3])
-                    try:
-                        idx, role, summary, call_sec = future.result()
-                        diamond_call_secs.append(call_sec)
+                    result = future.result()
+                    diamond_calls_detail.append(result["log"])
+                    call_sec = float(result["log"].get("duration_sec") or 0)
+                    diamond_call_secs.append(call_sec)
+                    idx, role, summary, err = (
+                        result["idx"],
+                        result["role"],
+                        result["summary"],
+                        result["error"],
+                    )
+                    if err:
+                        diamond_errors[key] = err
+                    elif summary is not None:
                         diamond_results[(idx, role)] = summary
                         if (
                             role == "close"
@@ -2401,10 +2471,6 @@ def sggg_diamond_nav_availability():
                                 "diamond",
                                 prior_task,
                             )
-                    except DiamondNavUnavailableError as exc:
-                        diamond_errors[key] = exc
-                    except Exception as exc:
-                        diamond_errors[key] = exc
                 elif kind == "wp":
                     wp, compliance_sec = future.result()
                 elif kind == "wp_prior":
@@ -2534,7 +2600,7 @@ def sggg_diamond_nav_availability():
         bottleneck_hint = None
         if diamond_skip_reason == "early_today":
             bottleneck_hint = (
-                "Skipped Diamond before 5:30pm Eastern for today's date. "
+                "Skipped Diamond before 4:30pm Eastern for today's date. "
                 "Compliance estimates still load; check Force SGGG check after NAV release."
             )
         elif diamond_skip_reason == "cached_unavailable":
@@ -2580,6 +2646,29 @@ def sggg_diamond_nav_availability():
             "sheet_as_of": wp.get("sheet_as_of"),
             "date_warning": wp.get("date_warning"),
         }
+        sorted_calls = sorted(
+            diamond_calls_detail,
+            key=lambda r: (0 if r.get("role") == "close" else 1, r.get("fund_index", 0)),
+        )
+        for call_no, row in enumerate(sorted_calls, start=1):
+            row["call_number"] = call_no
+        diamond_escalation = {
+            "client": "EH Partners / EHP Fund Admin NAV checker (DataBridge)",
+            "api_base_url": diamond_api_base,
+            "auth": {
+                "method": "POST",
+                "url": f"{diamond_api_base}/login/",
+                "request_body": {"Username": "<SGGG_DIAMOND_USERNAME>", "Password": "<redacted>"},
+                "note": "One login at start of each checker run; AuthKey reused for all GetNAVSheet calls (~1h TTL).",
+            },
+            "valuation_date": valuation_date,
+            "prior_business_day": prior_date,
+            "execution_model": (
+                f"{len(diamond_call_secs)} GetNAVSheet POST(s) in parallel "
+                f"(max_workers={diamond_workers}); wall clock ≈ slowest call, not sum of calls."
+            ),
+            "calls": sorted_calls,
+        }
         return jsonify(
             {
                 "valuation_date": valuation_date,
@@ -2587,6 +2676,8 @@ def sggg_diamond_nav_availability():
                 "compliance_check": compliance_meta,
                 "working_paper": compliance_meta,
                 "funds": results,
+                "diamond_calls_detail": sorted_calls,
+                "diamond_escalation": diamond_escalation,
                 "timing": {
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),

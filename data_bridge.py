@@ -71,6 +71,7 @@ from sggg.nav_sheet_parse import (
     pick_class_i_bps,
 )
 from sggg.compliance_check_estimates import compliance_aum_change_ex_flows, estimates_by_fund_id
+from sggg.diamond_nav_store import load_snapshots_bulk, snapshot_usable, upsert_snapshot
 
 from supabase import create_client, Client
 
@@ -2245,6 +2246,15 @@ def sggg_diamond_nav_availability():
                     end_date=valuation_date,
                 )
                 diamond_skip_reason = "early_today"
+
+        db_snapshots: Dict[tuple, Dict[str, Any]] = {}
+        if not force_diamond and supabase:
+            db_snapshots = load_snapshots_bulk(
+                supabase,
+                fund_ids_list,
+                [valuation_date, prior_date],
+            )
+
         def _base_entry(spec: Dict[str, str], wp: Dict[str, Any], wp_prior: Dict[str, Any], psc_navs: Dict) -> Dict[str, Any]:
             fid = spec["id"]
             name = spec.get("name") or fid
@@ -2343,6 +2353,7 @@ def sggg_diamond_nav_availability():
         diamond_errors: Dict[tuple, Any] = {}
         diamond_call_secs: List[float] = []
         diamond_cache_hits = 0
+        diamond_db_hits = 0
         diamond_calls_detail: List[Dict[str, Any]] = []
         compliance_sec = 0.0
         compliance_prior_sec = 0.0
@@ -2376,30 +2387,60 @@ def sggg_diamond_nav_availability():
                 "request_headers_note": "Authorization: AuthKey <token>; AuthKey: <token>; Content-Type: application/json",
                 "request_body": {"FundID": fid, "ValuationDate": vdate},
             }
-            cached_raw = get_nav_sheet_raw_cached(fid, vdate)
-            if cached_raw is not None:
-                summary = parse_nav_sheet_summary(cached_raw)
-                if fund_aum_from_summary(summary) is None:
-                    cached_raw = None
-                else:
+            vdate_norm = normalize_valuation_date(vdate)
+            if not force_diamond:
+                db_summary = db_snapshots.get((fid, vdate_norm))
+                if db_summary and snapshot_usable(db_summary):
                     log.update(
                         {
                             "duration_sec": 0.0,
                             "http_status": 200,
                             "cache_hit": True,
-                            "status": "from_cache",
-                            "response_valuation_date": summary.get("valuation_date"),
-                            "class_count": len(summary.get("classes") or []),
-                            "fund_aum": fund_aum_from_summary(summary),
+                            "data_source": "supabase",
+                            "status": "from_database",
+                            "response_valuation_date": db_summary.get("valuation_date"),
+                            "class_count": len(db_summary.get("classes") or []),
+                            "fund_aum": fund_aum_from_summary(db_summary),
                         }
                     )
-                    return {"idx": idx, "role": role, "summary": summary, "log": log, "error": None}
+                    return {
+                        "idx": idx,
+                        "role": role,
+                        "summary": db_summary,
+                        "log": log,
+                        "error": None,
+                    }
+            if not force_diamond:
+                cached_raw = get_nav_sheet_raw_cached(fid, vdate)
+                if cached_raw is not None:
+                    summary = parse_nav_sheet_summary(cached_raw)
+                    if fund_aum_from_summary(summary) is not None:
+                        log.update(
+                            {
+                                "duration_sec": 0.0,
+                                "http_status": 200,
+                                "cache_hit": True,
+                                "data_source": "memory",
+                                "status": "from_cache",
+                                "response_valuation_date": summary.get("valuation_date"),
+                                "class_count": len(summary.get("classes") or []),
+                                "fund_aum": fund_aum_from_summary(summary),
+                            }
+                        )
+                        return {
+                            "idx": idx,
+                            "role": role,
+                            "summary": summary,
+                            "log": log,
+                            "error": None,
+                        }
             try:
                 raw = fetch_nav_sheet(diamond_api_base, fid, vdate, auth_key=auth_key)
                 elapsed = time.time() - t0
                 summary = parse_nav_sheet_summary(raw)
                 if nav_sheet_summary_cacheable(summary):
                     set_nav_sheet_raw_cached(fid, vdate, raw)
+                    upsert_snapshot(supabase, fid, vdate, summary)
                 log.update(
                     {
                         "duration_sec": round(elapsed, 2),
@@ -2461,11 +2502,14 @@ def sggg_diamond_nav_availability():
                 diamond_errors[(idx, "close")] = diamond_short_circuit
 
         def _apply_diamond_result(result: Dict[str, Any]) -> None:
-            nonlocal diamond_cache_hits
+            nonlocal diamond_cache_hits, diamond_db_hits
             key = (result["idx"], result["role"])
             diamond_calls_detail.append(result["log"])
             if result["log"].get("cache_hit"):
-                diamond_cache_hits += 1
+                if result["log"].get("data_source") == "supabase":
+                    diamond_db_hits += 1
+                else:
+                    diamond_cache_hits += 1
             else:
                 diamond_call_secs.append(float(result["log"].get("duration_sec") or 0))
             if result["error"]:
@@ -2697,9 +2741,9 @@ def sggg_diamond_nav_availability():
             "valuation_date": valuation_date,
             "prior_business_day": prior_date,
             "execution_model": (
-                f"{len(diamond_call_secs)} live GetNAVSheet POST(s), {diamond_cache_hits} cache hit(s) "
-                f"(max_workers={diamond_workers}); wall clock ≈ slowest live call. "
-                "Successful responses cached 30 minutes per FundID+ValuationDate (not-finalized never cached)."
+                f"{len(diamond_call_secs)} live GetNAVSheet POST(s), {diamond_db_hits} from Supabase, "
+                f"{diamond_cache_hits} in-memory (max_workers={diamond_workers}); wall clock ≈ slowest live call. "
+                "Successful sheets persist in fund_admin_diamond_nav_snapshots; use force refresh to bypass."
             ),
             "calls": sorted_calls,
         }
@@ -2724,7 +2768,9 @@ def sggg_diamond_nav_availability():
                     "diamond_avg_sec": round(diamond_avg_sec, 2),
                     "diamond_requests": len(diamond_call_secs),
                     "diamond_cache_hits": diamond_cache_hits,
+                    "diamond_db_hits": diamond_db_hits,
                     "diamond_requests_live": len(diamond_call_secs),
+                    "force_diamond": force_diamond,
                     "diamond_requests_max": len(fund_specs)
                     * (2 if include_prior_diamond and not diamond_short_circuit else 1),
                     "diamond_skipped": diamond_skip_reason is not None,

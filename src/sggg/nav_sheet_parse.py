@@ -280,7 +280,7 @@ def _is_capital_flow_item(name: str) -> bool:
 
 
 def list_capital_flow_candidates(body: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """All subs/redemption-like lines on the NAV sheet (for debugging / UI)."""
+    """All subs/redemption-like lines on the NAV sheet, every share class (for debugging / UI)."""
     out: List[Dict[str, Any]] = []
     for scope, node in (("fund", body),):
         items = _section_items_by_name(node)
@@ -405,7 +405,8 @@ def pick_capital_flow_adjustment(body: Dict[str, Any]) -> Tuple[Optional[float],
     """
     Net subscriptions/redemptions on the valuation date from Diamond NAV sheet.
     Positive = net inflow (same sign as compliance Net Subs (reds)).
-    Sums class-level Adjusted Opening Equity Contributions/Redemptions and Units Contributions/Redemptions.
+    Sums class-level flow lines across all entries in ClassSeriesFundList (any class:
+    A, F, I, O, UA, UO, etc.) — not Class I only.
     """
     items = _section_items_by_name(body)
     for subs_key, reds_key in (
@@ -439,7 +440,11 @@ def pick_capital_flow_adjustment(body: Dict[str, Any]) -> Tuple[Optional[float],
         code = row.get("class_code") or "?"
         labels.append(f"{code}:{row.get('name')}")
     if labels:
-        return total, "; ".join(labels[:6]) + ("…" if len(labels) > 6 else "")
+        label = "; ".join(labels[:6]) + ("…" if len(labels) > 6 else "")
+        n_class = len({row.get("class_code") for row in list_capital_flow_candidates(body) if row.get("scope") == "class"})
+        if n_class > 1:
+            label = f"all classes ({n_class}): {label}"
+        return total, label
     return None, None
 
 

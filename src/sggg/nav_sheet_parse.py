@@ -143,7 +143,9 @@ def _navpu_from_section_items(
         if val is None or val <= 0:
             continue
         if want_usd:
-            if "USD" in upper or "U.S." in upper:
+            if "LOCAL" in upper and ("NAV" in upper or "PU" in upper):
+                preferred.insert(0, val)
+            elif "USD" in upper or "U.S." in upper:
                 preferred.append(val)
             elif "CAD" not in upper and "CAN" not in upper:
                 fallback.append(val)
@@ -158,9 +160,17 @@ def _navpu_from_section_items(
 
 
 def _entry_navpu(entry: Dict[str, Any], *, want_usd: bool) -> Optional[float]:
-    """Top-level NAVPU on the class entry (authoritative when present)."""
+    """
+    Top-level NAVPU on the class entry (authoritative when present).
+
+    Diamond USD series: LocalNAVPU = native USD per unit; NAVPU = fund reporting
+    currency (CAD) equivalent (LocalNAVPU × FXRate). ClassCurrency confirms USD/CAD.
+    """
+    local = _parse_money_value(entry.get("LocalNAVPU"))
+    if local is not None and local > 0:
+        return local
     if want_usd:
-        keys = ("NAVPU", "Price", "NAV per Unit (USD)", "NAV Per Unit (USD)")
+        keys = ("NAV per Unit (USD)", "NAV Per Unit (USD)", "NAVPU", "Price")
     else:
         keys = ("NAVPU", "Price", "NAV per Unit", "NAV Per Unit")
     for key in keys:

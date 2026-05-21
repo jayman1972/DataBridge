@@ -2295,6 +2295,7 @@ def sggg_diamond_nav_availability():
                 "diamond_open_aum_components": None,
                 "diamond_close_aum_components": None,
                 "diamond_capital_flow_candidates": None,
+                "aum_parse_version": None,
                 "diamond_opening_aum_source": None,
                 "sggg_nav_change_note": None,
                 "_estimate_bps_from_compliance": est_row.get("estimate_bps") is not None,
@@ -2454,7 +2455,15 @@ def sggg_diamond_nav_availability():
                         "cache_hit": False,
                         "status": "available" if summary.get("available") else "response_ok_no_class_nav",
                         "response_valuation_date": summary.get("valuation_date"),
+                        "sheet_valuation_date": summary.get("sheet_valuation_date"),
+                        "request_valuation_date": vdate_norm,
                         "class_count": len(summary.get("classes") or []),
+                        "fund_aum": fund_aum_from_summary(summary),
+                        "capital_flow": summary.get("capital_flow"),
+                        "capital_flow_candidate_count": len(
+                            summary.get("capital_flow_candidates") or []
+                        ),
+                        "aum_parse_version": summary.get("aum_parse_version"),
                     }
                 )
                 return {"idx": idx, "role": role, "summary": summary, "log": log, "error": None}
@@ -2661,11 +2670,26 @@ def sggg_diamond_nav_availability():
             if summary_close and summary_close.get("diamond_aum_components"):
                 entry["diamond_close_aum_components"] = summary_close["diamond_aum_components"]
 
+            if summary_close:
+                entry["aum_parse_version"] = summary_close.get("aum_parse_version")
+
             # SGGG: adjust only with subs/reds from the Diamond NAV sheet (not compliance AF).
             diamond_capital_flow: Optional[float] = None
             if summary_close and summary_close.get("capital_flow") is not None:
                 diamond_capital_flow = float(summary_close["capital_flow"])
                 entry["capital_flow_adjustment_label"] = summary_close.get("capital_flow_label")
+            elif summary_close:
+                cands = summary_close.get("capital_flow_candidates") or []
+                class_net = sum(
+                    float(c["amount"])
+                    for c in cands
+                    if c.get("scope") == "class" and c.get("amount") is not None
+                )
+                if class_net != 0:
+                    diamond_capital_flow = class_net
+                    entry["capital_flow_adjustment_label"] = (
+                        "summed from capital_flow_candidates (class)"
+                    )
 
             if entry["diamond_opening_aum"] is not None and entry["diamond_closing_aum"] is not None:
                 raw_change = entry["diamond_closing_aum"] - entry["diamond_opening_aum"]
@@ -2810,7 +2834,7 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
-                    "nav_checker_build": "sggg-equity-contrib-v5",
+                    "nav_checker_build": "sggg-class-flow-sum-v6",
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),
                     "compliance_sec": round(compliance_sec, 2),

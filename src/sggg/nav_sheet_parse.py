@@ -279,24 +279,47 @@ def _is_capital_flow_item(name: str) -> bool:
     return False
 
 
+def _iter_section_items(section: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """SectionItem may be a list, a single dict, or absent."""
+    raw = section.get("SectionItem")
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [x for x in raw if isinstance(x, dict)]
+    return []
+
+
 def list_capital_flow_candidates(body: Dict[str, Any]) -> List[Dict[str, Any]]:
     """All subs/redemption-like lines on the NAV sheet, every share class (for debugging / UI)."""
     out: List[Dict[str, Any]] = []
-    for scope, node in (("fund", body),):
-        items = _section_items_by_name(node)
-        for name, raw in sorted(items.items()):
+    for sec in body.get("SectionList") or []:
+        if not isinstance(sec, dict):
+            continue
+        sec_name = (sec.get("SectionName") or "").strip()
+        for item in _iter_section_items(sec):
+            name = (item.get("Name") or "").strip()
             if not _is_capital_flow_item(name):
                 continue
-            val = _parse_money_value(raw)
+            val = _parse_money_value(item.get("Value"))
             if val is not None:
-                out.append({"scope": scope, "class_code": None, "name": name, "amount": val})
+                out.append(
+                    {
+                        "scope": "fund",
+                        "class_code": None,
+                        "section": sec_name or None,
+                        "name": name,
+                        "amount": val,
+                    }
+                )
     for entry in body.get("ClassSeriesFundList") or []:
         if not isinstance(entry, dict):
             continue
         code = (entry.get("ClassCode") or "").strip() or None
         for sec in entry.get("SectionList") or []:
+            if not isinstance(sec, dict):
+                continue
             sec_name = (sec.get("SectionName") or "").strip()
-            for item in sec.get("SectionItem") or []:
+            for item in _iter_section_items(sec):
                 name = (item.get("Name") or "").strip()
                 if not _is_capital_flow_item(name):
                     continue
@@ -401,50 +424,65 @@ def pick_fund_net_asset_value(
     return None, base
 
 
+def _capital_flow_from_candidates(
+    candidates: List[Dict[str, Any]],
+) -> Tuple[Optional[float], Optional[str]]:
+    """Net flow from parsed candidate rows (class lines summed across all series)."""
+    class_rows = [r for r in candidates if r.get("scope") == "class"]
+    if class_rows:
+        total = sum(float(r["amount"]) for r in class_rows)
+        labels: List[str] = []
+        for row in class_rows:
+            amt = float(row["amount"])
+            if amt == 0:
+                continue
+            code = row.get("class_code") or "?"
+            labels.append(f"{code}:{row.get('name')}")
+        if not labels:
+            return None, None
+        label = "; ".join(labels[:6]) + ("…" if len(labels) > 6 else "")
+        n_class = len({r.get("class_code") for r in class_rows})
+        if n_class > 1:
+            label = f"all classes ({n_class}): {label}"
+        return total, label
+
+    fund_rows = [r for r in candidates if r.get("scope") == "fund"]
+    if fund_rows:
+        total = sum(float(r["amount"]) for r in fund_rows)
+        names = "; ".join(r["name"] for r in fund_rows[:4])
+        return total, names
+    return None, None
+
+
 def pick_capital_flow_adjustment(body: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
     """
     Net subscriptions/redemptions on the valuation date from Diamond NAV sheet.
     Positive = net inflow (same sign as compliance Net Subs (reds)).
-    Sums class-level flow lines across all entries in ClassSeriesFundList (any class:
-    A, F, I, O, UA, UO, etc.) — not Class I only.
+    Sums flow lines across every share class in ClassSeriesFundList (not Class I only).
     """
+    candidates = list_capital_flow_candidates(body)
+    net, label = _capital_flow_from_candidates(candidates)
+    if net is not None:
+        return net, label
+
     items = _section_items_by_name(body)
     for subs_key, reds_key in (
         ("Subscriptions", "Redemptions"),
         ("Subscription", "Redemption"),
-        ("Net Subscriptions", None),
-        ("Net Subs (reds)", None),
-        ("Net Subscriptions/(Redemptions)", None),
-        ("Net Subscriptions / Redemptions", None),
     ):
-        if reds_key:
-            subs = _parse_money_value(items.get(subs_key)) or 0.0
-            reds = _parse_money_value(items.get(reds_key)) or 0.0
-            if subs != 0 or reds != 0:
-                net = subs + reds
-                return net, f"{subs_key} / {reds_key}"
-        else:
-            net = _parse_money_value(items.get(subs_key))
-            if net is not None:
-                return net, subs_key
-
-    total = 0.0
-    labels: List[str] = []
-    for row in list_capital_flow_candidates(body):
-        if row.get("scope") != "class":
-            continue
-        amt = float(row["amount"])
-        if amt == 0:
-            continue
-        total += amt
-        code = row.get("class_code") or "?"
-        labels.append(f"{code}:{row.get('name')}")
-    if labels:
-        label = "; ".join(labels[:6]) + ("…" if len(labels) > 6 else "")
-        n_class = len({row.get("class_code") for row in list_capital_flow_candidates(body) if row.get("scope") == "class"})
-        if n_class > 1:
-            label = f"all classes ({n_class}): {label}"
-        return total, label
+        subs = _parse_money_value(items.get(subs_key)) or 0.0
+        reds = _parse_money_value(items.get(reds_key)) or 0.0
+        if subs != 0 or reds != 0:
+            return subs + reds, f"{subs_key} / {reds_key}"
+    for net_key in (
+        "Net Subscriptions",
+        "Net Subs (reds)",
+        "Net Subscriptions/(Redemptions)",
+        "Net Subscriptions / Redemptions",
+    ):
+        net = _parse_money_value(items.get(net_key))
+        if net is not None:
+            return net, net_key
     return None, None
 
 
@@ -543,7 +581,7 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         "capital_flow": capital_flow,
         "capital_flow_label": capital_flow_label,
         "capital_flow_candidates": list_capital_flow_candidates(body),
-        "aum_parse_version": 5,
+        "aum_parse_version": 6,
         "aum_from_class_sum": class_sum is not None and nav_native == class_sum,
         "diamond_aum_components": {
             "root_net_asset_value": root_nav,

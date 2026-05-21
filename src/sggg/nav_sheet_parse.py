@@ -6,29 +6,29 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 
-def _return_value_to_bps(raw: Any) -> Optional[int]:
+def _return_value_to_bps(raw: Any, base_aum: Optional[float] = None) -> Optional[int]:
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
         v = float(raw)
-        if abs(v) <= 1.5:
-            return int(round(v * 10_000))
-        return int(round(v * 100))
-    s = str(raw).strip()
-    if not s:
-        return None
-    if s.endswith("%"):
+    else:
+        s = str(raw).strip()
+        if not s:
+            return None
+        if s.endswith("%"):
+            try:
+                return int(round(float(s[:-1].strip()) * 100))
+            except ValueError:
+                return None
         try:
-            return int(round(float(s[:-1].strip()) * 100))
+            v = float(s.replace(",", ""))
         except ValueError:
             return None
-    try:
-        v = float(s.replace(",", ""))
-        if abs(v) <= 1.5:
-            return int(round(v * 10_000))
-        return int(round(v * 100))
-    except ValueError:
-        return None
+    if abs(v) <= 1.5:
+        return int(round(v * 10_000))
+    if base_aum is not None and abs(base_aum) > 0 and abs(v) < abs(base_aum):
+        return int(round((v / float(base_aum)) * 10_000))
+    return int(round(v * 100))
 
 
 # Fund base / reporting currency (compliance Steps AUM and Diamond fund NAV are in this currency).

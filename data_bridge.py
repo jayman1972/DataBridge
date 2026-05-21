@@ -69,7 +69,7 @@ from sggg.nav_sheet_parse import (
     prior_business_day_iso,
     pick_class_i_bps,
 )
-from sggg.compliance_check_estimates import estimates_by_fund_id
+from sggg.compliance_check_estimates import compliance_aum_change_ex_flows, estimates_by_fund_id
 
 from supabase import create_client, Client
 
@@ -2271,6 +2271,8 @@ def sggg_diamond_nav_availability():
                 "compliance_opening_aum": None,
                 "compliance_closing_aum": None,
                 "ehp_nav_change_dollars": None,
+                "ehp_aum_change_unadjusted": None,
+                "compliance_net_subs_reds": None,
                 "diamond_opening_aum": None,
                 "diamond_closing_aum": None,
                 "diamond_aum_currency": native_ccy,
@@ -2299,8 +2301,15 @@ def sggg_diamond_nav_availability():
             if est_row.get("prior_eod_aum") is not None and est_row.get("current_aum") is not None:
                 entry["compliance_opening_aum"] = float(est_row["prior_eod_aum"])
                 entry["compliance_closing_aum"] = float(est_row["current_aum"])
-                entry["ehp_nav_change_dollars"] = (
+                entry["ehp_aum_change_unadjusted"] = (
                     entry["compliance_closing_aum"] - entry["compliance_opening_aum"]
+                )
+                if est_row.get("net_subs_reds") is not None:
+                    entry["compliance_net_subs_reds"] = float(est_row["net_subs_reds"])
+                entry["ehp_nav_change_dollars"] = compliance_aum_change_ex_flows(
+                    entry["compliance_opening_aum"],
+                    entry["compliance_closing_aum"],
+                    est_row.get("net_subs_reds"),
                 )
             psc_row = psc_navs.get(fid) or {}
             if entry["opening_nav_aum"] is None and psc_row.get("opening") is not None:

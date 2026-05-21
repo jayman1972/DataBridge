@@ -247,8 +247,8 @@ def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
         current_aum = _parse_money(cells[1])
         prior_eod_aum = _parse_money(cells[3])
         ror_raw = cells[5]  # AB
-        net_subs_reds = _parse_money(cells[9])  # AF Net Subs (reds); inflows positive
-        estimate_bps = _return_value_to_bps(ror_raw)
+        net_subs_reds = _parse_money(cells[9])  # AF Net Subs (reds); inflows positive, redemptions negative
+        estimate_bps = _return_value_to_bps(ror_raw, prior_eod_aum)
         ror_display = str(ror_raw).strip() if ror_raw is not None else None
 
         entry: Dict[str, Any] = {
@@ -268,6 +268,23 @@ def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
 
     meta = {"sheet_as_of": sheet_as_of}
     return {"by_fund_id": {k: v for k, v in out.items() if len(k) == 36 and "-" in k}, "meta": meta}
+
+
+def compliance_aum_change_ex_flows(
+    prior_eod_aum: Optional[float],
+    current_aum: Optional[float],
+    net_subs_reds: Optional[float],
+) -> Optional[float]:
+    """
+    Dollar change aligned with Steps column AB: (X - Z) minus AF net subs/reds.
+    Redemptions are negative in AF; subtracting AF removes flow from the raw AUM delta.
+    """
+    if prior_eod_aum is None or current_aum is None:
+        return None
+    delta = float(current_aum) - float(prior_eod_aum)
+    if net_subs_reds is None:
+        return delta
+    return delta - float(net_subs_reds)
 
 
 def estimates_by_fund_id(

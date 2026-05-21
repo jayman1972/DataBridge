@@ -17,8 +17,13 @@ def _parse_sheet_date(raw: Any) -> Optional[str]:
     return s[:10] if len(s) >= 10 else None
 
 
+_AUM_PARSE_VERSION = 2
+
+
 def snapshot_usable(summary: Dict[str, Any]) -> bool:
     """True when stored row is enough to skip a live GetNAVSheet call."""
+    if int(summary.get("aum_parse_version") or 0) < _AUM_PARSE_VERSION:
+        return False
     if summary.get("available"):
         return True
     return fund_aum_from_summary(summary) is not None

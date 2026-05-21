@@ -221,6 +221,45 @@ def fund_aum_from_summary(summary: Dict[str, Any]) -> Optional[float]:
     return _parse_money_value(summary.get("net_asset_value"))
 
 
+def sum_class_net_assets_cad(body: Dict[str, Any], fund_id: str) -> Optional[float]:
+    """
+    Sum per-class net assets (CAD series) when fund-level NetAssetValue on the sheet is stale.
+    """
+    base = FUND_NATIVE_CURRENCY.get(fund_id, "CAD")
+    raw_classes = body.get("ClassSeriesFundList")
+    if not isinstance(raw_classes, list):
+        return None
+    total = 0.0
+    found = 0
+    for entry in raw_classes:
+        if not isinstance(entry, dict):
+            continue
+        class_code = (entry.get("ClassCode") or "").strip()
+        class_id = (entry.get("FundID") or "").strip()
+        if base == "CAD" and _is_usd_share_class(class_code, class_id):
+            continue
+        items = _section_items_by_name(entry)
+        class_nav = None
+        for key in (
+            "Net Asset Value (CAD)",
+            "Net Asset Value CAD",
+            "Total Net Assets (CAD)",
+            "Net Assets (CAD)",
+            "Net Asset Value",
+            "Total Net Assets",
+            "Net Assets",
+        ):
+            class_nav = _parse_money_value(items.get(key))
+            if class_nav is not None:
+                break
+        if class_nav is None:
+            class_nav = _parse_money_value(entry.get("NetAssetValue"))
+        if class_nav is not None:
+            total += class_nav
+            found += 1
+    return total if found else None
+
+
 def pick_fund_net_asset_value(
     body: Dict[str, Any],
     fund_id: str,
@@ -345,6 +384,9 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
 
     fund_id = (body.get("FundParentID") or "").strip()
     nav_native, nav_ccy = pick_fund_net_asset_value(body, fund_id)
+    class_sum = sum_class_net_assets_cad(body, fund_id)
+    if class_sum is not None:
+        nav_native = class_sum
     capital_flow = pick_capital_flow_adjustment(body)
 
     has_nav = any(c.get("navpu") is not None for c in classes_out)
@@ -357,6 +399,8 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         "net_asset_value_native": nav_native,
         "native_currency": nav_ccy,
         "capital_flow": capital_flow,
+        "aum_parse_version": 2,
+        "aum_from_class_sum": class_sum is not None,
         "classes": sorted(classes_out, key=lambda x: x.get("class_id") or ""),
     }
 

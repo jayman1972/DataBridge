@@ -2290,6 +2290,7 @@ def sggg_diamond_nav_availability():
                 "aum_currency": native_ccy,
                 "sggg_nav_change_raw": None,
                 "capital_flow_adjustment": None,
+                "capital_flow_adjustment_source": None,
                 "sggg_nav_change_note": None,
                 "_estimate_bps_from_compliance": est_row.get("estimate_bps") is not None,
                 "_est_row": est_row,
@@ -2610,25 +2611,31 @@ def sggg_diamond_nav_availability():
                 if summary_open.get("native_currency") and not summary_close:
                     entry["diamond_aum_currency"] = summary_open["native_currency"]
 
-            # Strip report-day subs/reds only: Diamond open is prior EOD (flows on prior_date
-            # are already in that NAV). Same as Steps AB using AF on the report date row.
+            # SGGG: adjust only with subs/reds from the Diamond NAV sheet (not compliance AF).
             capital_adj = 0.0
-            capital_adj_parts: List[str] = []
-            if est_row.get("net_subs_reds") is not None:
-                capital_adj = float(est_row["net_subs_reds"])
-                capital_adj_parts.append(f"report day {valuation_date} AF")
-            elif summary_close and summary_close.get("capital_flow") is not None:
-                capital_adj = float(summary_close["capital_flow"])
-                capital_adj_parts.append("Diamond NAV sheet")
+            diamond_capital_flow: Optional[float] = None
+            if summary_close and summary_close.get("capital_flow") is not None:
+                diamond_capital_flow = float(summary_close["capital_flow"])
 
             if entry["diamond_opening_aum"] is not None and entry["diamond_closing_aum"] is not None:
                 raw_change = entry["diamond_closing_aum"] - entry["diamond_opening_aum"]
                 entry["sggg_nav_change_raw"] = raw_change
-                if capital_adj_parts:
+                if diamond_capital_flow is not None:
+                    capital_adj = diamond_capital_flow
                     entry["capital_flow_adjustment"] = capital_adj
+                    entry["capital_flow_adjustment_source"] = "diamond"
                     entry["sggg_nav_change_dollars"] = raw_change - capital_adj
                 else:
                     entry["sggg_nav_change_dollars"] = raw_change
+                    if (
+                        est_row.get("net_subs_reds") is not None
+                        and abs(float(est_row["net_subs_reds"])) > 1000
+                        and abs(raw_change) > 100_000
+                    ):
+                        entry["sggg_nav_change_note"] = (
+                            "Diamond NAV sheet has no subs/reds line; "
+                            "SGGG day change is unadjusted (compliance AF is not applied to SGGG)."
+                        )
                 entry["sggg_nav_change_source"] = "diamond"
             else:
                 missing: List[str] = []
@@ -2758,7 +2765,7 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
-                    "nav_checker_build": "diamond-only-sggg-v1",
+                    "nav_checker_build": "sggg-diamond-flows-v3",
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),
                     "compliance_sec": round(compliance_sec, 2),

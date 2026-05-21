@@ -383,9 +383,14 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         )
 
     fund_id = (body.get("FundParentID") or "").strip()
-    nav_native, nav_ccy = pick_fund_net_asset_value(body, fund_id)
+    header_nav, nav_ccy = pick_fund_net_asset_value(body, fund_id)
     class_sum = sum_class_net_assets_cad(body, fund_id)
-    if class_sum is not None:
+    if header_nav is not None and class_sum is not None:
+        # Fund header often includes USD series; class-sum can undercount on sub days.
+        nav_native = max(header_nav, class_sum)
+    elif header_nav is not None:
+        nav_native = header_nav
+    else:
         nav_native = class_sum
     capital_flow = pick_capital_flow_adjustment(body)
 
@@ -399,8 +404,8 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         "net_asset_value_native": nav_native,
         "native_currency": nav_ccy,
         "capital_flow": capital_flow,
-        "aum_parse_version": 2,
-        "aum_from_class_sum": class_sum is not None,
+        "aum_parse_version": 3,
+        "aum_from_class_sum": class_sum is not None and nav_native == class_sum,
         "classes": sorted(classes_out, key=lambda x: x.get("class_id") or ""),
     }
 

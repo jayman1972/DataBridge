@@ -40,10 +40,6 @@ FUND_NATIVE_CURRENCY: Dict[str, str] = {
     "01010000-801A-4995-8370-45484608DE57": "CAD",
 }
 
-# Share classes with this suffix are USD-denominated (e.g. 550UF, 200UF) within a CAD fund.
-USD_CLASS_CODE_SUFFIX = "UF"
-
-
 def _section_items_by_name(node: Any) -> Dict[str, Any]:
     """Collect SectionItem Name->Value from a NAV sheet node (fund or class)."""
     out: Dict[str, Any] = {}
@@ -86,17 +82,59 @@ def _normalize_currency_code(raw: Any, default: str = "CAD") -> str:
     return default
 
 
+def _class_series_token(class_code: str, class_id: str) -> str:
+    """Best-effort series label (e.g. 500UO) from Diamond class entry."""
+    for raw in (class_code, class_id):
+        token = (raw or "").strip().upper()
+        if not token:
+            continue
+        if re.match(r"^[A-Z0-9]{2,8}$", token):
+            return token
+    return (class_code or class_id or "").strip().upper()
+
+
 def _is_usd_share_class(class_code: str, class_id: str) -> bool:
-    token = (class_code or class_id or "").strip().upper()
-    return token.endswith(USD_CLASS_CODE_SUFFIX)
+    """USD series codes include the letter U (500UO, 550UF, 200UA, etc.)."""
+    return "U" in _class_series_token(class_code, class_id)
+
+
+def _navpu_from_section_items(
+    items: Dict[str, Any],
+    *,
+    want_usd: bool,
+) -> Optional[float]:
+    """Scan NAV sheet section labels for currency-specific NAVPU."""
+    preferred: List[str] = []
+    fallback: List[str] = []
+    for name, raw in items.items():
+        upper = (name or "").upper()
+        if "NAV" not in upper and "PRICE" not in upper and "UNIT" not in upper and "PU" not in upper:
+            continue
+        val = _parse_money_value(raw)
+        if val is None:
+            continue
+        if want_usd:
+            if "USD" in upper or "U.S." in upper:
+                preferred.append(val)
+            elif "CAD" not in upper and "CAN" not in upper:
+                fallback.append(val)
+        else:
+            if "CAD" in upper or "CAN" in upper:
+                preferred.append(val)
+            elif "USD" not in upper:
+                fallback.append(val)
+    if preferred:
+        return preferred[0]
+    return fallback[0] if fallback else None
 
 
 def _parse_class_navpu(entry: Dict[str, Any], fund_base_ccy: str) -> Tuple[Optional[float], str]:
     """
-    Per-class NAVPU in the class's own currency. USD classes (e.g. *UF) use USD NAVPU, not CAD-converted.
+    Per-class NAVPU in the class's own currency. USD series (code contains U) use USD NAVPU fields.
     """
     class_code = (entry.get("ClassCode") or "").strip()
     class_id = (entry.get("FundID") or "").strip()
+    series = _class_series_token(class_code, class_id)
     raw_ccy = entry.get("Currency") or entry.get("ClassCurrency")
     if raw_ccy:
         class_ccy = _normalize_currency_code(raw_ccy, default=fund_base_ccy)
@@ -109,22 +147,26 @@ def _parse_class_navpu(entry: Dict[str, Any], fund_base_ccy: str) -> Tuple[Optio
     navpu: Optional[float] = None
 
     if class_ccy == "USD":
-        for key in (
-            "NAVPU",
-            "Price",
-            "NAV per Unit",
-            "NAV Per Unit",
-            "NAV per Unit (USD)",
-            "NAV Per Unit (USD)",
-        ):
-            navpu = _parse_money_value(entry.get(key)) or _parse_money_value(items.get(key))
-            if navpu is not None:
-                break
+        navpu = _navpu_from_section_items(items, want_usd=True)
+        if navpu is None:
+            for key in (
+                "NAV per Unit (USD)",
+                "NAV Per Unit (USD)",
+                "NAVPU (USD)",
+                "Price (USD)",
+                "NAVPU",
+                "Price",
+            ):
+                navpu = _parse_money_value(entry.get(key)) or _parse_money_value(items.get(key))
+                if navpu is not None:
+                    break
     else:
-        navpu = _parse_money_value(entry.get("NAVPU"))
+        navpu = _navpu_from_section_items(items, want_usd=False)
+        if navpu is None:
+            navpu = _parse_money_value(entry.get("NAVPU"))
         if navpu is None:
             for key in ("NAVPU", "NAV per Unit", "Price"):
-                navpu = _parse_money_value(items.get(key))
+                navpu = _parse_money_value(items.get(key)) or _parse_money_value(items.get(key))
                 if navpu is not None:
                     break
 
@@ -227,7 +269,7 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         fund_base = FUND_NATIVE_CURRENCY.get(fund_parent_id, "CAD")
         navpu, class_ccy = _parse_class_navpu(entry, fund_base)
         ret_raw = _valuation_period_return(entry)
-        display_class = (entry.get("ClassCode") or "").strip() or class_id
+        display_class = _class_series_token(class_code, class_id) or class_id
         classes_out.append(
             {
                 "class_id": class_id,

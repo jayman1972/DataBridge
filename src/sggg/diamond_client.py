@@ -7,9 +7,10 @@ Spec: Diamond API v2.03 - https://api.sgggfsi.com/api/v1/
 import os
 import threading
 import time
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from sggg.nav_sheet_parse import parse_diamond_nav_unavailable
+from sggg.nav_sheet_parse import normalize_valuation_date, parse_diamond_nav_unavailable
 
 try:
     import requests
@@ -20,6 +21,64 @@ except ImportError:
 
 BASE_URL = "https://api.sgggfsi.com/api/v1"
 AUTH_EXPIRY_BUFFER_SEC = 300  # Refresh AuthKey 5 min before expiry
+
+# Fleet-wide "NAV not finalized" cache (GetNAVSheet is slow even for HTTP 400).
+_NAV_FLEET_UNAVAIL_CACHE: Dict[str, Tuple[float, str, str]] = {}
+
+
+def _nav_unavail_cache_ttl_sec() -> int:
+    return int(os.environ.get("SGGG_NAV_UNAVAIL_CACHE_SEC", "900"))
+
+
+def get_fleet_nav_unavailable_cached(valuation_date: str) -> Optional["DiamondNavUnavailableError"]:
+    key = normalize_valuation_date(valuation_date)
+    row = _NAV_FLEET_UNAVAIL_CACHE.get(key)
+    if not row:
+        return None
+    expiry, end_date, message = row
+    if time.time() > expiry:
+        _NAV_FLEET_UNAVAIL_CACHE.pop(key, None)
+        return None
+    return DiamondNavUnavailableError(message, end_date=end_date)
+
+
+def set_fleet_nav_unavailable_cached(valuation_date: str, exc: "DiamondNavUnavailableError") -> None:
+    key = normalize_valuation_date(valuation_date)
+    _NAV_FLEET_UNAVAIL_CACHE[key] = (
+        time.time() + _nav_unavail_cache_ttl_sec(),
+        exc.end_date,
+        exc.user_message,
+    )
+
+
+def should_skip_diamond_early_for_today(valuation_date: str) -> Optional[str]:
+    """
+    Before the usual NAV release window, skip Diamond for today's valuation date.
+    GetNAVSheet still takes ~60s+ to return 'not finalized' — this avoids that wait.
+    Disable with SGGG_NAV_CHECKER_SKIP_EARLY_TODAY=0 or request force_diamond=true.
+    """
+    if os.environ.get("SGGG_NAV_CHECKER_SKIP_EARLY_TODAY", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+    ):
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("America/Toronto")
+    except Exception:
+        tz = None
+    now = datetime.now(tz) if tz else datetime.now()
+    val = date.fromisoformat(normalize_valuation_date(valuation_date))
+    if val != now.date():
+        return None
+    if (now.hour, now.minute) >= (17, 30):
+        return None
+    return (
+        f"NAV for {valuation_date} is usually not published until after 5:30pm Eastern. "
+        "Diamond was not called (use force check to query SGGG anyway)."
+    )
 
 
 class DiamondNavUnavailableError(Exception):
@@ -207,10 +266,12 @@ def fetch_nav_sheet(
     except RuntimeError as exc:
         parsed = parse_diamond_nav_unavailable(exc, valuation_date)
         if parsed:
-            raise DiamondNavUnavailableError(
+            nav_exc = DiamondNavUnavailableError(
                 parsed["message"],
                 end_date=parsed["end_date"],
-            ) from exc
+            )
+            set_fleet_nav_unavailable_cached(valuation_date, nav_exc)
+            raise nav_exc from exc
         raise
 
 

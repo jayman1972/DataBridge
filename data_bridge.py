@@ -51,7 +51,13 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 
 from bloomberg import get_bloomberg_client, BloombergClientType
-from sggg.diamond_client import DiamondNavUnavailableError, fetch_nav_sheet, get_diamond_client
+from sggg.diamond_client import (
+    DiamondNavUnavailableError,
+    fetch_nav_sheet,
+    get_diamond_client,
+    get_fleet_nav_unavailable_cached,
+    should_skip_diamond_early_for_today,
+)
 from sggg.nav_sheet_parse import (
     FUND_NATIVE_CURRENCY,
     fetch_psc_portfolio_navs,
@@ -2222,6 +2228,25 @@ def sggg_diamond_nav_availability():
             "no",
         )
         use_psc = os.environ.get("SGGG_NAV_CHECKER_USE_PSC", "0").strip().lower() in ("1", "true", "yes")
+        force_diamond = data.get("force_diamond") in (True, 1) or str(
+            data.get("force_diamond", "")
+        ).strip().lower() in ("1", "true", "yes")
+
+        diamond_short_circuit: Optional[DiamondNavUnavailableError] = None
+        diamond_skip_reason: Optional[str] = None
+        if not force_diamond:
+            early_msg = should_skip_diamond_early_for_today(valuation_date)
+            if early_msg:
+                diamond_short_circuit = DiamondNavUnavailableError(
+                    early_msg,
+                    end_date=valuation_date,
+                )
+                diamond_skip_reason = "early_today"
+            else:
+                cached_unavail = get_fleet_nav_unavailable_cached(valuation_date)
+                if cached_unavail:
+                    diamond_short_circuit = cached_unavail
+                    diamond_skip_reason = "cached_unavailable"
 
         def _base_entry(spec: Dict[str, str], wp: Dict[str, Any], wp_prior: Dict[str, Any], psc_navs: Dict) -> Dict[str, Any]:
             fid = spec["id"]
@@ -2292,17 +2317,15 @@ def sggg_diamond_nav_availability():
                 entry["aum_currency"] = "CAD"
             return entry
 
-        # Diamond (class NAVPU/BPS) + compliance + optional PSC in one pool so Diamond is not blocked by P: reads.
-        diamond_tasks: List[tuple] = []
-        for idx, spec in enumerate(fund_specs):
-            fid = spec["id"]
-            diamond_tasks.append((idx, fid, valuation_date, "close"))
-            if include_prior_diamond:
-                diamond_tasks.append((idx, fid, prior_date, "open"))
+        # Diamond close sheets first; prior-day sheets only if close is available (saves calls when NAV not out).
+        diamond_close_tasks: List[tuple] = []
+        if not diamond_short_circuit:
+            for idx, spec in enumerate(fund_specs):
+                diamond_close_tasks.append((idx, spec["id"], valuation_date, "close"))
 
         diamond_workers = min(
             int(os.environ.get("SGGG_DIAMOND_NAV_MAX_WORKERS", "12")),
-            max(1, len(diamond_tasks)),
+            max(1, len(diamond_close_tasks) or 1),
         )
         prep_slots = 3 if use_psc else 2
         pool_workers = max(diamond_workers, prep_slots)
@@ -2345,10 +2368,14 @@ def sggg_diamond_nav_availability():
         val_d = _date.fromisoformat(valuation_date)
         prior_d = _date.fromisoformat(prior_date)
 
+        if diamond_short_circuit:
+            for idx in range(len(fund_specs)):
+                diamond_errors[(idx, "close")] = diamond_short_circuit
+
         t_parallel = time.time()
         with ThreadPoolExecutor(max_workers=pool_workers) as executor:
             future_kind: Dict[Any, tuple] = {}
-            for task in diamond_tasks:
+            for task in diamond_close_tasks:
                 future_kind[executor.submit(_fetch_nav_task, task)] = ("diamond", task)
             future_kind[executor.submit(_timed_estimates, val_d)] = ("wp", None)
             future_kind[executor.submit(_timed_estimates, prior_d)] = ("wp_prior", None)
@@ -2363,6 +2390,17 @@ def sggg_diamond_nav_availability():
                         idx, role, summary, call_sec = future.result()
                         diamond_call_secs.append(call_sec)
                         diamond_results[(idx, role)] = summary
+                        if (
+                            role == "close"
+                            and tag[2] == valuation_date
+                            and include_prior_diamond
+                            and summary.get("available")
+                        ):
+                            prior_task = (idx, tag[1], prior_date, "open")
+                            future_kind[executor.submit(_fetch_nav_task, prior_task)] = (
+                                "diamond",
+                                prior_task,
+                            )
                     except DiamondNavUnavailableError as exc:
                         diamond_errors[key] = exc
                     except Exception as exc:
@@ -2494,7 +2532,17 @@ def sggg_diamond_nav_availability():
 
         elapsed = time.time() - started
         bottleneck_hint = None
-        if parallel_wall_sec > diamond_wall_sec + 2:
+        if diamond_skip_reason == "early_today":
+            bottleneck_hint = (
+                "Skipped Diamond before 5:30pm Eastern for today's date. "
+                "Compliance estimates still load; check Force SGGG check after NAV release."
+            )
+        elif diamond_skip_reason == "cached_unavailable":
+            bottleneck_hint = (
+                "Used cached 'NAV not available' for this date (recent slow Diamond response). "
+                "Use force check to refresh from SGGG."
+            )
+        elif parallel_wall_sec > diamond_wall_sec + 2:
             if max(compliance_sec, compliance_prior_sec) >= diamond_wall_sec:
                 bottleneck_hint = (
                     "Compliance workbook reads on P: (two dates) dominated wall time; "
@@ -2505,14 +2553,14 @@ def sggg_diamond_nav_availability():
         if not bottleneck_hint and diamond_avg_sec >= 12:
             bottleneck_hint = (
                 f"Diamond GetNAVSheet averaged {diamond_avg_sec:.1f}s per call "
-                f"(slowest {diamond_wall_sec:.1f}s); network/API latency, not request count."
+                f"(slowest {diamond_wall_sec:.1f}s) even when NAV is not ready — SGGG server latency."
             )
 
         logging.getLogger(__name__).info(
             "nav-availability: %d funds, %d diamond calls in %.2fs "
             "(parallel=%.2fs compliance=%.2fs/%.2fs diamond_wall=%.2fs workers=%d psc=%s)",
             len(fund_specs),
-            len(diamond_tasks),
+            len(diamond_call_secs),
             elapsed,
             parallel_wall_sec,
             compliance_sec,
@@ -2549,7 +2597,11 @@ def sggg_diamond_nav_availability():
                     "diamond_wall_sec": round(diamond_wall_sec, 2),
                     "diamond_slowest_sec": round(diamond_wall_sec, 2),
                     "diamond_avg_sec": round(diamond_avg_sec, 2),
-                    "diamond_requests": len(diamond_tasks),
+                    "diamond_requests": len(diamond_call_secs),
+                    "diamond_requests_max": len(fund_specs)
+                    * (2 if include_prior_diamond and not diamond_short_circuit else 1),
+                    "diamond_skipped": diamond_skip_reason is not None,
+                    "diamond_skip_reason": diamond_skip_reason,
                     "diamond_workers": diamond_workers,
                     "bottleneck_hint": bottleneck_hint,
                 },

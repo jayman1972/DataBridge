@@ -8,7 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from sggg.nav_sheet_parse import _return_value_to_bps
+from sggg.nav_sheet_parse import FUND_NATIVE_CURRENCY, _return_value_to_bps
 
 DEFAULT_ROOT = (
     r"P:\03. Reporting\100. Compliance Check - portfolios (Alt Funds)"
@@ -245,7 +245,7 @@ def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
             "current_aum": current_aum,
             "prior_eod_aum": prior_eod_aum,
             "net_subs_reds": net_subs_reds,
-            "aum_currency": "USD",
+            "aum_currency": FUND_NATIVE_CURRENCY.get(fund_id or "", "CAD"),
             "fund_id": fund_id,
         }
         if fund_id:

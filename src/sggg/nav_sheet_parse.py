@@ -31,14 +31,17 @@ def _return_value_to_bps(raw: Any) -> Optional[int]:
         return None
 
 
-# Native fund currency for Fund Admin NAV checker (compliance Steps are USD for alts).
+# Fund base / reporting currency (compliance Steps AUM and Diamond fund NAV are in this currency).
 FUND_NATIVE_CURRENCY: Dict[str, str] = {
-    "415a3530-3034-4536-4432-303030364337": "USD",
-    "41010000-7F7A-0A65-D559-45484608DB40": "USD",
-    "41323030-3031-4144-3637-303030364338": "USD",
-    "41010000-7F2A-D7E8-776F-45484608D91C": "USD",
+    "415a3530-3034-4536-4432-303030364337": "CAD",
+    "41010000-7F7A-0A65-D559-45484608DB40": "CAD",
+    "41323030-3031-4144-3637-303030364338": "CAD",
+    "41010000-7F2A-D7E8-776F-45484608D91C": "CAD",
     "01010000-801A-4995-8370-45484608DE57": "CAD",
 }
+
+# Share classes with this suffix are USD-denominated (e.g. 550UF, 200UF) within a CAD fund.
+USD_CLASS_CODE_SUFFIX = "UF"
 
 
 def _section_items_by_name(node: Any) -> Dict[str, Any]:
@@ -72,54 +75,86 @@ def _parse_money_value(raw: Any) -> Optional[float]:
         return None
 
 
-def pick_native_net_asset_value(
+def _normalize_currency_code(raw: Any, default: str = "CAD") -> str:
+    s = (str(raw or "")).strip().upper()
+    if not s:
+        return default
+    if "USD" in s or s in ("US$", "US"):
+        return "USD"
+    if "CAD" in s or "CAN" in s:
+        return "CAD"
+    return default
+
+
+def _is_usd_share_class(class_code: str, class_id: str) -> bool:
+    token = (class_code or class_id or "").strip().upper()
+    return token.endswith(USD_CLASS_CODE_SUFFIX)
+
+
+def _parse_class_navpu(entry: Dict[str, Any], fund_base_ccy: str) -> Tuple[Optional[float], str]:
+    """
+    Per-class NAVPU in the class's own currency. USD classes (e.g. *UF) use USD NAVPU, not CAD-converted.
+    """
+    class_code = (entry.get("ClassCode") or "").strip()
+    class_id = (entry.get("FundID") or "").strip()
+    raw_ccy = entry.get("Currency") or entry.get("ClassCurrency")
+    if raw_ccy:
+        class_ccy = _normalize_currency_code(raw_ccy, default=fund_base_ccy)
+    elif _is_usd_share_class(class_code, class_id):
+        class_ccy = "USD"
+    else:
+        class_ccy = fund_base_ccy
+
+    items = _section_items_by_name(entry)
+    navpu: Optional[float] = None
+
+    if class_ccy == "USD":
+        for key in (
+            "NAVPU",
+            "Price",
+            "NAV per Unit",
+            "NAV Per Unit",
+            "NAV per Unit (USD)",
+            "NAV Per Unit (USD)",
+        ):
+            navpu = _parse_money_value(entry.get(key)) or _parse_money_value(items.get(key))
+            if navpu is not None:
+                break
+    else:
+        navpu = _parse_money_value(entry.get("NAVPU"))
+        if navpu is None:
+            for key in ("NAVPU", "NAV per Unit", "Price"):
+                navpu = _parse_money_value(items.get(key))
+                if navpu is not None:
+                    break
+
+    return navpu, class_ccy
+
+
+def pick_fund_net_asset_value(
     body: Dict[str, Any],
     fund_id: str,
 ) -> Tuple[Optional[float], str]:
-    """
-    Prefer USD Net Asset Value from Diamond NAV sheet when fund is USD-denominated.
-    Returns (amount, currency_code).
-    """
-    native = FUND_NATIVE_CURRENCY.get(fund_id, "USD")
-    fund_ccy = (body.get("FundCurrency") or "").strip().upper()
+    """Fund-level NetAssetValue in the fund's base currency (typically CAD)."""
+    base = FUND_NATIVE_CURRENCY.get(fund_id, "CAD")
+    fund_ccy = _normalize_currency_code(body.get("FundCurrency"), default=base)
     items = _section_items_by_name(body)
 
-    usd_keys = (
-        "Net Asset Value (USD)",
-        "Net Asset Value USD",
-        "Total Net Assets (USD)",
-        "Net Assets (USD)",
-    )
     cad_keys = (
         "Net Asset Value (CAD)",
         "Net Asset Value CAD",
         "Total Net Assets (CAD)",
+        "Net Assets (CAD)",
     )
-
-    if native == "USD":
-        for key in usd_keys:
-            v = _parse_money_value(items.get(key))
-            if v is not None:
-                return v, "USD"
-        nav = _parse_money_value(body.get("NetAssetValue"))
-        if nav is not None and fund_ccy in ("", "USD", "US Dollar", "US$"):
-            return nav, "USD"
-        for key in cad_keys:
-            v = _parse_money_value(items.get(key))
-            if v is not None:
-                return v, "CAD"
-
-    if native == "CAD":
-        for key in cad_keys:
-            v = _parse_money_value(items.get(key))
-            if v is not None:
-                return v, "CAD"
-        nav = _parse_money_value(body.get("NetAssetValue"))
-        if nav is not None:
-            return nav, "CAD" if fund_ccy != "USD" else "USD"
+    for key in cad_keys:
+        v = _parse_money_value(items.get(key))
+        if v is not None:
+            return v, "CAD"
 
     nav = _parse_money_value(body.get("NetAssetValue"))
-    return nav, native if nav is not None else native
+    if nav is not None:
+        return nav, fund_ccy if fund_ccy in ("CAD", "USD") else base
+    return None, base
 
 
 def pick_capital_flow_adjustment(body: Dict[str, Any]) -> Optional[float]:
@@ -188,20 +223,25 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         class_id = (entry.get("FundID") or "").strip()
         if not class_id:
             continue
-        navpu = entry.get("NAVPU")
+        fund_parent_id = (body.get("FundParentID") or "").strip()
+        fund_base = FUND_NATIVE_CURRENCY.get(fund_parent_id, "CAD")
+        navpu, class_ccy = _parse_class_navpu(entry, fund_base)
         ret_raw = _valuation_period_return(entry)
+        display_class = (entry.get("ClassCode") or "").strip() or class_id
         classes_out.append(
             {
                 "class_id": class_id,
                 "class_code": (entry.get("ClassCode") or "").strip() or None,
-                "navpu": float(navpu) if navpu is not None else None,
+                "display_class": display_class,
+                "navpu": navpu,
+                "nav_currency": class_ccy,
                 "bps": _return_value_to_bps(ret_raw),
                 "return_display": str(ret_raw).strip() if ret_raw is not None else None,
             }
         )
 
     fund_id = (body.get("FundParentID") or "").strip()
-    nav_native, nav_ccy = pick_native_net_asset_value(body, fund_id)
+    nav_native, nav_ccy = pick_fund_net_asset_value(body, fund_id)
     capital_flow = pick_capital_flow_adjustment(body)
 
     has_nav = any(c.get("navpu") is not None for c in classes_out)

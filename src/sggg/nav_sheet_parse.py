@@ -265,6 +265,7 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         class_id = (entry.get("FundID") or "").strip()
         if not class_id:
             continue
+        class_code = (entry.get("ClassCode") or "").strip()
         fund_parent_id = (body.get("FundParentID") or "").strip()
         fund_base = FUND_NATIVE_CURRENCY.get(fund_parent_id, "CAD")
         navpu, class_ccy = _parse_class_navpu(entry, fund_base)
@@ -393,14 +394,29 @@ def prior_business_day_iso(valuation_date: str) -> str:
     return d.isoformat()
 
 
+def _is_class_i_series(token: str) -> bool:
+    """Match Class I series labels from Diamond (e.g. 500I, 550I, 200I)."""
+    t = (token or "").strip().upper()
+    if not t:
+        return False
+    if t in ("I", "CLASS I"):
+        return True
+    if re.match(r"^class\s*i\b", t, re.IGNORECASE):
+        return True
+    # EHP series codes: digits + I (500I), not USD series containing U (500UO).
+    return bool(re.search(r"\dI$", t)) and "U" not in t
+
+
 def pick_class_i_bps(classes: List[Dict[str, Any]]) -> Optional[int]:
     """Return valuation-period return (bps) for Class I share class."""
     for cls in classes or []:
-        cid = (cls.get("class_id") or "").strip()
-        code = (cls.get("class_code") or "").strip()
-        if cid.upper() in ("I", "CLASS I") or code.upper() in ("I", "CLASS I"):
-            return cls.get("bps")
-        if re.match(r"^class\s*i\b", cid, re.IGNORECASE):
+        token = (
+            cls.get("display_class")
+            or cls.get("class_code")
+            or cls.get("class_id")
+            or ""
+        )
+        if _is_class_i_series(str(token)):
             return cls.get("bps")
     return None
 

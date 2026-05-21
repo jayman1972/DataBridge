@@ -819,6 +819,55 @@ def prior_business_day_iso(valuation_date: str) -> str:
     return d.isoformat()
 
 
+def previous_business_day_iso(iso_date: str) -> str:
+    """Business day immediately before iso_date (skips weekends)."""
+    from datetime import date, timedelta
+
+    d = date.fromisoformat(normalize_valuation_date(iso_date)) - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.isoformat()
+
+
+def prior_open_sheet_is_usable(
+    sheet_date_iso: Optional[str],
+    valuation_date_iso: str,
+    requested_date_iso: str,
+) -> Tuple[bool, Optional[str]]:
+    """
+    True when a prior-day GetNAVSheet can be used as opening EOD for valuation_date.
+
+    Rejects sheets on/after the report date (e.g. holiday: request 2026-05-18, sheet 2026-05-19)
+    or sheets newer than the date requested.
+    """
+    if not sheet_date_iso:
+        return False, "missing_sheet_date"
+    sheet = normalize_valuation_date(sheet_date_iso)
+    val = normalize_valuation_date(valuation_date_iso)
+    req = normalize_valuation_date(requested_date_iso)
+    if sheet >= val:
+        return False, "sheet_on_or_after_report_date"
+    if sheet > req:
+        return False, "sheet_after_requested_date"
+    return True, None
+
+
+def prior_business_days_for_lookup(
+    initial_prior_iso: str,
+    *,
+    max_days: int = 12,
+) -> List[str]:
+    """Calendar prior business days to try for opening NAV (holiday walk-back)."""
+    out: List[str] = []
+    d = normalize_valuation_date(initial_prior_iso)
+    for _ in range(max(1, max_days)):
+        if d in out:
+            break
+        out.append(d)
+        d = previous_business_day_iso(d)
+    return out
+
+
 def _is_class_i_series(token: str) -> bool:
     """Match Class I series labels from Diamond (e.g. 500I, 550I, 200I)."""
     t = (token or "").strip().upper()

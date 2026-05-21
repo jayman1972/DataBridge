@@ -69,6 +69,8 @@ from sggg.nav_sheet_parse import (
     normalize_valuation_date,
     parse_nav_sheet_summary,
     prior_business_day_iso,
+    prior_business_days_for_lookup,
+    prior_open_sheet_is_usable,
     pick_class_i_bps,
     sggg_opening_aum_from_prior_summary,
 )
@@ -2251,10 +2253,16 @@ def sggg_diamond_nav_availability():
 
         db_snapshots: Dict[tuple, Dict[str, Any]] = {}
         if not force_diamond and supabase:
+            prior_lookup_dates = list(
+                dict.fromkeys(
+                    [valuation_date, prior_date]
+                    + prior_business_days_for_lookup(prior_date)
+                )
+            )
             db_snapshots = load_snapshots_bulk(
                 supabase,
                 fund_ids_list,
-                [valuation_date, prior_date],
+                prior_lookup_dates,
             )
 
         def _base_entry(spec: Dict[str, str], wp: Dict[str, Any], wp_prior: Dict[str, Any], psc_navs: Dict) -> Dict[str, Any]:
@@ -2271,6 +2279,7 @@ def sggg_diamond_nav_availability():
                 "message": None,
                 "classes": [],
                 "prior_valuation_date": prior_date,
+                "diamond_prior_valuation_date": None,
                 "opening_nav_aum": None,
                 "closing_nav_aum": None,
                 "sggg_nav_change_dollars": None,
@@ -2382,6 +2391,76 @@ def sggg_diamond_nav_availability():
                 "SGGG day-change (close AUM minus open AUM, net of subs)"
             )
 
+        def _fetch_summary_for_date(
+            fid: str,
+            vdate: str,
+            vdate_norm: str,
+        ) -> Dict[str, Any]:
+            """Load one GetNAVSheet summary from DB, memory cache, or live API."""
+            if not force_diamond:
+                db_summary = db_snapshots.get((fid, vdate_norm))
+                if db_summary and snapshot_usable(db_summary):
+                    return {
+                        "summary": db_summary,
+                        "error": None,
+                        "data_source": "supabase",
+                        "cache_hit": True,
+                        "duration_sec": 0.0,
+                        "http_status": 200,
+                        "status": "from_database",
+                    }
+            if not force_diamond:
+                cached_raw = get_nav_sheet_raw_cached(fid, vdate)
+                if cached_raw is not None:
+                    summary = parse_nav_sheet_summary(cached_raw)
+                    if fund_aum_from_summary(summary) is not None:
+                        return {
+                            "summary": summary,
+                            "error": None,
+                            "data_source": "memory",
+                            "cache_hit": True,
+                            "duration_sec": 0.0,
+                            "http_status": 200,
+                            "status": "from_cache",
+                        }
+            t_call = time.time()
+            try:
+                raw = fetch_nav_sheet(diamond_api_base, fid, vdate, auth_key=auth_key)
+                elapsed = time.time() - t_call
+                summary = parse_nav_sheet_summary(raw)
+                if nav_sheet_summary_cacheable(summary):
+                    set_nav_sheet_raw_cached(fid, vdate, raw)
+                    upsert_snapshot(supabase, fid, vdate, summary)
+                return {
+                    "summary": summary,
+                    "error": None,
+                    "data_source": "live",
+                    "cache_hit": False,
+                    "duration_sec": round(elapsed, 2),
+                    "http_status": 200,
+                    "status": "available" if summary.get("available") else "response_ok_no_class_nav",
+                }
+            except DiamondNavUnavailableError as exc:
+                return {
+                    "summary": None,
+                    "error": exc,
+                    "data_source": "live",
+                    "cache_hit": False,
+                    "duration_sec": round(time.time() - t_call, 2),
+                    "http_status": 400,
+                    "status": "not_finalized",
+                }
+            except Exception as exc:
+                return {
+                    "summary": None,
+                    "error": exc,
+                    "data_source": "live",
+                    "cache_hit": False,
+                    "duration_sec": round(time.time() - t_call, 2),
+                    "http_status": None,
+                    "status": "error",
+                }
+
         def _fetch_nav_task(task: tuple) -> Dict[str, Any]:
             t0 = time.time()
             idx, fid, vdate, role = task
@@ -2396,72 +2475,131 @@ def sggg_diamond_nav_availability():
                 "endpoint_path": "/api/v1/GetNAVSheet/",
                 "url": f"{diamond_api_base}/GetNAVSheet/",
                 "request_headers_note": "Authorization: AuthKey <token>; AuthKey: <token>; Content-Type: application/json",
-                "request_body": {"FundID": fid, "ValuationDate": vdate},
                 "force_diamond": force_diamond,
             }
             vdate_norm = normalize_valuation_date(vdate)
-            if not force_diamond:
-                db_summary = db_snapshots.get((fid, vdate_norm))
-                if db_summary and snapshot_usable(db_summary):
+            val_norm = normalize_valuation_date(valuation_date)
+
+            if role == "open":
+                lookback = int(os.environ.get("SGGG_NAV_PRIOR_LOOKBACK_DAYS", "12"))
+                candidates = prior_business_days_for_lookup(vdate_norm, max_days=lookback)
+                fetch_attempts: List[Dict[str, Any]] = []
+                last_error: Any = None
+                chosen_summary: Optional[Dict[str, Any]] = None
+                effective_prior: Optional[str] = None
+                for candidate in candidates:
+                    log["request_body"] = {"FundID": fid, "ValuationDate": candidate}
+                    attempt = _fetch_summary_for_date(fid, candidate, candidate)
+                    summary = attempt.get("summary")
+                    sheet_date = None
+                    if summary:
+                        sheet_date = normalize_diamond_sheet_date(
+                            summary.get("sheet_valuation_date")
+                            or summary.get("valuation_date")
+                        )
+                    usable, reject_reason = prior_open_sheet_is_usable(
+                        sheet_date, val_norm, candidate
+                    )
+                    has_aum = summary is not None and fund_aum_from_summary(summary) is not None
+                    fetch_attempts.append(
+                        {
+                            "requested_date": candidate,
+                            "sheet_valuation_date": sheet_date,
+                            "usable": usable and has_aum,
+                            "reject_reason": reject_reason,
+                            "has_fund_aum": has_aum,
+                            "data_source": attempt.get("data_source"),
+                            "status": attempt.get("status"),
+                        }
+                    )
+                    if attempt.get("error"):
+                        last_error = attempt["error"]
+                    if usable and has_aum and summary:
+                        chosen_summary = summary
+                        effective_prior = sheet_date or candidate
+                        break
+                elapsed = time.time() - t0
+                if chosen_summary is not None and effective_prior:
+                    chosen_summary = dict(chosen_summary)
+                    chosen_summary["prior_effective_valuation_date"] = effective_prior
+                    chosen_summary["prior_holiday_fallback"] = effective_prior != vdate_norm
+                    chosen_summary["prior_fetch_attempts"] = fetch_attempts
                     log.update(
                         {
-                            "duration_sec": 0.0,
+                            "request_body": {"FundID": fid, "ValuationDate": effective_prior},
+                            "duration_sec": round(elapsed, 2),
                             "http_status": 200,
-                            "cache_hit": True,
-                            "data_source": "supabase",
-                            "status": "from_database",
-                            "response_valuation_date": db_summary.get("valuation_date"),
-                            "class_count": len(db_summary.get("classes") or []),
-                            "fund_aum": fund_aum_from_summary(db_summary),
+                            "cache_hit": False,
+                            "status": "available",
+                            "response_valuation_date": chosen_summary.get("valuation_date"),
+                            "sheet_valuation_date": normalize_diamond_sheet_date(
+                                chosen_summary.get("sheet_valuation_date")
+                                or chosen_summary.get("valuation_date")
+                            ),
+                            "request_valuation_date": effective_prior,
+                            "initial_prior_business_day": vdate_norm,
+                            "prior_holiday_fallback": effective_prior != vdate_norm,
+                            "prior_fetch_attempts": fetch_attempts,
+                            "class_count": len(chosen_summary.get("classes") or []),
+                            "fund_aum": fund_aum_from_summary(chosen_summary),
                         }
                     )
                     return {
                         "idx": idx,
                         "role": role,
-                        "summary": db_summary,
+                        "summary": chosen_summary,
                         "log": log,
                         "error": None,
                     }
-            if not force_diamond:
-                cached_raw = get_nav_sheet_raw_cached(fid, vdate)
-                if cached_raw is not None:
-                    summary = parse_nav_sheet_summary(cached_raw)
-                    if fund_aum_from_summary(summary) is not None:
-                        log.update(
-                            {
-                                "duration_sec": 0.0,
-                                "http_status": 200,
-                                "cache_hit": True,
-                                "data_source": "memory",
-                                "status": "from_cache",
-                                "response_valuation_date": summary.get("valuation_date"),
-                                "class_count": len(summary.get("classes") or []),
-                                "fund_aum": fund_aum_from_summary(summary),
-                            }
-                        )
-                        return {
-                            "idx": idx,
-                            "role": role,
-                            "summary": summary,
-                            "log": log,
-                            "error": None,
-                        }
-            try:
-                raw = fetch_nav_sheet(diamond_api_base, fid, vdate, auth_key=auth_key)
-                elapsed = time.time() - t0
-                summary = parse_nav_sheet_summary(raw)
-                if nav_sheet_summary_cacheable(summary):
-                    set_nav_sheet_raw_cached(fid, vdate, raw)
-                    upsert_snapshot(supabase, fid, vdate, summary)
                 log.update(
                     {
                         "duration_sec": round(elapsed, 2),
-                        "http_status": 200,
-                        "cache_hit": False,
-                        "status": "available" if summary.get("available") else "response_ok_no_class_nav",
+                        "initial_prior_business_day": vdate_norm,
+                        "prior_fetch_attempts": fetch_attempts,
+                    }
+                )
+                if isinstance(last_error, DiamondNavUnavailableError):
+                    log.update(
+                        {
+                            "http_status": 400,
+                            "status": "not_finalized",
+                            "error_message": last_error.user_message,
+                            "diamond_end_date": last_error.end_date,
+                        }
+                    )
+                    return {"idx": idx, "role": role, "summary": None, "log": log, "error": last_error}
+                if isinstance(last_error, Exception):
+                    log.update({"status": "error", "error_message": str(last_error)[:2000]})
+                    return {"idx": idx, "role": role, "summary": None, "log": log, "error": last_error}
+                log.update(
+                    {
+                        "status": "not_found",
+                        "error_message": (
+                            f"No usable prior GetNAVSheet before {val_norm} "
+                            f"(tried {len(fetch_attempts)} business days back from {vdate_norm})"
+                        ),
+                    }
+                )
+                return {"idx": idx, "role": role, "summary": None, "log": log, "error": None}
+
+            log["request_body"] = {"FundID": fid, "ValuationDate": vdate}
+            attempt = _fetch_summary_for_date(fid, vdate, vdate_norm)
+            summary = attempt.get("summary")
+            log.update(
+                {
+                    "duration_sec": attempt.get("duration_sec"),
+                    "http_status": attempt.get("http_status"),
+                    "cache_hit": attempt.get("cache_hit"),
+                    "data_source": attempt.get("data_source"),
+                    "status": attempt.get("status"),
+                    "request_valuation_date": vdate_norm,
+                }
+            )
+            if summary is not None:
+                log.update(
+                    {
                         "response_valuation_date": summary.get("valuation_date"),
                         "sheet_valuation_date": summary.get("sheet_valuation_date"),
-                        "request_valuation_date": vdate_norm,
                         "class_count": len(summary.get("classes") or []),
                         "fund_aum": fund_aum_from_summary(summary),
                         "capital_flow": summary.get("capital_flow"),
@@ -2472,28 +2610,17 @@ def sggg_diamond_nav_availability():
                     }
                 )
                 return {"idx": idx, "role": role, "summary": summary, "log": log, "error": None}
-            except DiamondNavUnavailableError as exc:
-                elapsed = time.time() - t0
+            err = attempt.get("error")
+            if isinstance(err, DiamondNavUnavailableError):
                 log.update(
                     {
-                        "duration_sec": round(elapsed, 2),
-                        "http_status": 400,
-                        "status": "not_finalized",
-                        "error_message": exc.user_message,
-                        "diamond_end_date": exc.end_date,
+                        "error_message": err.user_message,
+                        "diamond_end_date": err.end_date,
                     }
                 )
-                return {"idx": idx, "role": role, "summary": None, "log": log, "error": exc}
-            except Exception as exc:
-                elapsed = time.time() - t0
-                log.update(
-                    {
-                        "duration_sec": round(elapsed, 2),
-                        "status": "error",
-                        "error_message": str(exc)[:2000],
-                    }
-                )
-                return {"idx": idx, "role": role, "summary": None, "log": log, "error": exc}
+            elif isinstance(err, Exception):
+                log.update({"error_message": str(err)[:2000]})
+            return {"idx": idx, "role": role, "summary": None, "log": log, "error": err}
 
         def _timed_estimates(val_d):
             t0 = time.time()
@@ -2629,13 +2756,29 @@ def sggg_diamond_nav_availability():
             prior_norm = normalize_valuation_date(prior_date)
             opening_nav: Optional[float] = None
             if summary_open:
+                effective_prior = (
+                    summary_open.get("prior_effective_valuation_date") or prior_norm
+                )
+                entry["diamond_prior_valuation_date"] = effective_prior
+                if effective_prior != prior_norm:
+                    entry["prior_valuation_date"] = effective_prior
                 open_sheet_date = normalize_diamond_sheet_date(
                     summary_open.get("sheet_valuation_date")
                     or summary_open.get("valuation_date")
                 )
-                if open_sheet_date and open_sheet_date != prior_norm:
+                if summary_open.get("prior_holiday_fallback"):
                     warn = (
-                        f"Prior GetNAVSheet requested {prior_date} but sheet is dated "
+                        f"Prior business day {prior_date} had no Diamond NAV; "
+                        f"using sheet dated {effective_prior} for opening AUM."
+                    )
+                    entry["diamond_date_warning"] = (
+                        f"{entry['diamond_date_warning']}; {warn}"
+                        if entry.get("diamond_date_warning")
+                        else warn
+                    )
+                elif open_sheet_date and open_sheet_date != effective_prior:
+                    warn = (
+                        f"Prior GetNAVSheet requested {effective_prior} but sheet is dated "
                         f"{open_sheet_date}; prior-day flows may be wrong."
                     )
                     entry["diamond_date_warning"] = (
@@ -2644,7 +2787,7 @@ def sggg_diamond_nav_availability():
                         else warn
                     )
                 opening_nav, prior_eod, prior_flow, open_src = sggg_opening_aum_from_prior_summary(
-                    summary_open, prior_date
+                    summary_open, effective_prior
                 )
                 if opening_nav is not None:
                     entry["diamond_opening_aum"] = opening_nav
@@ -2823,7 +2966,7 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
-                    "nav_checker_build": "sggg-opening-no-dbl-v9",
+                    "nav_checker_build": "sggg-prior-holiday-v10",
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),
                     "compliance_sec": round(compliance_sec, 2),

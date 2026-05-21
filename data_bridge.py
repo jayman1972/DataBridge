@@ -55,7 +55,9 @@ from sggg.diamond_client import (
     DiamondNavUnavailableError,
     fetch_nav_sheet,
     get_diamond_client,
-    get_fleet_nav_unavailable_cached,
+    get_nav_sheet_raw_cached,
+    nav_sheet_summary_cacheable,
+    set_nav_sheet_raw_cached,
     should_skip_diamond_early_for_today,
 )
 from sggg.nav_sheet_parse import (
@@ -2242,12 +2244,6 @@ def sggg_diamond_nav_availability():
                     end_date=valuation_date,
                 )
                 diamond_skip_reason = "early_today"
-            else:
-                cached_unavail = get_fleet_nav_unavailable_cached(valuation_date)
-                if cached_unavail:
-                    diamond_short_circuit = cached_unavail
-                    diamond_skip_reason = "cached_unavailable"
-
         def _base_entry(spec: Dict[str, str], wp: Dict[str, Any], wp_prior: Dict[str, Any], psc_navs: Dict) -> Dict[str, Any]:
             fid = spec["id"]
             name = spec.get("name") or fid
@@ -2336,6 +2332,7 @@ def sggg_diamond_nav_availability():
         diamond_results: Dict[tuple, Dict[str, Any]] = {}
         diamond_errors: Dict[tuple, Any] = {}
         diamond_call_secs: List[float] = []
+        diamond_cache_hits = 0
         diamond_calls_detail: List[Dict[str, Any]] = []
         compliance_sec = 0.0
         compliance_prior_sec = 0.0
@@ -2369,14 +2366,31 @@ def sggg_diamond_nav_availability():
                 "request_headers_note": "Authorization: AuthKey <token>; AuthKey: <token>; Content-Type: application/json",
                 "request_body": {"FundID": fid, "ValuationDate": vdate},
             }
+            cached_raw = get_nav_sheet_raw_cached(fid, vdate)
+            if cached_raw is not None:
+                summary = parse_nav_sheet_summary(cached_raw)
+                log.update(
+                    {
+                        "duration_sec": 0.0,
+                        "http_status": 200,
+                        "cache_hit": True,
+                        "status": "from_cache",
+                        "response_valuation_date": summary.get("valuation_date"),
+                        "class_count": len(summary.get("classes") or []),
+                    }
+                )
+                return {"idx": idx, "role": role, "summary": summary, "log": log, "error": None}
             try:
                 raw = fetch_nav_sheet(diamond_api_base, fid, vdate, auth_key=auth_key)
                 elapsed = time.time() - t0
                 summary = parse_nav_sheet_summary(raw)
+                if nav_sheet_summary_cacheable(summary):
+                    set_nav_sheet_raw_cached(fid, vdate, raw)
                 log.update(
                     {
                         "duration_sec": round(elapsed, 2),
                         "http_status": 200,
+                        "cache_hit": False,
                         "status": "available" if summary.get("available") else "response_ok_no_class_nav",
                         "response_valuation_date": summary.get("valuation_date"),
                         "class_count": len(summary.get("classes") or []),
@@ -2448,8 +2462,11 @@ def sggg_diamond_nav_availability():
                     key = (tag[0], tag[3])
                     result = future.result()
                     diamond_calls_detail.append(result["log"])
-                    call_sec = float(result["log"].get("duration_sec") or 0)
-                    diamond_call_secs.append(call_sec)
+                    if result["log"].get("cache_hit"):
+                        diamond_cache_hits += 1
+                    else:
+                        call_sec = float(result["log"].get("duration_sec") or 0)
+                        diamond_call_secs.append(call_sec)
                     idx, role, summary, err = (
                         result["idx"],
                         result["role"],
@@ -2603,11 +2620,6 @@ def sggg_diamond_nav_availability():
                 "Skipped Diamond before 4:30pm Eastern for today's date. "
                 "Compliance estimates still load; check Force SGGG check after NAV release."
             )
-        elif diamond_skip_reason == "cached_unavailable":
-            bottleneck_hint = (
-                "Used cached 'NAV not available' for this date (recent slow Diamond response). "
-                "Use force check to refresh from SGGG."
-            )
         elif parallel_wall_sec > diamond_wall_sec + 2:
             if max(compliance_sec, compliance_prior_sec) >= diamond_wall_sec:
                 bottleneck_hint = (
@@ -2664,8 +2676,9 @@ def sggg_diamond_nav_availability():
             "valuation_date": valuation_date,
             "prior_business_day": prior_date,
             "execution_model": (
-                f"{len(diamond_call_secs)} GetNAVSheet POST(s) in parallel "
-                f"(max_workers={diamond_workers}); wall clock ≈ slowest call, not sum of calls."
+                f"{len(diamond_call_secs)} live GetNAVSheet POST(s), {diamond_cache_hits} cache hit(s) "
+                f"(max_workers={diamond_workers}); wall clock ≈ slowest live call. "
+                "Successful responses cached 30 minutes per FundID+ValuationDate (not-finalized never cached)."
             ),
             "calls": sorted_calls,
         }
@@ -2689,6 +2702,8 @@ def sggg_diamond_nav_availability():
                     "diamond_slowest_sec": round(diamond_wall_sec, 2),
                     "diamond_avg_sec": round(diamond_avg_sec, 2),
                     "diamond_requests": len(diamond_call_secs),
+                    "diamond_cache_hits": diamond_cache_hits,
+                    "diamond_requests_live": len(diamond_call_secs),
                     "diamond_requests_max": len(fund_specs)
                     * (2 if include_prior_diamond and not diamond_short_circuit else 1),
                     "diamond_skipped": diamond_skip_reason is not None,

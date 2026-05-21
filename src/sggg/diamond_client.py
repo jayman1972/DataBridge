@@ -22,32 +22,54 @@ except ImportError:
 BASE_URL = "https://api.sgggfsi.com/api/v1"
 AUTH_EXPIRY_BUFFER_SEC = 300  # Refresh AuthKey 5 min before expiry
 
-# Fleet-wide "NAV not finalized" cache (GetNAVSheet is slow even for HTTP 400).
-_NAV_FLEET_UNAVAIL_CACHE: Dict[str, Tuple[float, str, str]] = {}
+# Successful GetNAVSheet responses only (fund_id + ValuationDate). Not used for errors / not-finalized.
+_NAV_SHEET_SUCCESS_CACHE: Dict[str, Tuple[float, Any]] = {}
 
 
-def _nav_unavail_cache_ttl_sec() -> int:
-    return int(os.environ.get("SGGG_NAV_UNAVAIL_CACHE_SEC", "900"))
+def _nav_sheet_success_cache_ttl_sec() -> int:
+    return int(os.environ.get("SGGG_NAV_SHEET_CACHE_SEC", "1800"))
 
 
-def get_fleet_nav_unavailable_cached(valuation_date: str) -> Optional["DiamondNavUnavailableError"]:
-    key = normalize_valuation_date(valuation_date)
-    row = _NAV_FLEET_UNAVAIL_CACHE.get(key)
+def _nav_sheet_cache_key(fund_id: str, valuation_date: str) -> str:
+    return f"{fund_id}:{normalize_valuation_date(valuation_date)}"
+
+
+def _prune_nav_sheet_success_cache() -> None:
+    now = time.time()
+    for key, (expiry, _) in list(_NAV_SHEET_SUCCESS_CACHE.items()):
+        if now >= expiry:
+            _NAV_SHEET_SUCCESS_CACHE.pop(key, None)
+
+
+def get_nav_sheet_raw_cached(fund_id: str, valuation_date: str) -> Optional[Any]:
+    """Return cached GetNAVSheet JSON if still within TTL (default 30 minutes)."""
+    _prune_nav_sheet_success_cache()
+    key = _nav_sheet_cache_key(fund_id, valuation_date)
+    row = _NAV_SHEET_SUCCESS_CACHE.get(key)
     if not row:
         return None
-    expiry, end_date, message = row
-    if time.time() > expiry:
-        _NAV_FLEET_UNAVAIL_CACHE.pop(key, None)
+    expiry, raw = row
+    if time.time() >= expiry:
+        _NAV_SHEET_SUCCESS_CACHE.pop(key, None)
         return None
-    return DiamondNavUnavailableError(message, end_date=end_date)
+    return raw
 
 
-def set_fleet_nav_unavailable_cached(valuation_date: str, exc: "DiamondNavUnavailableError") -> None:
-    key = normalize_valuation_date(valuation_date)
-    _NAV_FLEET_UNAVAIL_CACHE[key] = (
-        time.time() + _nav_unavail_cache_ttl_sec(),
-        exc.end_date,
-        exc.user_message,
+def nav_sheet_summary_cacheable(summary: Dict[str, Any]) -> bool:
+    """True when the response has usable NAV sheet data worth caching."""
+    if summary.get("available"):
+        return True
+    nav = summary.get("net_asset_value_native")
+    if nav is None:
+        nav = summary.get("net_asset_value")
+    return nav is not None
+
+
+def set_nav_sheet_raw_cached(fund_id: str, valuation_date: str, raw: Any) -> None:
+    key = _nav_sheet_cache_key(fund_id, valuation_date)
+    _NAV_SHEET_SUCCESS_CACHE[key] = (
+        time.time() + _nav_sheet_success_cache_ttl_sec(),
+        raw,
     )
 
 
@@ -266,12 +288,10 @@ def fetch_nav_sheet(
     except RuntimeError as exc:
         parsed = parse_diamond_nav_unavailable(exc, valuation_date)
         if parsed:
-            nav_exc = DiamondNavUnavailableError(
+            raise DiamondNavUnavailableError(
                 parsed["message"],
                 end_date=parsed["end_date"],
-            )
-            set_fleet_nav_unavailable_cached(valuation_date, nav_exc)
-            raise nav_exc from exc
+            ) from exc
         raise
 
 

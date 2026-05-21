@@ -424,18 +424,56 @@ def pick_fund_net_asset_value(
     return None, base
 
 
+def capital_flow_net_from_summary(summary: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
+    """Net subs/reds on a single GetNAVSheet summary (one valuation date)."""
+    if not summary:
+        return None, None
+    flow = summary.get("capital_flow")
+    if flow is not None:
+        return float(flow), summary.get("capital_flow_label")
+    cands = summary.get("capital_flow_candidates") or []
+    return _capital_flow_from_candidates(cands)
+
+
+def sggg_opening_aum_from_prior_summary(
+    summary_prior: Dict[str, Any],
+    prior_date: str,
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[str]]:
+    """
+    Economic opening AUM for report day = prior sheet EOD + prior-day net flows.
+    prior_raw_eod: fund AUM on prior valuation date sheet; prior_flow: net subs/reds that day.
+    """
+    if not summary_prior:
+        return None, None, None, None
+    prior_eod = summary_prior.get("fund_aum_closing")
+    if prior_eod is None:
+        prior_eod = summary_prior.get("net_asset_value_native")
+    if prior_eod is None:
+        return None, None, None, None
+    prior_flow, _ = capital_flow_net_from_summary(summary_prior)
+    flow = float(prior_flow) if prior_flow is not None else 0.0
+    opening = float(prior_eod) + flow
+    return opening, float(prior_eod), flow, f"GetNAVSheet {prior_date} EOD + prior-day Diamond subs/reds"
+
+
 def _capital_flow_from_candidates(
     candidates: List[Dict[str, Any]],
 ) -> Tuple[Optional[float], Optional[str]]:
     """Net flow from parsed candidate rows (class lines summed across all series)."""
     class_rows = [r for r in candidates if r.get("scope") == "class"]
     if class_rows:
-        total = sum(float(r["amount"]) for r in class_rows)
+        seen: set = set()
+        total = 0.0
         labels: List[str] = []
         for row in class_rows:
+            key = (row.get("class_code"), row.get("name"))
+            if key in seen:
+                continue
+            seen.add(key)
             amt = float(row["amount"])
             if amt == 0:
                 continue
+            total += amt
             code = row.get("class_code") or "?"
             labels.append(f"{code}:{row.get('name')}")
         if not labels:
@@ -581,7 +619,7 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         "capital_flow": capital_flow,
         "capital_flow_label": capital_flow_label,
         "capital_flow_candidates": list_capital_flow_candidates(body),
-        "aum_parse_version": 6,
+        "aum_parse_version": 7,
         "aum_from_class_sum": class_sum is not None and nav_native == class_sum,
         "diamond_aum_components": {
             "root_net_asset_value": root_nav,

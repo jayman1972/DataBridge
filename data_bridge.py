@@ -63,12 +63,14 @@ from sggg.diamond_client import (
 )
 from sggg.nav_sheet_parse import (
     FUND_NATIVE_CURRENCY,
+    capital_flow_net_from_summary,
     fetch_psc_portfolio_navs,
     normalize_diamond_sheet_date,
     normalize_valuation_date,
     parse_nav_sheet_summary,
     prior_business_day_iso,
     pick_class_i_bps,
+    sggg_opening_aum_from_prior_summary,
 )
 from sggg.compliance_check_estimates import compliance_aum_change_ex_flows, estimates_by_fund_id
 from sggg.diamond_nav_store import load_snapshots_bulk, snapshot_usable, upsert_snapshot
@@ -2295,6 +2297,8 @@ def sggg_diamond_nav_availability():
                 "diamond_open_aum_components": None,
                 "diamond_close_aum_components": None,
                 "diamond_capital_flow_candidates": None,
+                "diamond_prior_eod_aum": None,
+                "diamond_prior_day_flow_adjustment": None,
                 "aum_parse_version": None,
                 "diamond_opening_aum_source": None,
                 "sggg_nav_change_note": None,
@@ -2393,6 +2397,7 @@ def sggg_diamond_nav_availability():
                 "url": f"{diamond_api_base}/GetNAVSheet/",
                 "request_headers_note": "Authorization: AuthKey <token>; AuthKey: <token>; Content-Type: application/json",
                 "request_body": {"FundID": fid, "ValuationDate": vdate},
+                "force_diamond": force_diamond,
             }
             vdate_norm = normalize_valuation_date(vdate)
             if not force_diamond:
@@ -2628,42 +2633,26 @@ def sggg_diamond_nav_availability():
                     summary_open.get("sheet_valuation_date")
                     or summary_open.get("valuation_date")
                 )
-                if open_sheet_date == prior_norm:
-                    opening_nav = summary_open.get("fund_aum_closing")
-                    if opening_nav is None:
-                        opening_nav = summary_open.get("net_asset_value_native")
-                    if opening_nav is not None:
-                        entry["diamond_opening_aum_source"] = (
-                            f"prior EOD GetNAVSheet ({prior_date})"
-                        )
-                elif open_sheet_date and open_sheet_date != prior_norm:
+                if open_sheet_date and open_sheet_date != prior_norm:
                     warn = (
                         f"Prior GetNAVSheet requested {prior_date} but sheet is dated "
-                        f"{open_sheet_date}; using report-day opening AUM instead."
+                        f"{open_sheet_date}; prior-day flows may be wrong."
                     )
                     entry["diamond_date_warning"] = (
                         f"{entry['diamond_date_warning']}; {warn}"
                         if entry.get("diamond_date_warning")
                         else warn
                     )
+                opening_nav, prior_eod, prior_flow, open_src = sggg_opening_aum_from_prior_summary(
+                    summary_open, prior_date
+                )
+                if opening_nav is not None:
+                    entry["diamond_opening_aum"] = opening_nav
+                    entry["diamond_prior_eod_aum"] = prior_eod
+                    entry["diamond_prior_day_flow_adjustment"] = prior_flow
+                    entry["diamond_opening_aum_source"] = open_src
                 if summary_open.get("native_currency") and not summary_close:
                     entry["diamond_aum_currency"] = summary_open["native_currency"]
-            if opening_nav is None and summary_close:
-                opening_nav = summary_close.get("fund_aum_opening")
-                if opening_nav is not None:
-                    entry["diamond_opening_aum_source"] = (
-                        f"opening on report sheet ({valuation_date})"
-                    )
-            if opening_nav is None and summary_open:
-                opening_nav = summary_open.get("fund_aum_closing")
-                if opening_nav is None:
-                    opening_nav = summary_open.get("net_asset_value_native")
-                if opening_nav is not None and not entry.get("diamond_opening_aum_source"):
-                    entry["diamond_opening_aum_source"] = (
-                        f"prior GetNAVSheet (sheet date may not match {prior_date})"
-                    )
-            if opening_nav is not None:
-                entry["diamond_opening_aum"] = float(opening_nav)
 
             if summary_open and summary_open.get("diamond_aum_components"):
                 entry["diamond_open_aum_components"] = summary_open["diamond_aum_components"]
@@ -2673,22 +2662,16 @@ def sggg_diamond_nav_availability():
             if summary_close:
                 entry["aum_parse_version"] = summary_close.get("aum_parse_version")
 
-            # SGGG: adjust only with subs/reds from the Diamond NAV sheet (not compliance AF).
+            # SGGG: report-day subs/reds only (prior-day flows are in diamond_opening_aum).
             diamond_capital_flow: Optional[float] = None
-            if summary_close and summary_close.get("capital_flow") is not None:
-                diamond_capital_flow = float(summary_close["capital_flow"])
-                entry["capital_flow_adjustment_label"] = summary_close.get("capital_flow_label")
-            elif summary_close:
-                cands = summary_close.get("capital_flow_candidates") or []
-                class_net = sum(
-                    float(c["amount"])
-                    for c in cands
-                    if c.get("scope") == "class" and c.get("amount") is not None
+            report_flow_label: Optional[str] = None
+            if summary_close:
+                diamond_capital_flow, report_flow_label = capital_flow_net_from_summary(
+                    summary_close
                 )
-                if class_net != 0:
-                    diamond_capital_flow = class_net
+                if report_flow_label:
                     entry["capital_flow_adjustment_label"] = (
-                        "summed from capital_flow_candidates (class)"
+                        f"report day {valuation_date}: {report_flow_label}"
                     )
 
             if entry["diamond_opening_aum"] is not None and entry["diamond_closing_aum"] is not None:
@@ -2834,7 +2817,7 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
-                    "nav_checker_build": "sggg-class-flow-sum-v6",
+                    "nav_checker_build": "sggg-prior-flow-v7",
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),
                     "compliance_sec": round(compliance_sec, 2),

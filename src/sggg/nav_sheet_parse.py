@@ -213,6 +213,14 @@ def normalize_diamond_sheet_date(raw: Any) -> Optional[str]:
     return None
 
 
+def fund_aum_from_summary(summary: Dict[str, Any]) -> Optional[float]:
+    """Fund-level AUM from a parsed GetNAVSheet summary (for cache / SGGG day change)."""
+    nav = summary.get("net_asset_value_native")
+    if nav is not None:
+        return float(nav)
+    return _parse_money_value(summary.get("net_asset_value"))
+
+
 def pick_fund_net_asset_value(
     body: Dict[str, Any],
     fund_id: str,
@@ -222,16 +230,20 @@ def pick_fund_net_asset_value(
     fund_ccy = _normalize_currency_code(body.get("FundCurrency"), default=base)
     items = _section_items_by_name(body)
 
-    cad_keys = (
+    for key in (
         "Net Asset Value (CAD)",
         "Net Asset Value CAD",
         "Total Net Assets (CAD)",
         "Net Assets (CAD)",
-    )
-    for key in cad_keys:
+        "Net Asset Value",
+        "Total Net Assets",
+        "Fund Net Asset Value",
+        "Net Assets",
+    ):
         v = _parse_money_value(items.get(key))
         if v is not None:
-            return v, "CAD"
+            ccy = "CAD" if "CAD" in key.upper() else fund_ccy if fund_ccy in ("CAD", "USD") else base
+            return v, ccy
 
     nav = _parse_money_value(body.get("NetAssetValue"))
     if nav is not None:
@@ -287,6 +299,9 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
     if not isinstance(body, dict):
         return {"available": False, "classes": [], "error": "Missing GetNAVSheetResponse"}
 
+    fund_id_early = (body.get("FundParentID") or "").strip()
+    nav_native_early, nav_ccy_early = pick_fund_net_asset_value(body, fund_id_early)
+
     raw_classes = body.get("ClassSeriesFundList")
     if not isinstance(raw_classes, list) or len(raw_classes) == 0:
         return {
@@ -294,7 +309,11 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
             "fund_parent_id": body.get("FundParentID"),
             "fund_currency": body.get("FundCurrency"),
             "valuation_date": body.get("ValuationDate"),
-            "net_asset_value": body.get("NetAssetValue"),
+            "net_asset_value": nav_native_early
+            if nav_native_early is not None
+            else _parse_money_value(body.get("NetAssetValue")),
+            "net_asset_value_native": nav_native_early,
+            "native_currency": nav_ccy_early,
             "classes": [],
         }
 

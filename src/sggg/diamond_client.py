@@ -10,7 +10,11 @@ import time
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from sggg.nav_sheet_parse import normalize_valuation_date, parse_diamond_nav_unavailable
+from sggg.nav_sheet_parse import (
+    fund_aum_from_summary,
+    normalize_valuation_date,
+    parse_diamond_nav_unavailable,
+)
 
 try:
     import requests
@@ -56,13 +60,8 @@ def get_nav_sheet_raw_cached(fund_id: str, valuation_date: str) -> Optional[Any]
 
 
 def nav_sheet_summary_cacheable(summary: Dict[str, Any]) -> bool:
-    """True when the response has usable NAV sheet data worth caching."""
-    if summary.get("available"):
-        return True
-    nav = summary.get("net_asset_value_native")
-    if nav is None:
-        nav = summary.get("net_asset_value")
-    return nav is not None
+    """Cache only when fund-level AUM is present (class NAVs alone break SGGG day change)."""
+    return fund_aum_from_summary(summary) is not None
 
 
 def set_nav_sheet_raw_cached(fund_id: str, valuation_date: str, raw: Any) -> None:

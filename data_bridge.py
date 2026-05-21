@@ -55,6 +55,7 @@ from sggg.diamond_client import (
     DiamondNavUnavailableError,
     fetch_nav_sheet,
     get_diamond_client,
+    fund_aum_from_summary,
     get_nav_sheet_raw_cached,
     nav_sheet_summary_cacheable,
     set_nav_sheet_raw_cached,
@@ -2378,17 +2379,21 @@ def sggg_diamond_nav_availability():
             cached_raw = get_nav_sheet_raw_cached(fid, vdate)
             if cached_raw is not None:
                 summary = parse_nav_sheet_summary(cached_raw)
-                log.update(
-                    {
-                        "duration_sec": 0.0,
-                        "http_status": 200,
-                        "cache_hit": True,
-                        "status": "from_cache",
-                        "response_valuation_date": summary.get("valuation_date"),
-                        "class_count": len(summary.get("classes") or []),
-                    }
-                )
-                return {"idx": idx, "role": role, "summary": summary, "log": log, "error": None}
+                if fund_aum_from_summary(summary) is None:
+                    cached_raw = None
+                else:
+                    log.update(
+                        {
+                            "duration_sec": 0.0,
+                            "http_status": 200,
+                            "cache_hit": True,
+                            "status": "from_cache",
+                            "response_valuation_date": summary.get("valuation_date"),
+                            "class_count": len(summary.get("classes") or []),
+                            "fund_aum": fund_aum_from_summary(summary),
+                        }
+                    )
+                    return {"idx": idx, "role": role, "summary": summary, "log": log, "error": None}
             try:
                 raw = fetch_nav_sheet(diamond_api_base, fid, vdate, auth_key=auth_key)
                 elapsed = time.time() - t0
@@ -2496,8 +2501,9 @@ def sggg_diamond_nav_availability():
             prior_tasks: List[tuple] = []
             if include_prior_diamond and not diamond_short_circuit:
                 for idx, spec in enumerate(fund_specs):
-                    summary_close = diamond_results.get((idx, "close"))
-                    if summary_close and summary_close.get("available"):
+                    if (idx, "close") in diamond_errors:
+                        continue
+                    if diamond_results.get((idx, "close")) is not None:
                         prior_tasks.append((idx, spec["id"], prior_date, "open"))
 
             if prior_tasks:
@@ -2585,6 +2591,10 @@ def sggg_diamond_nav_availability():
                 if entry["diamond_opening_aum"] is None:
                     if isinstance(open_err, DiamondNavUnavailableError):
                         missing.append(open_err.user_message)
+                    elif summary_open and fund_aum_from_summary(summary_open) is None:
+                        missing.append(
+                            f"prior day ({prior_date}): Diamond sheet returned no fund-level AUM"
+                        )
                     else:
                         missing.append(f"prior day ({prior_date})")
                 if entry["diamond_closing_aum"] is None:

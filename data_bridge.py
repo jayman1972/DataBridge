@@ -2446,54 +2446,57 @@ def sggg_diamond_nav_availability():
             for idx in range(len(fund_specs)):
                 diamond_errors[(idx, "close")] = diamond_short_circuit
 
+        def _apply_diamond_result(result: Dict[str, Any]) -> None:
+            nonlocal diamond_cache_hits
+            key = (result["idx"], result["role"])
+            diamond_calls_detail.append(result["log"])
+            if result["log"].get("cache_hit"):
+                diamond_cache_hits += 1
+            else:
+                diamond_call_secs.append(float(result["log"].get("duration_sec") or 0))
+            if result["error"]:
+                diamond_errors[key] = result["error"]
+            elif result["summary"] is not None:
+                diamond_results[key] = result["summary"]
+
         t_parallel = time.time()
         with ThreadPoolExecutor(max_workers=pool_workers) as executor:
-            future_kind: Dict[Any, tuple] = {}
-            for task in diamond_close_tasks:
-                future_kind[executor.submit(_fetch_nav_task, task)] = ("diamond", task)
-            future_kind[executor.submit(_timed_estimates, val_d)] = ("wp", None)
-            future_kind[executor.submit(_timed_estimates, prior_d)] = ("wp_prior", None)
+            prep_futures: Dict[Any, str] = {
+                executor.submit(_timed_estimates, val_d): "wp",
+                executor.submit(_timed_estimates, prior_d): "wp_prior",
+            }
             if use_psc:
-                future_kind[executor.submit(_timed_psc)] = ("psc", None)
+                prep_futures[executor.submit(_timed_psc)] = "psc"
+            close_futures = {
+                executor.submit(_fetch_nav_task, task): task for task in diamond_close_tasks
+            }
 
-            for future in as_completed(future_kind):
-                kind, tag = future_kind[future]
-                if kind == "diamond":
-                    key = (tag[0], tag[3])
-                    result = future.result()
-                    diamond_calls_detail.append(result["log"])
-                    if result["log"].get("cache_hit"):
-                        diamond_cache_hits += 1
-                    else:
-                        call_sec = float(result["log"].get("duration_sec") or 0)
-                        diamond_call_secs.append(call_sec)
-                    idx, role, summary, err = (
-                        result["idx"],
-                        result["role"],
-                        result["summary"],
-                        result["error"],
-                    )
-                    if err:
-                        diamond_errors[key] = err
-                    elif summary is not None:
-                        diamond_results[(idx, role)] = summary
-                        if (
-                            role == "close"
-                            and tag[2] == valuation_date
-                            and include_prior_diamond
-                            and summary.get("available")
-                        ):
-                            prior_task = (idx, tag[1], prior_date, "open")
-                            future_kind[executor.submit(_fetch_nav_task, prior_task)] = (
-                                "diamond",
-                                prior_task,
-                            )
-                elif kind == "wp":
+            for future in as_completed({**prep_futures, **close_futures}):
+                if future in close_futures:
+                    _apply_diamond_result(future.result())
+                    continue
+                kind = prep_futures[future]
+                if kind == "wp":
                     wp, compliance_sec = future.result()
                 elif kind == "wp_prior":
                     wp_prior, compliance_prior_sec = future.result()
                 elif kind == "psc":
                     psc_navs, psc_sec = future.result()
+
+            # Prior-day sheets: second phase (dynamic submit inside as_completed never ran these).
+            prior_tasks: List[tuple] = []
+            if include_prior_diamond and not diamond_short_circuit:
+                for idx, spec in enumerate(fund_specs):
+                    summary_close = diamond_results.get((idx, "close"))
+                    if summary_close and summary_close.get("available"):
+                        prior_tasks.append((idx, spec["id"], prior_date, "open"))
+
+            if prior_tasks:
+                prior_futures = {
+                    executor.submit(_fetch_nav_task, task): task for task in prior_tasks
+                }
+                for future in as_completed(prior_futures):
+                    _apply_diamond_result(future.result())
         parallel_wall_sec = time.time() - t_parallel
         diamond_wall_sec = max(diamond_call_secs) if diamond_call_secs else 0.0
         diamond_avg_sec = (

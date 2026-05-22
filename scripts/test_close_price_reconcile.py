@@ -8,6 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sggg.close_price_reconcile import (
     _compute_dollar_difference,
     aggregate_psc_by_security,
+    align_diamond_bond_close,
+    format_equity_display_ticker,
     is_cash_position,
     merge_positions_by_secondary_ids,
     normalize_bbg_key,
@@ -34,7 +36,26 @@ def test_bond_compact_match_key() -> None:
 
 def test_bond_diamond_price_scaled() -> None:
     assert normalize_diamond_close_price(0.99982, security_name="AAL 5 3/4 04/20/29") == 99.982
+    assert normalize_diamond_close_price(0.97381, security_name="LEG") == 97.381
     assert normalize_diamond_close_price(78.5, security_name="AAPL US Equity") == 78.5
+
+
+def test_align_diamond_bond_close_when_matched_to_par() -> None:
+    assert align_diamond_bond_close(0.97381, 97.381, is_bond_like=False) == 97.381
+
+
+def test_cadusd_cash_excluded() -> None:
+    assert is_cash_position(company_symbol="CADUSD")
+    assert reconcile_match_key(company_symbol="CADUSD") is None
+
+
+def test_equity_ticker_us_cn_suffix() -> None:
+    assert format_equity_display_ticker(company_symbol="AMAT.US") == "AMAT US"
+    assert format_equity_display_ticker(company_symbol="SHOP", currency="CAD") == "SHOP CN"
+    assert (
+        portfolio_line_ticker(company_symbol="HYG.US", bbg_ticker="HYG US Equity")
+        == "HYG US"
+    )
 
 
 def test_match_key_equity_line_ticker() -> None:
@@ -175,7 +196,7 @@ def test_aggregate_psc_net_shares() -> None:
     agg = aggregate_psc_by_security(rows)
     assert len(agg) == 1
     row = next(iter(agg.values()))
-    assert row["ticker"] == "HYG.US"
+    assert row["ticker"] == "HYG US"
     assert row["shares"] == 45000.0
 
 
@@ -183,6 +204,9 @@ if __name__ == "__main__":
     test_bbg_key_normalization()
     test_bond_compact_match_key()
     test_bond_diamond_price_scaled()
+    test_align_diamond_bond_close_when_matched_to_par()
+    test_cadusd_cash_excluded()
+    test_equity_ticker_us_cn_suffix()
     test_match_key_equity_line_ticker()
     test_portfolio_line_ticker_bond_uses_company_symbol()
     test_option_contract_key_cross_format()

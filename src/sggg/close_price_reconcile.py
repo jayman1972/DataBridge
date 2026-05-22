@@ -115,10 +115,131 @@ def is_cash_position(
         u = _norm(raw).upper()
         if not u:
             continue
-        if u in ("CASH", "CASH USD", "CASH CAD") or u.startswith("CASH "):
+        if u in ("CASH", "CASH USD", "CASH CAD", "CADUSD", "USDUSD", "USDCAD") or u.startswith(
+            "CASH "
+        ):
             return True
     st = _norm(security_type).upper()
     return st == "CASH" or st.startswith("CASH ")
+
+
+def _is_equity_security_type(security_type: Any) -> bool:
+    u = _norm(security_type).upper().replace(" ", "")
+    if not u:
+        return False
+    return any(tok in u for tok in ("STOCK", "EQUITY", "ETF", "COMMONSTOCK"))
+
+
+def is_bond_like_position(
+    *,
+    security_type: Any = None,
+    company_symbol: Any = None,
+    description: Any = None,
+    security_name: Any = None,
+    match_key: Any = None,
+) -> bool:
+    mk = _norm(match_key)
+    if mk.startswith("bond:"):
+        return True
+    if _is_bond_security_type(security_type):
+        return True
+    for text in (company_symbol, description, security_name):
+        if _looks_like_bond_description(text):
+            return True
+    return False
+
+
+def is_fund_unit_position(
+    *,
+    security_type: Any = None,
+    company_symbol: Any = None,
+    description: Any = None,
+    security_name: Any = None,
+) -> bool:
+    """Holdings of another fund share class (e.g. EHF550I vs long fund name in Diamond)."""
+    st = _norm(security_type).upper()
+    if st and any(tok in st for tok in ("MUTUAL", "FUND", "UNIT TRUST", "LP UNITS")):
+        if "BOND" not in st:
+            return True
+    sym = _norm(company_symbol).upper()
+    if sym and re.match(r"^EHF\d+[A-Z]+$", sym):
+        return True
+    for text in (description, security_name):
+        u = _norm(text).upper()
+        if u and "ALTERNATIVE FUND" in u:
+            return True
+    return False
+
+
+def _market_suffix_from_locale(
+    *,
+    country: Any = None,
+    currency: Any = None,
+    exchange: Any = None,
+) -> Optional[str]:
+    cc = _norm(currency).upper()
+    ex = _norm(exchange).upper()
+    c = _norm(country).upper()
+    if cc == "USD" or ex in ("US", "USA", "NYSE", "NASDAQ", "AMEX") or "UNITED STATES" in c:
+        return "US"
+    if cc == "CAD" or ex in ("CN", "CA", "TSX", "TSXV", "TSE") or "CANADA" in c:
+        return "CN"
+    return None
+
+
+def format_equity_display_ticker(
+    *,
+    company_symbol: Any = None,
+    bbg_ticker: Any = None,
+    country: Any = None,
+    currency: Any = None,
+    exchange: Any = None,
+) -> str:
+    """
+    Display tickers like AMAT US / SHOP CN (PortfoliosTable normalizes AMAT.US -> AMAT US).
+    """
+    bbg = normalize_bbg_key(bbg_ticker)
+    if bbg:
+        parts = bbg.split()
+        if len(parts) >= 2 and parts[1] in ("US", "CN", "CA"):
+            return f"{parts[0]} {parts[1]}"
+    cs = _norm(company_symbol)
+    if cs:
+        dot = re.match(r"^([A-Z0-9]+)\.([A-Z]{2,3})$", cs, re.IGNORECASE)
+        if dot:
+            sym, mkt = dot.group(1).upper(), dot.group(2).upper()
+            if mkt == "US":
+                return f"{sym} US"
+            if mkt in ("CN", "CA"):
+                return f"{sym} CN"
+        if re.search(r"\s(US|CN)\s*$", cs, re.IGNORECASE):
+            return cs.upper()
+    root = (cs or (bbg.split()[0] if bbg else "")).upper()
+    if not root:
+        return bbg or cs or ""
+    suffix = _market_suffix_from_locale(country=country, currency=currency, exchange=exchange)
+    if suffix and not re.search(rf"\b{suffix}\s*$", root):
+        return f"{root} {suffix}"
+    return root
+
+
+def align_diamond_bond_close(
+    diamond_close: Optional[float],
+    alphadesk_close: Optional[float],
+    *,
+    is_bond_like: bool = False,
+) -> Optional[float]:
+    """Scale Diamond fractional par quotes when AlphaDesk is already in par points."""
+    if diamond_close is None:
+        return None
+    if alphadesk_close is None:
+        if is_bond_like and 0 < diamond_close < 20:
+            return round(diamond_close * 100.0, 6)
+        return diamond_close
+    if is_bond_like or (0 < diamond_close < 20 and alphadesk_close > 50):
+        if 0 < diamond_close < 20:
+            return round(diamond_close * 100.0, 6)
+    return diamond_close
 
 
 def notional_quantity_multiplier(security_type: Any, description: Any = None) -> float:
@@ -133,6 +254,8 @@ def normalize_diamond_close_price(
     *,
     security_name: Any = None,
     security_type: Any = None,
+    description: Any = None,
+    is_bond_like: bool = False,
 ) -> Optional[float]:
     """
     Diamond reports bond prices as fraction of par (0.99982); AlphaDesk uses 99.982.
@@ -143,8 +266,19 @@ def normalize_diamond_close_price(
         p = float(price)
     except (TypeError, ValueError):
         return None
-    name = _norm(security_name)
-    if (_is_bond_security_type(security_type) or _looks_like_bond_description(name)) and 0 < p < 20:
+    bond_like = is_bond_like or is_bond_like_position(
+        security_type=security_type,
+        company_symbol=security_name,
+        description=description,
+        security_name=security_name,
+    )
+    if bond_like and 0 < p < 20:
+        return round(p * 100.0, 6)
+    if (
+        0 < p < 5
+        and not _is_equity_security_type(security_type)
+        and not _is_option_security_type(security_type)
+    ):
         return round(p * 100.0, 6)
     return round(p, 6)
 
@@ -225,27 +359,68 @@ def portfolio_line_ticker(
     security_name: Any = None,
     security_type: Any = None,
     description: Any = None,
+    country: Any = None,
+    currency: Any = None,
+    exchange: Any = None,
 ) -> str:
-    """Same ticker column logic as dashboard portfolio (refresh-portfolio)."""
+    """Dashboard-style ticker: full bond line, option contract, or equity with US/CN suffix."""
     cs = _norm(company_symbol)
     bbg = _norm(bbg_ticker)
     sn = _norm(security_name)
+    desc = _norm(description)
 
-    for candidate in (cs, bbg, sn):
-        opt = parse_option_contract_key(candidate)
-        if opt:
+    for candidate in (cs, bbg, sn, desc):
+        if parse_option_contract_key(candidate):
             return candidate
-    if _looks_like_bond_description(cs):
-        return cs
-    if _looks_like_bond_description(sn):
-        return sn
-    if _looks_like_bond_description(bbg):
-        return bbg
 
-    line = (cs or normalize_bbg_key(bbg) or normalize_bbg_key(sn)).upper()
-    if line:
-        return line
-    return _norm(description) or bbg or sn or cs or ""
+    bond_lines = [
+        t
+        for t in (desc, cs, sn, bbg)
+        if t and _looks_like_bond_description(t)
+    ]
+    if bond_lines:
+        return max(bond_lines, key=len)
+
+    if is_fund_unit_position(
+        security_type=security_type,
+        company_symbol=cs,
+        description=desc or sn,
+        security_name=sn,
+    ):
+        return desc or sn or cs or bbg or ""
+
+    equity = format_equity_display_ticker(
+        company_symbol=cs,
+        bbg_ticker=bbg or sn,
+        country=country,
+        currency=currency,
+        exchange=exchange,
+    )
+    if equity:
+        return equity
+    return desc or bbg or sn or cs or ""
+
+
+def pick_display_ticker(
+    psc: Optional[Dict[str, Any]],
+    dia: Optional[Dict[str, Any]],
+) -> str:
+    """Prefer descriptive bond line; else best ticker from either side."""
+    candidates: List[str] = []
+    for bucket in (psc, dia):
+        if not bucket:
+            continue
+        for field in ("ticker", "description", "company_symbol", "security_name"):
+            val = _norm(bucket.get(field))
+            if val:
+                candidates.append(val)
+    bond_lines = [c for c in candidates if _looks_like_bond_description(c)]
+    if bond_lines:
+        return max(bond_lines, key=len)
+    for bucket in (psc, dia):
+        if bucket and bucket.get("ticker"):
+            return _norm(bucket["ticker"])
+    return candidates[0] if candidates else ""
 
 
 def _signed_qty(quantity: Any, long_short: Any) -> float:
@@ -269,6 +444,9 @@ def _parse_psc_reconcile_row(row: tuple) -> Dict[str, Any]:
         "long_short": _norm(row[7]),
         "quantity": float(row[8]) if row[8] is not None else 0.0,
         "close_price": float(row[9]) if row[9] is not None else None,
+        "currency": _norm(row[10]),
+        "country": _norm(row[11]),
+        "exchange": _norm(row[12]),
     }
 
 
@@ -279,7 +457,8 @@ def fetch_psc_positions_for_reconcile(
 ) -> List[Dict[str, Any]]:
     sql = (
         "SELECT ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.BBG_TICKER, ph.ISIN, ph.CUSIP, sd.SEDOL, "
-        "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE "
+        "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, "
+        "ph.SEC_CCY, ph.COUNTRY, ph.EXCHANGE "
         "FROM psc_position_history ph "
         "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
         "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? "
@@ -393,6 +572,82 @@ def merge_positions_by_secondary_ids(
     return psc_by_key, dia_by_key, merges
 
 
+def _position_notional(bucket: Dict[str, Any]) -> float:
+    return abs(
+        float(bucket.get("shares") or 0)
+        * float(bucket.get("close_price") or 0)
+        * float(bucket.get("qty_multiplier") or 1.0)
+    )
+
+
+def merge_fund_unit_holdings_by_navpu(
+    psc_by_key: Dict[str, Dict[str, Any]],
+    dia_by_key: Dict[str, Dict[str, Any]],
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], int]:
+    """
+    Pair fund-in-fund lines when share-class NAVPU and notional are close
+    (e.g. EHF550I vs EHP Tactical Growth Alternative Fund Class I).
+    """
+    psc_only = [k for k in psc_by_key if k not in dia_by_key]
+    dia_only = [k for k in dia_by_key if k not in psc_by_key]
+    used_dia: set = set()
+    merges = 0
+
+    for pk in list(psc_only):
+        psc = psc_by_key.get(pk)
+        if not psc:
+            continue
+        if not is_fund_unit_position(
+            security_type=psc.get("security_type"),
+            company_symbol=psc.get("company_symbol"),
+            description=psc.get("description"),
+        ):
+            continue
+        pc = psc.get("close_price")
+        if pc is None or float(pc) <= 0:
+            continue
+        pc_f = float(pc)
+        best_dk: Optional[str] = None
+        best_rel = 999.0
+        for dk in dia_only:
+            if dk in used_dia:
+                continue
+            dia = dia_by_key.get(dk)
+            if not dia:
+                continue
+            if not is_fund_unit_position(
+                security_type=dia.get("security_type"),
+                company_symbol=dia.get("company_symbol"),
+                description=dia.get("description") or dia.get("security_name"),
+                security_name=dia.get("security_name"),
+            ):
+                continue
+            dc = dia.get("close_price")
+            if dc is None:
+                continue
+            dc_f = float(dc)
+            rel = abs(pc_f - dc_f) / max(pc_f, dc_f)
+            if rel > 0.025:
+                continue
+            pn = _position_notional(psc)
+            dn = _position_notional(dia)
+            if pn > 1000 and dn > 1000:
+                nv_rel = abs(pn - dn) / max(pn, dn)
+                if nv_rel > 0.08:
+                    continue
+            if rel < best_rel:
+                best_rel = rel
+                best_dk = dk
+        if best_dk:
+            ck = _canonical_reconcile_key(pk, best_dk)
+            _rename_bucket(psc_by_key, pk, ck)
+            _rename_bucket(dia_by_key, best_dk, ck)
+            used_dia.add(best_dk)
+            merges += 1
+
+    return psc_by_key, dia_by_key, merges
+
+
 def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Roll PSC legs up to one row per reconcile_match_key (net shares, one close)."""
     out: Dict[str, Dict[str, Any]] = {}
@@ -423,7 +678,12 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                     description=row.get("description"),
                     bbg_ticker=row.get("bbg_ticker"),
                     security_type=row.get("security_type"),
+                    country=row.get("country"),
+                    currency=row.get("currency"),
+                    exchange=row.get("exchange"),
                 ),
+                "company_symbol": row.get("company_symbol"),
+                "description": row.get("description"),
                 "shares": 0.0,
                 "close_price": row.get("close_price"),
                 "qty_multiplier": mult,
@@ -431,17 +691,30 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                 "isin": row.get("isin"),
                 "cusip": row.get("cusip"),
                 "sedol": row.get("sedol"),
+                "is_bond_like": is_bond_like_position(
+                    security_type=row.get("security_type"),
+                    company_symbol=row.get("company_symbol"),
+                    description=row.get("description"),
+                    match_key=key,
+                ),
             }
             out[key] = bucket
         bucket["shares"] = float(bucket["shares"]) + signed
         if row.get("close_price") is not None:
             bucket["close_price"] = row.get("close_price")
-        if not bucket.get("ticker"):
+        bond_desc = row.get("description")
+        if bond_desc and _looks_like_bond_description(bond_desc):
+            bucket["description"] = bond_desc
+            bucket["ticker"] = bond_desc
+        elif not bucket.get("ticker"):
             bucket["ticker"] = portfolio_line_ticker(
                 company_symbol=row.get("company_symbol"),
                 description=row.get("description"),
                 bbg_ticker=row.get("bbg_ticker"),
                 security_type=row.get("security_type"),
+                country=row.get("country"),
+                currency=row.get("currency"),
+                exchange=row.get("exchange"),
             )
     return out
 
@@ -549,12 +822,20 @@ def aggregate_diamond_by_security(
         signed = _diamond_signed_qty(row)
         if abs(signed) <= 0.0001:
             continue
+        bond_like = is_bond_like_position(
+            security_type=sec_type,
+            company_symbol=sec_name,
+            security_name=sec_name,
+            match_key=key,
+        )
         close_f = normalize_diamond_close_price(
             row.get("PortfolioPrice"),
             security_name=sec_name,
             security_type=sec_type,
+            is_bond_like=bond_like,
         )
         mult = notional_quantity_multiplier(sec_type, sec_name)
+        dia_currency = row.get("Currency") or row.get("QuoteCurrency")
         bucket = out.get(key)
         if not bucket:
             bucket = {
@@ -564,7 +845,12 @@ def aggregate_diamond_by_security(
                     bbg_ticker=row.get("PricingTicker"),
                     security_type=sec_type,
                     security_name=sec_name,
+                    description=sec_name,
+                    currency=dia_currency,
                 ),
+                "company_symbol": sec_name,
+                "security_name": sec_name,
+                "description": sec_name,
                 "shares": 0.0,
                 "close_price": close_f,
                 "qty_multiplier": mult,
@@ -572,17 +858,23 @@ def aggregate_diamond_by_security(
                 "isin": row.get("ISIN"),
                 "cusip": row.get("CUSIP"),
                 "sedol": row.get("SEDOL"),
+                "is_bond_like": bond_like,
             }
             out[key] = bucket
         bucket["shares"] = float(bucket["shares"]) + signed
         if close_f is not None:
             bucket["close_price"] = close_f
+        if sec_name and len(_norm(sec_name)) > len(_norm(bucket.get("description"))):
+            bucket["description"] = sec_name
+            if is_fund_unit_position(security_type=sec_type, security_name=sec_name):
+                bucket["ticker"] = sec_name
         if not bucket.get("ticker"):
             bucket["ticker"] = portfolio_line_ticker(
                 company_symbol=sec_name,
                 bbg_ticker=row.get("PricingTicker"),
                 security_type=sec_type,
                 security_name=sec_name,
+                currency=dia_currency,
             )
     return out
 
@@ -686,24 +978,38 @@ def build_close_price_reconciliation(
         psc_by_key, diamond_by_key
     )
     meta["secondary_id_merges"] = id_merges
+    psc_by_key, diamond_by_key, fund_merges = merge_fund_unit_holdings_by_navpu(
+        psc_by_key, diamond_by_key
+    )
+    meta["fund_unit_merges"] = fund_merges
 
     all_keys = sorted(set(psc_by_key.keys()) | set(diamond_by_key.keys()))
     lines: List[Dict[str, Any]] = []
     for key in all_keys:
         psc = psc_by_key.get(key)
         dia = diamond_by_key.get(key)
+        psc_close = psc.get("close_price") if psc else None
+        dia_close_raw = dia.get("close_price") if dia else None
+        bond_like = bool(
+            (psc and psc.get("is_bond_like"))
+            or (dia and dia.get("is_bond_like"))
+            or is_bond_like_position(match_key=key)
+        )
+        dia_close = align_diamond_bond_close(
+            dia_close_raw,
+            float(psc_close) if psc_close is not None else None,
+            is_bond_like=bond_like,
+        )
+        if dia and dia_close is not None:
+            dia = {**dia, "close_price": dia_close}
         price_diff, dollar_diff, shares = _compute_dollar_difference(psc, dia)
-        ticker = ""
-        if psc:
-            ticker = psc.get("ticker") or ""
-        if not ticker and dia:
-            ticker = dia.get("ticker") or ""
+        ticker = pick_display_ticker(psc, dia)
         lines.append(
             {
                 "match_key": key,
                 "ticker": ticker or key,
-                "diamond_close": dia.get("close_price") if dia else None,
-                "alphadesk_close": psc.get("close_price") if psc else None,
+                "diamond_close": dia_close,
+                "alphadesk_close": psc_close,
                 "price_difference": price_diff,
                 "shares": round(shares, 4) if abs(shares) > 0.0001 else 0.0,
                 "dollar_difference": dollar_diff,

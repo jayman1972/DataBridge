@@ -6,6 +6,24 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sggg.nav_sheet_parse import NAV_CHECKER_FUND_ID_TO_PSC, normalize_valuation_date
 
+
+def _normalize_fund_guid(fund_id: str) -> str:
+    return (fund_id or "").strip().upper()
+
+
+def psc_portfolio_for_fund_id(fund_id: str) -> Optional[str]:
+    """Resolve PSC portfolio name; fund GUID match is case-insensitive."""
+    raw = (fund_id or "").strip()
+    if not raw:
+        return None
+    if raw in NAV_CHECKER_FUND_ID_TO_PSC:
+        return NAV_CHECKER_FUND_ID_TO_PSC[raw]
+    key_up = raw.upper()
+    for fid, portfolio in NAV_CHECKER_FUND_ID_TO_PSC.items():
+        if fid.upper() == key_up:
+            return portfolio
+    return None
+
 # In-memory PSC position rows for follow-on price comparison (same Data Bridge process).
 _NAV_CHECKER_PSC_PORTFOLIO: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -206,22 +224,29 @@ def fetch_boxed_positions_for_funds(
     date_compact = _compact_date(valuation_date_iso)
     boxed_by_fund: Dict[str, List[Dict[str, Any]]] = {}
     positions_by_fund: Dict[str, List[Dict[str, Any]]] = {}
+    fund_error: Optional[str] = None
     conn = None
     try:
         conn = pyodbc.connect(f"DSN={dsn}")
         cursor = conn.cursor()
         for spec in fund_specs:
-            fid = (spec.get("id") or "").strip()
+            fid = (spec.get("id") or spec.get("fund_id") or "").strip()
             if not fid:
                 continue
-            portfolio = NAV_CHECKER_FUND_ID_TO_PSC.get(fid)
+            portfolio = psc_portfolio_for_fund_id(fid)
             if not portfolio:
                 boxed_by_fund[fid] = []
+                positions_by_fund[fid] = []
                 continue
             try:
                 positions = fetch_psc_positions_for_portfolio(cursor, portfolio, date_compact)
-            except Exception:
+            except Exception as leg_exc:
                 positions = []
+                positions_by_fund[fid] = positions
+                boxed_by_fund[fid] = []
+                if fund_error is None:
+                    fund_error = f"{portfolio}: {leg_exc}"
+                continue
             positions_by_fund[fid] = positions
             boxed_by_fund[fid] = detect_boxed_positions(positions)
             if store_portfolios:
@@ -233,4 +258,4 @@ def fetch_boxed_positions_for_funds(
     finally:
         if conn:
             conn.close()
-    return boxed_by_fund, positions_by_fund, None
+    return boxed_by_fund, positions_by_fund, fund_error

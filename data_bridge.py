@@ -77,6 +77,7 @@ from sggg.nav_sheet_parse import (
 )
 from sggg.compliance_check_estimates import compliance_aum_change_ex_flows, estimates_by_fund_id
 from sggg.diamond_nav_store import load_snapshots_bulk, snapshot_usable, upsert_snapshot
+from sggg.psc_boxed_positions import fetch_boxed_positions_for_funds
 
 from supabase import create_client, Client
 
@@ -2193,6 +2194,83 @@ def sggg_diamond_nav_sheet():
         return jsonify({"error": str(e)}), 500
 
 
+def _boxed_positions_for_fund_id(
+    boxed_by_fund: Dict[str, List[Dict[str, Any]]],
+    fund_id: str,
+) -> List[Dict[str, Any]]:
+    fid = (fund_id or "").strip()
+    if not fid:
+        return []
+    if fid in boxed_by_fund:
+        return list(boxed_by_fund[fid] or [])
+    fid_up = fid.upper()
+    for key, rows in boxed_by_fund.items():
+        if (key or "").strip().upper() == fid_up:
+            return list(rows or [])
+    return []
+
+
+@app.route("/sggg/psc/boxed-positions", methods=["GET", "POST"])
+def sggg_psc_boxed_positions():
+    """
+    AlphaDesk PSC boxed positions for NAV checker funds (same logic as scripts/run_psc_boxed_live.py).
+    Body: valuation_date, optional funds: [{id, name}, ...]
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        raw_date = (
+            request.args.get("date")
+            or request.args.get("valuation_date")
+            or data.get("date")
+            or data.get("valuation_date")
+        )
+        if not raw_date:
+            return jsonify({"error": "valuation_date required"}), 400
+        valuation_date = normalize_valuation_date(str(raw_date))
+
+        funds_in = data.get("funds")
+        if isinstance(funds_in, list) and funds_in:
+            fund_specs = [
+                {"id": str(f.get("id") or f.get("fund_id") or "").strip(), "name": str(f.get("name") or "").strip()}
+                for f in funds_in
+                if isinstance(f, dict) and (f.get("id") or f.get("fund_id"))
+            ]
+        else:
+            fund_specs = [{"id": fid, "name": ""} for fid in _get_diamond_fund_ids()]
+
+        dsn = (os.environ.get("SGGG_PSC_ODBC_DSN") or "PSC_VIEWER").strip() or "PSC_VIEWER"
+        t0 = time.time()
+        boxed_by_fund, positions_by_fund, err = fetch_boxed_positions_for_funds(
+            fund_specs,
+            valuation_date,
+            store_portfolios=True,
+            dsn=dsn,
+        )
+        elapsed = time.time() - t0
+        total_boxes = sum(len(v or []) for v in boxed_by_fund.values())
+        return jsonify(
+            {
+                "valuation_date": valuation_date,
+                "by_fund": boxed_by_fund,
+                "psc_position_counts": {
+                    spec["id"]: len(positions_by_fund.get(spec["id"]) or [])
+                    for spec in fund_specs
+                },
+                "psc_box_counts": {
+                    spec["id"]: len(boxed_by_fund.get(spec["id"]) or [])
+                    for spec in fund_specs
+                },
+                "total_boxes": total_boxes,
+                "error": err,
+                "psc_boxed_sec": round(elapsed, 2),
+                "nav_checker_build": "sggg-psc-boxed-v16",
+            }
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/sggg/diamond/nav-availability", methods=["GET", "POST"])
 def sggg_diamond_nav_availability():
     """
@@ -2721,11 +2799,11 @@ def sggg_diamond_nav_availability():
         if include_psc_boxed:
             t_psc_boxed = time.time()
             try:
-                from sggg.psc_boxed_positions import fetch_boxed_positions_for_funds
-
-                boxed_by_fund, _, psc_boxed_error = fetch_boxed_positions_for_funds(
+                boxed_by_fund, positions_by_fund, psc_boxed_error = fetch_boxed_positions_for_funds(
                     fund_specs,
                     valuation_date,
+                    store_portfolios=True,
+                    dsn=(os.environ.get("SGGG_PSC_ODBC_DSN") or "PSC_VIEWER").strip() or "PSC_VIEWER",
                 )
             except Exception as exc:
                 psc_boxed_error = str(exc)
@@ -2746,7 +2824,9 @@ def sggg_diamond_nav_availability():
                 else:
                     entry["status"] = "error"
                     entry["error"] = str(close_err)
-                entry["boxed_positions"] = boxed_by_fund.get(entry.get("fund_id") or "", [])
+                entry["boxed_positions"] = _boxed_positions_for_fund_id(
+                    boxed_by_fund, entry.get("fund_id") or ""
+                )
                 results[idx] = entry
                 continue
 
@@ -2911,7 +2991,9 @@ def sggg_diamond_nav_availability():
 
             if summary_close:
                 entry["status"] = "available" if summary_close.get("available") else "unavailable"
-            entry["boxed_positions"] = boxed_by_fund.get(entry.get("fund_id") or "", [])
+            entry["boxed_positions"] = _boxed_positions_for_fund_id(
+                boxed_by_fund, entry.get("fund_id") or ""
+            )
             results[idx] = entry
 
         elapsed = time.time() - started
@@ -2993,7 +3075,16 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
-                    "nav_checker_build": "sggg-psc-boxed-v15",
+                    "nav_checker_build": "sggg-psc-boxed-v16",
+                    "psc_boxed_total": sum(len(v or []) for v in boxed_by_fund.values())
+                    if include_psc_boxed
+                    else None,
+                    "psc_boxed_fund_counts": {
+                        spec["id"]: len(_boxed_positions_for_fund_id(boxed_by_fund, spec["id"]))
+                        for spec in fund_specs
+                    }
+                    if include_psc_boxed
+                    else None,
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),
                     "compliance_sec": round(compliance_sec, 2),

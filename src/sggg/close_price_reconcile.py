@@ -171,56 +171,16 @@ def is_fund_unit_position(
     return False
 
 
-def _market_suffix_from_locale(
-    *,
-    country: Any = None,
-    currency: Any = None,
-    exchange: Any = None,
-) -> Optional[str]:
-    cc = _norm(currency).upper()
-    ex = _norm(exchange).upper()
-    c = _norm(country).upper()
-    if cc == "USD" or ex in ("US", "USA", "NYSE", "NASDAQ", "AMEX") or "UNITED STATES" in c:
-        return "US"
-    if cc == "CAD" or ex in ("CN", "CA", "TSX", "TSXV", "TSE") or "CANADA" in c:
-        return "CN"
-    return None
-
-
 def format_equity_display_ticker(
     *,
     company_symbol: Any = None,
     bbg_ticker: Any = None,
-    country: Any = None,
-    currency: Any = None,
-    exchange: Any = None,
 ) -> str:
-    """
-    Display tickers like AMAT US / SHOP CN (PortfoliosTable normalizes AMAT.US -> AMAT US).
-    """
-    bbg = normalize_bbg_key(bbg_ticker)
-    if bbg:
-        parts = bbg.split()
-        if len(parts) >= 2 and parts[1] in ("US", "CN", "CA"):
-            return f"{parts[0]} {parts[1]}"
+    """Use AlphaDesk COMPANY_SYMBOL as-is (e.g. AMAT.US, ABX.CA)."""
     cs = _norm(company_symbol)
     if cs:
-        dot = re.match(r"^([A-Z0-9]+)\.([A-Z]{2,3})$", cs, re.IGNORECASE)
-        if dot:
-            sym, mkt = dot.group(1).upper(), dot.group(2).upper()
-            if mkt == "US":
-                return f"{sym} US"
-            if mkt in ("CN", "CA"):
-                return f"{sym} CN"
-        if re.search(r"\s(US|CN)\s*$", cs, re.IGNORECASE):
-            return cs.upper()
-    root = (cs or (bbg.split()[0] if bbg else "")).upper()
-    if not root:
-        return bbg or cs or ""
-    suffix = _market_suffix_from_locale(country=country, currency=currency, exchange=exchange)
-    if suffix and not re.search(rf"\b{suffix}\s*$", root):
-        return f"{root} {suffix}"
-    return root
+        return cs
+    return normalize_bbg_key(bbg_ticker) or _norm(bbg_ticker) or ""
 
 
 def align_diamond_bond_close(
@@ -359,11 +319,8 @@ def portfolio_line_ticker(
     security_name: Any = None,
     security_type: Any = None,
     description: Any = None,
-    country: Any = None,
-    currency: Any = None,
-    exchange: Any = None,
 ) -> str:
-    """Dashboard-style ticker: full bond line, option contract, or equity with US/CN suffix."""
+    """Full bond line, option contract, or PSC company_symbol for equities."""
     cs = _norm(company_symbol)
     bbg = _norm(bbg_ticker)
     sn = _norm(security_name)
@@ -389,13 +346,7 @@ def portfolio_line_ticker(
     ):
         return desc or sn or cs or bbg or ""
 
-    equity = format_equity_display_ticker(
-        company_symbol=cs,
-        bbg_ticker=bbg or sn,
-        country=country,
-        currency=currency,
-        exchange=exchange,
-    )
+    equity = format_equity_display_ticker(company_symbol=cs, bbg_ticker=bbg or sn)
     if equity:
         return equity
     return desc or bbg or sn or cs or ""
@@ -405,7 +356,11 @@ def pick_display_ticker(
     psc: Optional[Dict[str, Any]],
     dia: Optional[Dict[str, Any]],
 ) -> str:
-    """Prefer descriptive bond line; else best ticker from either side."""
+    """Prefer PSC company_symbol; descriptive bond line; else best ticker from either side."""
+    if psc:
+        cs = _norm(psc.get("company_symbol"))
+        if cs and not _looks_like_bond_description(cs):
+            return cs
     candidates: List[str] = []
     for bucket in (psc, dia):
         if not bucket:
@@ -444,9 +399,6 @@ def _parse_psc_reconcile_row(row: tuple) -> Dict[str, Any]:
         "long_short": _norm(row[7]),
         "quantity": float(row[8]) if row[8] is not None else 0.0,
         "close_price": float(row[9]) if row[9] is not None else None,
-        "currency": _norm(row[10]),
-        "country": _norm(row[11]),
-        "exchange": _norm(row[12]),
     }
 
 
@@ -457,8 +409,7 @@ def fetch_psc_positions_for_reconcile(
 ) -> List[Dict[str, Any]]:
     sql = (
         "SELECT ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.BBG_TICKER, ph.ISIN, ph.CUSIP, sd.SEDOL, "
-        "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, "
-        "ph.SEC_CCY, ph.COUNTRY, ph.EXCHANGE "
+        "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE "
         "FROM psc_position_history ph "
         "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
         "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? "
@@ -678,9 +629,6 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                     description=row.get("description"),
                     bbg_ticker=row.get("bbg_ticker"),
                     security_type=row.get("security_type"),
-                    country=row.get("country"),
-                    currency=row.get("currency"),
-                    exchange=row.get("exchange"),
                 ),
                 "company_symbol": row.get("company_symbol"),
                 "description": row.get("description"),
@@ -712,9 +660,6 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                 description=row.get("description"),
                 bbg_ticker=row.get("bbg_ticker"),
                 security_type=row.get("security_type"),
-                country=row.get("country"),
-                currency=row.get("currency"),
-                exchange=row.get("exchange"),
             )
     return out
 
@@ -835,7 +780,6 @@ def aggregate_diamond_by_security(
             is_bond_like=bond_like,
         )
         mult = notional_quantity_multiplier(sec_type, sec_name)
-        dia_currency = row.get("Currency") or row.get("QuoteCurrency")
         bucket = out.get(key)
         if not bucket:
             bucket = {
@@ -846,7 +790,6 @@ def aggregate_diamond_by_security(
                     security_type=sec_type,
                     security_name=sec_name,
                     description=sec_name,
-                    currency=dia_currency,
                 ),
                 "company_symbol": sec_name,
                 "security_name": sec_name,
@@ -874,7 +817,6 @@ def aggregate_diamond_by_security(
                 bbg_ticker=row.get("PricingTicker"),
                 security_type=sec_type,
                 security_name=sec_name,
-                currency=dia_currency,
             )
     return out
 

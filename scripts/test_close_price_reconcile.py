@@ -49,12 +49,12 @@ def test_cadusd_cash_excluded() -> None:
     assert reconcile_match_key(company_symbol="CADUSD") is None
 
 
-def test_equity_ticker_us_cn_suffix() -> None:
-    assert format_equity_display_ticker(company_symbol="AMAT.US") == "AMAT US"
-    assert format_equity_display_ticker(company_symbol="SHOP", currency="CAD") == "SHOP CN"
+def test_equity_ticker_uses_psc_company_symbol() -> None:
+    assert format_equity_display_ticker(company_symbol="AMAT.US") == "AMAT.US"
+    assert format_equity_display_ticker(company_symbol="ABX.CA") == "ABX.CA"
     assert (
         portfolio_line_ticker(company_symbol="HYG.US", bbg_ticker="HYG US Equity")
-        == "HYG US"
+        == "HYG.US"
     )
 
 
@@ -196,7 +196,7 @@ def test_aggregate_psc_net_shares() -> None:
     agg = aggregate_psc_by_security(rows)
     assert len(agg) == 1
     row = next(iter(agg.values()))
-    assert row["ticker"] == "HYG US"
+    assert row["ticker"] == "HYG.US"
     assert row["shares"] == 45000.0
 
 
@@ -206,7 +206,7 @@ if __name__ == "__main__":
     test_bond_diamond_price_scaled()
     test_align_diamond_bond_close_when_matched_to_par()
     test_cadusd_cash_excluded()
-    test_equity_ticker_us_cn_suffix()
+    test_equity_ticker_uses_psc_company_symbol()
     test_match_key_equity_line_ticker()
     test_portfolio_line_ticker_bond_uses_company_symbol()
     test_option_contract_key_cross_format()

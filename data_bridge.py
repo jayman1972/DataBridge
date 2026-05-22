@@ -71,6 +71,7 @@ from sggg.nav_sheet_parse import (
     prior_business_day_iso,
     prior_business_days_for_lookup,
     prior_open_sheet_is_usable,
+    enrich_classes_display_labels,
     pick_class_i_bps,
     sggg_opening_aum_from_prior_summary,
 )
@@ -2728,7 +2729,10 @@ def sggg_diamond_nav_availability():
                 continue
 
             if summary_close:
-                entry["classes"] = summary_close.get("classes") or []
+                entry["classes"] = enrich_classes_display_labels(
+                    summary_close.get("classes") or [],
+                    entry.get("fund_id"),
+                )
                 entry["class_nav_source"] = "diamond"
                 entry["class_i_bps"] = pick_class_i_bps(entry["classes"])
                 entry["diamond_nav_requested_date"] = valuation_date
@@ -2966,7 +2970,7 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
-                    "nav_checker_build": "sggg-opening-prior-eod-v13",
+                    "nav_checker_build": "sggg-class-display-v14",
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),
                     "compliance_sec": round(compliance_sec, 2),

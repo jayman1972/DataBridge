@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sggg.nav_sheet_parse import (  # noqa: E402
     _display_class_label,
     _infer_fund_series_prefix,
+    enrich_classes_display_labels,
     prior_business_day_iso,
     prior_business_days_for_lookup,
     prior_open_sheet_is_usable,
@@ -45,6 +46,19 @@ def test_suffix_display_class_prefix() -> None:
     assert prefix_800 == "800"
     assert _display_class_label("FD", "", prefix_800) == "800FD"
     assert _display_class_label("UF", "", prefix_800) == "800UF"
+
+    select_codes = ["500A", "500I", "500O", "US", "OA"]
+    prefix_500 = _infer_fund_series_prefix(select_codes)
+    assert prefix_500 == "500"
+    assert _display_class_label("US", "", prefix_500) == "500US"
+    assert _display_class_label("OA", "", prefix_500) == "500OA"
+
+    cached = [
+        {"class_id": "x", "class_code": "UA", "display_class": "UA", "navpu": 1.0},
+        {"class_id": "y", "class_code": "200A", "display_class": "200A", "navpu": 2.0},
+    ]
+    enriched = enrich_classes_display_labels(cached, "415a3530-3034-4536-4432-303030364337")
+    assert enriched[0]["display_class"] == "200UA"
 
 
 if __name__ == "__main__":

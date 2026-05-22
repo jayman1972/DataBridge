@@ -153,6 +153,37 @@ def _display_class_label(class_code: str, class_id: str, fund_prefix: str) -> st
     return label
 
 
+def enrich_classes_display_labels(
+    classes: List[Dict[str, Any]],
+    fund_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Re-apply display_class labels (e.g. after loading a cached snapshot parsed before prefix fix).
+    """
+    if not classes:
+        return []
+    codes: List[str] = []
+    for row in classes:
+        if not isinstance(row, dict):
+            continue
+        for key in ("class_code", "display_class"):
+            raw = (row.get(key) or "").strip()
+            if raw:
+                codes.append(raw)
+    prefix = _infer_fund_series_prefix(codes)
+    if not prefix and fund_id:
+        prefix = FUND_SERIES_PREFIX_BY_FUND_ID.get((fund_id or "").strip(), "")
+    out: List[Dict[str, Any]] = []
+    for row in classes:
+        if not isinstance(row, dict):
+            continue
+        cc = (row.get("class_code") or "").strip()
+        cid = (row.get("class_id") or "").strip()
+        disp = _display_class_label(cc, cid, prefix)
+        out.append({**row, "display_class": disp})
+    return out
+
+
 def _is_usd_share_class(class_code: str, class_id: str) -> bool:
     """USD series codes include U (500UO, 550UF). Ignore GUIDs that happen to contain U."""
     series = _class_series_token(class_code, class_id)
@@ -742,6 +773,8 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
     capital_flow, capital_flow_label = pick_capital_flow_adjustment(body)
     sheet_date = normalize_diamond_sheet_date(body.get("ValuationDate"))
 
+    classes_out = enrich_classes_display_labels(classes_out, fund_id)
+
     has_nav = any(c.get("navpu") is not None for c in classes_out)
     return {
         "available": has_nav and len(classes_out) > 0,
@@ -771,6 +804,15 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
         "classes": sorted(classes_out, key=lambda x: x.get("class_id") or ""),
     }
 
+
+# Default class series number prefix when Diamond omits it on suffix-only ClassCodes.
+FUND_SERIES_PREFIX_BY_FUND_ID: Dict[str, str] = {
+    "415a3530-3034-4536-4432-303030364337": "200",
+    "41010000-7F7A-0A65-D559-45484608DB40": "550",
+    "41323030-3031-4144-3637-303030364338": "500",
+    "41010000-7F2A-D7E8-776F-45484608D91C": "800",
+    "01010000-801A-4995-8370-45484608DE57": "925",
+}
 
 # Diamond fund parent GUID -> PSC portfolio name (Fund Admin NAV checker)
 NAV_CHECKER_FUND_ID_TO_PSC: Dict[str, str] = {

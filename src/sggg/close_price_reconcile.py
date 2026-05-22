@@ -250,9 +250,17 @@ def align_diamond_bond_close(
 
 
 def notional_quantity_multiplier(security_type: Any, description: Any = None) -> float:
-    """Options: contracts × 100 for dollar impact."""
+    """
+    Scale quantity × price into dollars.
+
+    Options: contracts × 100 (shares per contract).
+    Bonds: face quantity × (price / 100) — AlphaDesk close is % of par.
+    Equities / fund units: quantity × price as-is.
+    """
     if _is_option_security_type(security_type) or _looks_like_option_description(description):
         return 100.0
+    if _is_bond_security_type(security_type):
+        return 0.01
     return 1.0
 
 

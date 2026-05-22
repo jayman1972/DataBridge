@@ -157,6 +157,14 @@ def test_secondary_id_merge() -> None:
     assert set(psc_out.keys()) == set(dia_out.keys())
 
 
+def test_bond_dollar_diff_par_scaling() -> None:
+    """475k face × (71.882 - 97.573) / 100 ≈ -122k, not -12.2M."""
+    psc = {"shares": 475000.0, "close_price": 97.573, "qty_multiplier": 0.01}
+    dia = {"shares": 475000.0, "close_price": 71.882, "qty_multiplier": 0.01}
+    _, dollar_diff, _ = _compute_dollar_difference(psc, dia)
+    assert dollar_diff == round(475000 * 0.01 * (71.882 - 97.573), 2)
+
+
 def test_one_sided_alphadesk_only() -> None:
     psc = {"shares": 1000.0, "close_price": 99.982, "qty_multiplier": 1.0}
     price_diff, dollar_diff, _ = _compute_dollar_difference(psc, None)
@@ -239,6 +247,7 @@ if __name__ == "__main__":
     test_bond_diamond_price_scaled()
     test_option_price_not_scaled()
     test_align_diamond_bond_close_when_matched_to_par()
+    test_bond_dollar_diff_par_scaling()
     test_cadusd_cash_excluded()
     test_portfolio_details_display_ticker()
     test_match_key_equity_line_ticker()

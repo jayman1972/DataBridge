@@ -9,13 +9,12 @@ from sggg.close_price_reconcile import (
     _compute_dollar_difference,
     aggregate_psc_by_security,
     align_diamond_bond_close,
-    format_equity_display_ticker,
     is_cash_position,
     merge_positions_by_secondary_ids,
     normalize_bbg_key,
     normalize_diamond_close_price,
     parse_option_contract_key,
-    portfolio_line_ticker,
+    portfolio_details_display_ticker,
     reconcile_match_key,
 )
 
@@ -36,8 +35,29 @@ def test_bond_compact_match_key() -> None:
 
 def test_bond_diamond_price_scaled() -> None:
     assert normalize_diamond_close_price(0.99982, security_name="AAL 5 3/4 04/20/29") == 99.982
-    assert normalize_diamond_close_price(0.97381, security_name="LEG") == 97.381
+    assert (
+        normalize_diamond_close_price(
+            0.97381,
+            security_name="LEG",
+            security_type="Bond",
+            is_bond_like=True,
+        )
+        == 97.381
+    )
     assert normalize_diamond_close_price(78.5, security_name="AAPL US Equity") == 78.5
+
+
+def test_option_price_not_scaled() -> None:
+    assert (
+        normalize_diamond_close_price(
+            1.55,
+            security_type="EquityOption",
+            bbg_ticker="SLV 06/18/26 C87 US",
+            is_bond_like=True,
+        )
+        == 1.55
+    )
+    assert align_diamond_bond_close(8.45, 8.45, is_bond_like=True, is_option_like=True) == 8.45
 
 
 def test_align_diamond_bond_close_when_matched_to_par() -> None:
@@ -49,29 +69,36 @@ def test_cadusd_cash_excluded() -> None:
     assert reconcile_match_key(company_symbol="CADUSD") is None
 
 
-def test_equity_ticker_uses_psc_company_symbol() -> None:
-    assert format_equity_display_ticker(company_symbol="AMAT.US") == "AMAT.US"
-    assert format_equity_display_ticker(company_symbol="ABX.CA") == "ABX.CA"
+def test_portfolio_details_display_ticker() -> None:
     assert (
-        portfolio_line_ticker(company_symbol="HYG.US", bbg_ticker="HYG US Equity")
-        == "HYG.US"
+        portfolio_details_display_ticker(
+            security_type="EquityOption",
+            company_symbol="USO",
+            bbg_ticker="USO 06/18/26 C87 US",
+        )
+        == "USO 06/18/26 C87 US"
+    )
+    assert (
+        portfolio_details_display_ticker(
+            security_type="Bond",
+            company_symbol="TPC",
+            description="TPC 11 7/8 04/30/29",
+        )
+        == "TPC 11 7/8 04/30/29"
+    )
+    assert (
+        portfolio_details_display_ticker(
+            security_type="Stock",
+            company_symbol="ABX",
+            security="ABX.CA",
+        )
+        == "ABX.CA"
     )
 
 
 def test_match_key_equity_line_ticker() -> None:
     assert reconcile_match_key(bbg_ticker="HYG US Equity") == "line:HYG US"
     assert reconcile_match_key(bbg_ticker="HYG US", sedol="B4PJP68") == "sedol:B4PJP68"
-
-
-def test_portfolio_line_ticker_bond_uses_company_symbol() -> None:
-    assert (
-        portfolio_line_ticker(
-            company_symbol="AAL 5 3/4 04/20/29",
-            description="AMERICAN AIRLINES GROUP INC",
-            security_type="Bond",
-        )
-        == "AAL 5 3/4 04/20/29"
-    )
 
 
 def test_option_contract_key_cross_format() -> None:
@@ -145,9 +172,10 @@ def test_one_sided_diamond_only() -> None:
 def test_options_contract_multiplier() -> None:
     rows = [
         {
-            "company_symbol": "AAPL US 01/17/2025 C150",
+            "company_symbol": "AAPL",
             "description": "AAPL US Equity",
-            "bbg_ticker": "AAPL US Equity",
+            "bbg_ticker": "AAPL US 01/17/2025 C150",
+            "security": "AAPL US 01/17/2025 C150",
             "isin": "",
             "cusip": "",
             "sedol": "",
@@ -160,6 +188,7 @@ def test_options_contract_multiplier() -> None:
     agg = aggregate_psc_by_security(rows)
     row = next(iter(agg.values()))
     assert row["qty_multiplier"] == 100.0
+    assert "C150" in row["ticker"]
     psc = row
     dia = {"shares": 10.0, "close_price": 5.30, "qty_multiplier": 100.0}
     _, dollar_diff, _ = _compute_dollar_difference(psc, dia)
@@ -172,6 +201,7 @@ def test_aggregate_psc_net_shares() -> None:
             "company_symbol": "HYG.US",
             "description": "HYG US Equity",
             "bbg_ticker": "HYG US Equity",
+            "security": "HYG.US",
             "isin": "US4642885135",
             "cusip": "",
             "sedol": "B4PJP68",
@@ -184,6 +214,7 @@ def test_aggregate_psc_net_shares() -> None:
             "company_symbol": "HYG.US",
             "description": "HYG US Equity",
             "bbg_ticker": "HYG US Equity",
+            "security": "HYG.US",
             "isin": "US4642885135",
             "cusip": "",
             "sedol": "B4PJP68",
@@ -204,11 +235,11 @@ if __name__ == "__main__":
     test_bbg_key_normalization()
     test_bond_compact_match_key()
     test_bond_diamond_price_scaled()
+    test_option_price_not_scaled()
     test_align_diamond_bond_close_when_matched_to_par()
     test_cadusd_cash_excluded()
-    test_equity_ticker_uses_psc_company_symbol()
+    test_portfolio_details_display_ticker()
     test_match_key_equity_line_ticker()
-    test_portfolio_line_ticker_bond_uses_company_symbol()
     test_option_contract_key_cross_format()
     test_cash_excluded()
     test_secondary_id_merge()

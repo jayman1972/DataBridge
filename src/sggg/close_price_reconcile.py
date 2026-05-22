@@ -171,16 +171,77 @@ def is_fund_unit_position(
     return False
 
 
-def format_equity_display_ticker(
+def is_option_like_position(
     *,
+    security_type: Any = None,
     company_symbol: Any = None,
+    description: Any = None,
     bbg_ticker: Any = None,
+    security: Any = None,
+    security_name: Any = None,
+    match_key: Any = None,
+) -> bool:
+    mk = _norm(match_key)
+    if mk.startswith("opt:"):
+        return True
+    if _is_option_security_type(security_type):
+        return True
+    for text in (bbg_ticker, security, description, security_name, company_symbol):
+        if parse_option_contract_key(text) or _looks_like_option_description(text):
+            return True
+    return False
+
+
+def portfolio_details_display_ticker(
+    *,
+    security_type: Any = None,
+    company_symbol: Any = None,
+    description: Any = None,
+    bbg_ticker: Any = None,
+    security: Any = None,
+    security_name: Any = None,
 ) -> str:
-    """Use AlphaDesk COMPANY_SYMBOL as-is (e.g. AMAT.US, ABX.CA)."""
+    """
+    Same display rules as dashboard Portfolio Details (PortfoliosTable.getDisplayedTicker).
+
+    Options: BBG_TICKER (e.g. SLV 06/18/26 C87 US).
+    Bonds: DESCRIPTION / bond-like SecurityName (e.g. TPC 11 7/8 04/30/29).
+    Equities: PSC SECURITY column when set (e.g. NEO.CA), else company_symbol.
+    """
+    st = _norm(security_type)
+    bbg = _norm(bbg_ticker)
+    sec = _norm(security)
     cs = _norm(company_symbol)
-    if cs:
-        return cs
-    return normalize_bbg_key(bbg_ticker) or _norm(bbg_ticker) or ""
+    desc = _norm(description)
+    sn = _norm(security_name)
+
+    if is_option_like_position(
+        security_type=st,
+        company_symbol=cs,
+        description=desc,
+        bbg_ticker=bbg,
+        security=sec,
+        security_name=sn,
+    ):
+        return bbg or sec or desc or sn or cs or ""
+
+    if is_bond_like_position(
+        security_type=st,
+        company_symbol=cs,
+        description=desc,
+        security_name=sn or sec,
+    ):
+        bond_lines = [
+            t
+            for t in (desc, sn, sec, bbg, cs)
+            if t and _looks_like_bond_description(t)
+        ]
+        if bond_lines:
+            return max(bond_lines, key=len)
+        if _is_bond_security_type(st):
+            return desc or sn or sec or bbg or cs or ""
+
+    return sec or cs or bbg or desc or sn or ""
 
 
 def align_diamond_bond_close(
@@ -188,10 +249,11 @@ def align_diamond_bond_close(
     alphadesk_close: Optional[float],
     *,
     is_bond_like: bool = False,
+    is_option_like: bool = False,
 ) -> Optional[float]:
     """Scale Diamond fractional par quotes when AlphaDesk is already in par points."""
-    if diamond_close is None:
-        return None
+    if is_option_like or diamond_close is None:
+        return diamond_close
     if alphadesk_close is None:
         if is_bond_like and 0 < diamond_close < 20:
             return round(diamond_close * 100.0, 6)
@@ -215,10 +277,13 @@ def normalize_diamond_close_price(
     security_name: Any = None,
     security_type: Any = None,
     description: Any = None,
+    bbg_ticker: Any = None,
     is_bond_like: bool = False,
+    is_option_like: bool = False,
 ) -> Optional[float]:
     """
     Diamond reports bond prices as fraction of par (0.99982); AlphaDesk uses 99.982.
+    Options and equities are never scaled.
     """
     if price is None:
         return None
@@ -226,6 +291,13 @@ def normalize_diamond_close_price(
         p = float(price)
     except (TypeError, ValueError):
         return None
+    if is_option_like or is_option_like_position(
+        security_type=security_type,
+        bbg_ticker=bbg_ticker,
+        description=description,
+        security_name=security_name,
+    ):
+        return round(p, 6)
     bond_like = is_bond_like or is_bond_like_position(
         security_type=security_type,
         company_symbol=security_name,
@@ -233,12 +305,6 @@ def normalize_diamond_close_price(
         security_name=security_name,
     )
     if bond_like and 0 < p < 20:
-        return round(p * 100.0, 6)
-    if (
-        0 < p < 5
-        and not _is_equity_security_type(security_type)
-        and not _is_option_security_type(security_type)
-    ):
         return round(p * 100.0, 6)
     return round(p, 6)
 
@@ -312,70 +378,32 @@ def reconcile_match_key(
     return None
 
 
-def portfolio_line_ticker(
-    *,
-    company_symbol: Any = None,
-    bbg_ticker: Any = None,
-    security_name: Any = None,
-    security_type: Any = None,
-    description: Any = None,
-) -> str:
-    """Full bond line, option contract, or PSC company_symbol for equities."""
-    cs = _norm(company_symbol)
-    bbg = _norm(bbg_ticker)
-    sn = _norm(security_name)
-    desc = _norm(description)
-
-    for candidate in (cs, bbg, sn, desc):
-        if parse_option_contract_key(candidate):
-            return candidate
-
-    bond_lines = [
-        t
-        for t in (desc, cs, sn, bbg)
-        if t and _looks_like_bond_description(t)
-    ]
-    if bond_lines:
-        return max(bond_lines, key=len)
-
-    if is_fund_unit_position(
-        security_type=security_type,
-        company_symbol=cs,
-        description=desc or sn,
-        security_name=sn,
-    ):
-        return desc or sn or cs or bbg or ""
-
-    equity = format_equity_display_ticker(company_symbol=cs, bbg_ticker=bbg or sn)
-    if equity:
-        return equity
-    return desc or bbg or sn or cs or ""
-
-
 def pick_display_ticker(
     psc: Optional[Dict[str, Any]],
     dia: Optional[Dict[str, Any]],
 ) -> str:
-    """Prefer PSC company_symbol; descriptive bond line; else best ticker from either side."""
+    """Portfolio Details card display; prefer AlphaDesk (PSC) fields when present."""
     if psc:
-        cs = _norm(psc.get("company_symbol"))
-        if cs and not _looks_like_bond_description(cs):
-            return cs
-    candidates: List[str] = []
-    for bucket in (psc, dia):
-        if not bucket:
-            continue
-        for field in ("ticker", "description", "company_symbol", "security_name"):
-            val = _norm(bucket.get(field))
-            if val:
-                candidates.append(val)
-    bond_lines = [c for c in candidates if _looks_like_bond_description(c)]
-    if bond_lines:
-        return max(bond_lines, key=len)
-    for bucket in (psc, dia):
-        if bucket and bucket.get("ticker"):
-            return _norm(bucket["ticker"])
-    return candidates[0] if candidates else ""
+        t = portfolio_details_display_ticker(
+            security_type=psc.get("security_type"),
+            company_symbol=psc.get("company_symbol"),
+            description=psc.get("description"),
+            bbg_ticker=psc.get("bbg_ticker"),
+            security=psc.get("security"),
+        )
+        if t:
+            return t
+    if dia:
+        t = portfolio_details_display_ticker(
+            security_type=dia.get("security_type"),
+            company_symbol=dia.get("company_symbol"),
+            description=dia.get("description"),
+            bbg_ticker=dia.get("bbg_ticker"),
+            security_name=dia.get("security_name"),
+        )
+        if t:
+            return t
+    return ""
 
 
 def _signed_qty(quantity: Any, long_short: Any) -> float:
@@ -399,6 +427,7 @@ def _parse_psc_reconcile_row(row: tuple) -> Dict[str, Any]:
         "long_short": _norm(row[7]),
         "quantity": float(row[8]) if row[8] is not None else 0.0,
         "close_price": float(row[9]) if row[9] is not None else None,
+        "security": _norm(row[10]),
     }
 
 
@@ -409,7 +438,7 @@ def fetch_psc_positions_for_reconcile(
 ) -> List[Dict[str, Any]]:
     sql = (
         "SELECT ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.BBG_TICKER, ph.ISIN, ph.CUSIP, sd.SEDOL, "
-        "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE "
+        "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, ph.SECURITY "
         "FROM psc_position_history ph "
         "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
         "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? "
@@ -616,22 +645,40 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
         signed = _signed_qty(row.get("quantity"), row.get("long_short"))
         if abs(signed) <= 0.0001:
             continue
+        opt_like = is_option_like_position(
+            security_type=row.get("security_type"),
+            company_symbol=row.get("company_symbol"),
+            description=row.get("description"),
+            bbg_ticker=row.get("bbg_ticker"),
+            security=row.get("security"),
+            match_key=key,
+        )
         mult = notional_quantity_multiplier(
             row.get("security_type"),
-            row.get("company_symbol") or row.get("description"),
+            row.get("bbg_ticker") or row.get("description") or row.get("security"),
         )
         bucket = out.get(key)
         if not bucket:
+            display = portfolio_details_display_ticker(
+                security_type=row.get("security_type"),
+                company_symbol=row.get("company_symbol"),
+                description=row.get("description"),
+                bbg_ticker=row.get("bbg_ticker"),
+                security=row.get("security"),
+            )
+            bond_like = is_bond_like_position(
+                security_type=row.get("security_type"),
+                company_symbol=row.get("company_symbol"),
+                description=row.get("description"),
+                match_key=key,
+            ) and not opt_like
             bucket = {
                 "match_key": key,
-                "ticker": portfolio_line_ticker(
-                    company_symbol=row.get("company_symbol"),
-                    description=row.get("description"),
-                    bbg_ticker=row.get("bbg_ticker"),
-                    security_type=row.get("security_type"),
-                ),
+                "ticker": display,
                 "company_symbol": row.get("company_symbol"),
                 "description": row.get("description"),
+                "bbg_ticker": row.get("bbg_ticker"),
+                "security": row.get("security"),
                 "shares": 0.0,
                 "close_price": row.get("close_price"),
                 "qty_multiplier": mult,
@@ -639,28 +686,20 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                 "isin": row.get("isin"),
                 "cusip": row.get("cusip"),
                 "sedol": row.get("sedol"),
-                "is_bond_like": is_bond_like_position(
-                    security_type=row.get("security_type"),
-                    company_symbol=row.get("company_symbol"),
-                    description=row.get("description"),
-                    match_key=key,
-                ),
+                "is_bond_like": bond_like,
+                "is_option_like": opt_like,
             }
             out[key] = bucket
         bucket["shares"] = float(bucket["shares"]) + signed
         if row.get("close_price") is not None:
             bucket["close_price"] = row.get("close_price")
-        bond_desc = row.get("description")
-        if bond_desc and _looks_like_bond_description(bond_desc):
-            bucket["description"] = bond_desc
-            bucket["ticker"] = bond_desc
-        elif not bucket.get("ticker"):
-            bucket["ticker"] = portfolio_line_ticker(
-                company_symbol=row.get("company_symbol"),
-                description=row.get("description"),
-                bbg_ticker=row.get("bbg_ticker"),
-                security_type=row.get("security_type"),
-            )
+        bucket["ticker"] = portfolio_details_display_ticker(
+            security_type=row.get("security_type"),
+            company_symbol=row.get("company_symbol"),
+            description=bucket.get("description") or row.get("description"),
+            bbg_ticker=row.get("bbg_ticker") or bucket.get("bbg_ticker"),
+            security=row.get("security") or bucket.get("security"),
+        )
     return out
 
 
@@ -767,33 +806,44 @@ def aggregate_diamond_by_security(
         signed = _diamond_signed_qty(row)
         if abs(signed) <= 0.0001:
             continue
+        pricing = row.get("PricingTicker")
+        opt_like = is_option_like_position(
+            security_type=sec_type,
+            company_symbol=sec_name,
+            security_name=sec_name,
+            bbg_ticker=pricing,
+            match_key=key,
+        )
         bond_like = is_bond_like_position(
             security_type=sec_type,
             company_symbol=sec_name,
             security_name=sec_name,
             match_key=key,
-        )
+        ) and not opt_like
         close_f = normalize_diamond_close_price(
             row.get("PortfolioPrice"),
             security_name=sec_name,
             security_type=sec_type,
+            bbg_ticker=pricing,
             is_bond_like=bond_like,
+            is_option_like=opt_like,
         )
-        mult = notional_quantity_multiplier(sec_type, sec_name)
+        mult = notional_quantity_multiplier(sec_type, pricing or sec_name)
         bucket = out.get(key)
         if not bucket:
             bucket = {
                 "match_key": key,
-                "ticker": portfolio_line_ticker(
-                    company_symbol=sec_name,
-                    bbg_ticker=row.get("PricingTicker"),
+                "ticker": portfolio_details_display_ticker(
                     security_type=sec_type,
+                    company_symbol=sec_name,
+                    bbg_ticker=pricing,
                     security_name=sec_name,
                     description=sec_name,
                 ),
                 "company_symbol": sec_name,
                 "security_name": sec_name,
                 "description": sec_name,
+                "bbg_ticker": pricing,
                 "shares": 0.0,
                 "close_price": close_f,
                 "qty_multiplier": mult,
@@ -802,22 +852,22 @@ def aggregate_diamond_by_security(
                 "cusip": row.get("CUSIP"),
                 "sedol": row.get("SEDOL"),
                 "is_bond_like": bond_like,
+                "is_option_like": opt_like,
             }
             out[key] = bucket
         bucket["shares"] = float(bucket["shares"]) + signed
         if close_f is not None:
             bucket["close_price"] = close_f
-        if sec_name and len(_norm(sec_name)) > len(_norm(bucket.get("description"))):
+        bucket["bbg_ticker"] = pricing or bucket.get("bbg_ticker")
+        if sec_name and _looks_like_bond_description(sec_name):
             bucket["description"] = sec_name
-            if is_fund_unit_position(security_type=sec_type, security_name=sec_name):
-                bucket["ticker"] = sec_name
-        if not bucket.get("ticker"):
-            bucket["ticker"] = portfolio_line_ticker(
-                company_symbol=sec_name,
-                bbg_ticker=row.get("PricingTicker"),
-                security_type=sec_type,
-                security_name=sec_name,
-            )
+        bucket["ticker"] = portfolio_details_display_ticker(
+            security_type=sec_type,
+            company_symbol=sec_name,
+            bbg_ticker=bucket.get("bbg_ticker"),
+            security_name=sec_name,
+            description=bucket.get("description"),
+        )
     return out
 
 
@@ -932,15 +982,24 @@ def build_close_price_reconciliation(
         dia = diamond_by_key.get(key)
         psc_close = psc.get("close_price") if psc else None
         dia_close_raw = dia.get("close_price") if dia else None
-        bond_like = bool(
-            (psc and psc.get("is_bond_like"))
-            or (dia and dia.get("is_bond_like"))
-            or is_bond_like_position(match_key=key)
+        option_like = bool(
+            (psc and psc.get("is_option_like"))
+            or (dia and dia.get("is_option_like"))
+            or (key or "").startswith("opt:")
+        )
+        bond_like = (
+            not option_like
+            and bool(
+                (psc and psc.get("is_bond_like"))
+                or (dia and dia.get("is_bond_like"))
+                or is_bond_like_position(match_key=key)
+            )
         )
         dia_close = align_diamond_bond_close(
             dia_close_raw,
             float(psc_close) if psc_close is not None else None,
             is_bond_like=bond_like,
+            is_option_like=option_like,
         )
         if dia and dia_close is not None:
             dia = {**dia, "close_price": dia_close}

@@ -9,6 +9,7 @@ from sggg.close_price_reconcile import (
     _compute_dollar_difference,
     aggregate_psc_by_security,
     align_diamond_bond_close,
+    apply_diamond_price_discount,
     is_cash_position,
     merge_positions_by_secondary_ids,
     normalize_bbg_key,
@@ -45,6 +46,24 @@ def test_bond_diamond_price_scaled() -> None:
         == 97.381
     )
     assert normalize_diamond_close_price(78.5, security_name="AAPL US Equity") == 78.5
+
+
+def test_sinking_bond_price_discount_gnfpso() -> None:
+    """EHP Strategic Income GNFPSO — live Diamond 2026-05-21."""
+    assert (
+        normalize_diamond_close_price(
+            0.718820291,
+            security_name="Guara Norte Sarl 5.198% 15JUN2034",
+            security_type="Bond",
+            is_bond_like=True,
+            price_discount=26.33,
+            pre_discount_price=97.573,
+        )
+        == 97.573
+    )
+    assert apply_diamond_price_discount(71.882, price_discount=26.33, is_bond_like=True) == round(
+        71.882 + 26.33, 6
+    )
 
 
 def test_option_price_not_scaled() -> None:

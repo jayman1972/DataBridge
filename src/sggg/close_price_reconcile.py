@@ -264,6 +264,43 @@ def notional_quantity_multiplier(security_type: Any, description: Any = None) ->
     return 1.0
 
 
+def _nonzero_amount(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if abs(v) < 1e-9:
+        return None
+    return v
+
+
+def apply_diamond_price_discount(
+    normalized_close: Optional[float],
+    *,
+    price_discount: Any = None,
+    pre_discount_price: Any = None,
+    is_bond_like: bool = False,
+) -> Optional[float]:
+    """
+    Sinking-fund and similar bonds carry a non-zero Diamond PriceDiscount (sinking adjustment).
+
+    PortfolioPrice is after the discount; AlphaDesk close aligns with PreDiscountPrice when
+    Diamond reports it in par points. Otherwise add PriceDiscount to the normalized close.
+    """
+    discount = _nonzero_amount(price_discount)
+    if discount is None:
+        return normalized_close
+    if is_bond_like:
+        pre = _nonzero_amount(pre_discount_price)
+        if pre is not None and pre > 20:
+            return round(pre, 6)
+    if normalized_close is None:
+        return None
+    return round(normalized_close + discount, 6)
+
+
 def normalize_diamond_close_price(
     price: Any,
     *,
@@ -273,10 +310,15 @@ def normalize_diamond_close_price(
     bbg_ticker: Any = None,
     is_bond_like: bool = False,
     is_option_like: bool = False,
+    price_discount: Any = None,
+    pre_discount_price: Any = None,
 ) -> Optional[float]:
     """
     Diamond reports bond prices as fraction of par (0.99982); AlphaDesk uses 99.982.
     Options and equities are never scaled.
+
+    When PriceDiscount is set (sinking adjustment), restore comparable par close via
+    PreDiscountPrice or PortfolioPrice + PriceDiscount.
     """
     if price is None:
         return None
@@ -298,8 +340,15 @@ def normalize_diamond_close_price(
         security_name=security_name,
     )
     if bond_like and 0 < p < 20:
-        return round(p * 100.0, 6)
-    return round(p, 6)
+        p = round(p * 100.0, 6)
+    else:
+        p = round(p, 6)
+    return apply_diamond_price_discount(
+        p,
+        price_discount=price_discount,
+        pre_discount_price=pre_discount_price,
+        is_bond_like=bond_like,
+    )
 
 
 def reconcile_match_key(
@@ -814,6 +863,7 @@ def aggregate_diamond_by_security(
             security_name=sec_name,
             match_key=key,
         ) and not opt_like
+        price_disc = row.get("PriceDiscount")
         close_f = normalize_diamond_close_price(
             row.get("PortfolioPrice"),
             security_name=sec_name,
@@ -821,6 +871,8 @@ def aggregate_diamond_by_security(
             bbg_ticker=pricing,
             is_bond_like=bond_like,
             is_option_like=opt_like,
+            price_discount=price_disc,
+            pre_discount_price=row.get("PreDiscountPrice"),
         )
         mult = notional_quantity_multiplier(sec_type, pricing or sec_name)
         bucket = out.get(key)

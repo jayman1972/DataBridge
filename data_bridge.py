@@ -2805,7 +2805,7 @@ def sggg_diamond_nav_availability():
             if summary_close:
                 entry["aum_parse_version"] = summary_close.get("aum_parse_version")
 
-            # SGGG: report-day subs/reds only (prior-day flows are in diamond_opening_aum).
+            # SGGG: opening = prior-day EOD only; report-day subs/reds subtracted from raw close − open.
             diamond_capital_flow: Optional[float] = None
             report_flow_label: Optional[str] = None
             if summary_close:
@@ -2966,7 +2966,7 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
-                    "nav_checker_build": "sggg-class-suffix-label-v12",
+                    "nav_checker_build": "sggg-opening-prior-eod-v13",
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),
                     "compliance_sec": round(compliance_sec, 2),

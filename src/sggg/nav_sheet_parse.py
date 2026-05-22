@@ -577,10 +577,10 @@ def sggg_opening_aum_from_prior_summary(
     prior_date: str,
 ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[str]]:
     """
-    SGGG opening AUM = prior GetNAVSheet EOD closing + prior-day flows (excl. opening-equity).
+    SGGG opening AUM = prior GetNAVSheet EOD closing (fund NetAssetValue on prior date).
 
-    Opening-equity subs/reds on the prior sheet are stripped from the opening basis
-    and handled on the report-day sheet instead.
+    Prior-day flow lines on that sheet are not added to opening; they are already reflected
+    in EOD or belong on the report-day sheet. Report-day subs/reds are adjusted separately.
     """
     if not summary_prior:
         return None, None, None, None
@@ -590,10 +590,8 @@ def sggg_opening_aum_from_prior_summary(
     if prior_eod is None:
         return None, None, None, None
     flow = prior_flows_for_opening_basis(summary_prior)
-    opening = float(prior_eod) + flow
+    opening = float(prior_eod)
     src = f"GetNAVSheet {prior_date} EOD"
-    if flow != 0:
-        src += " + prior-day flows (excl. opening-equity)"
     return opening, float(prior_eod), flow, src
 
 

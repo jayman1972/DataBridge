@@ -78,6 +78,7 @@ from sggg.nav_sheet_parse import (
 from sggg.compliance_check_estimates import compliance_aum_change_ex_flows, estimates_by_fund_id
 from sggg.diamond_nav_store import load_snapshots_bulk, snapshot_usable, upsert_snapshot
 from sggg.psc_boxed_positions import fetch_boxed_positions_for_funds
+from sggg.close_price_reconcile import fetch_close_price_reconciliation
 
 from supabase import create_client, Client
 
@@ -2264,6 +2265,48 @@ def sggg_psc_boxed_positions():
                 "error": err,
                 "psc_boxed_sec": round(elapsed, 2),
                 "nav_checker_build": "sggg-psc-boxed-v16",
+            }
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/sggg/close-price-reconciliation", methods=["GET", "POST"])
+def sggg_close_price_reconciliation():
+    """
+    Line-by-line closing price comparison: Diamond GetPortfolio vs AlphaDesk PSC.
+    Body: fund_id, valuation_date (yyyy-mm-dd).
+    """
+    try:
+        client = get_diamond_client()
+        if not client:
+            return jsonify({"error": "Diamond API not configured."}), 503
+        data = request.get_json(silent=True) or {}
+        fund_id = (request.args.get("fund_id") or data.get("fund_id") or "").strip()
+        raw_date = (
+            request.args.get("date")
+            or request.args.get("valuation_date")
+            or data.get("date")
+            or data.get("valuation_date")
+        )
+        if not fund_id:
+            return jsonify({"error": "fund_id required"}), 400
+        if not raw_date:
+            return jsonify({"error": "valuation_date required"}), 400
+        valuation_date = normalize_valuation_date(str(raw_date))
+        t0 = time.time()
+        lines, meta, err = fetch_close_price_reconciliation(fund_id, valuation_date, client)
+        if err:
+            return jsonify({"error": err, "meta": meta}), 502
+        return jsonify(
+            {
+                "fund_id": fund_id,
+                "valuation_date": valuation_date,
+                "lines": lines,
+                "meta": meta,
+                "timing_sec": round(time.time() - t0, 2),
+                "nav_checker_build": "sggg-close-price-v17",
             }
         )
     except Exception as e:

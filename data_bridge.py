@@ -2710,6 +2710,27 @@ def sggg_diamond_nav_availability():
             sum(diamond_call_secs) / len(diamond_call_secs) if diamond_call_secs else 0.0
         )
 
+        include_psc_boxed = os.environ.get("SGGG_NAV_CHECKER_PSC_BOXED", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        boxed_by_fund: Dict[str, List[Dict[str, Any]]] = {}
+        psc_boxed_sec = 0.0
+        psc_boxed_error: Optional[str] = None
+        if include_psc_boxed:
+            t_psc_boxed = time.time()
+            try:
+                from sggg.psc_boxed_positions import fetch_boxed_positions_for_funds
+
+                boxed_by_fund, _, psc_boxed_error = fetch_boxed_positions_for_funds(
+                    fund_specs,
+                    valuation_date,
+                )
+            except Exception as exc:
+                psc_boxed_error = str(exc)
+            psc_boxed_sec = time.time() - t_psc_boxed
+
         entries = [_base_entry(spec, wp, wp_prior, psc_navs) for spec in fund_specs]
 
         for idx, entry in enumerate(entries):
@@ -2725,6 +2746,7 @@ def sggg_diamond_nav_availability():
                 else:
                     entry["status"] = "error"
                     entry["error"] = str(close_err)
+                entry["boxed_positions"] = boxed_by_fund.get(entry.get("fund_id") or "", [])
                 results[idx] = entry
                 continue
 
@@ -2889,6 +2911,7 @@ def sggg_diamond_nav_availability():
 
             if summary_close:
                 entry["status"] = "available" if summary_close.get("available") else "unavailable"
+            entry["boxed_positions"] = boxed_by_fund.get(entry.get("fund_id") or "", [])
             results[idx] = entry
 
         elapsed = time.time() - started
@@ -2970,12 +2993,14 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
-                    "nav_checker_build": "sggg-class-display-v14",
+                    "nav_checker_build": "sggg-psc-boxed-v15",
                     "total_sec": round(elapsed, 2),
                     "parallel_wall_sec": round(parallel_wall_sec, 2),
                     "compliance_sec": round(compliance_sec, 2),
                     "compliance_prior_sec": round(compliance_prior_sec, 2),
                     "psc_sec": round(psc_sec, 2) if use_psc else None,
+                    "psc_boxed_sec": round(psc_boxed_sec, 2) if include_psc_boxed else None,
+                    "psc_boxed_error": psc_boxed_error,
                     "psc_enabled": use_psc,
                     "diamond_wall_sec": round(diamond_wall_sec, 2),
                     "diamond_slowest_sec": round(diamond_wall_sec, 2),

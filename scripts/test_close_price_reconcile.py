@@ -146,6 +146,64 @@ def test_option_contract_key_cross_format() -> None:
     assert reconcile_match_key(company_symbol="SPY US 06/18/26 P702") != a
 
 
+def test_option_security_field_and_long_description() -> None:
+    hyg = "opt:HYG|2026-05-22|C|80"
+    assert parse_option_contract_key("HYG 05/22/26 C80 US") == hyg
+    assert (
+        reconcile_match_key(
+            company_symbol="HYG",
+            description="Call iShares iBoxx USD High Yield Corporate Bond ETF $80 22MAY2026",
+            security="HYG 05/22/26 C80 US",
+            security_type="EquityOption",
+            underlying_company_symbol="HYG",
+        )
+        == hyg
+    )
+    dram = "opt:DRAM|2026-05-22|P|51.5"
+    assert parse_option_contract_key("DRAM 05/22/26 P51.5") == dram
+    assert parse_option_contract_key("DRAM US 05/22/26 P51.5 EQUITY") == dram
+    assert (
+        parse_option_contract_key(
+            "Put Roundhill Memory ETF $51.50 22MAY2026",
+            underlying_root="DRAM",
+        )
+        == dram
+    )
+    assert (
+        reconcile_match_key(
+            company_symbol="DRAM",
+            description="Put Roundhill Memory ETF $51.50 22MAY2026",
+            security="DRAM 05/22/26 P51.5",
+            security_type="EquityOption",
+            bbg_ticker="DRAM US 05/22/26 P51.5 EQUITY",
+        )
+        == dram
+    )
+
+
+def test_diamond_underlying_index_hyg_call() -> None:
+    from sggg.close_price_reconcile import build_underlying_ticker_index, _diamond_match_key
+
+    records = [
+        {
+            "SecurityName": "iShares iBoxx $ High Yield Corporate Bond ETF",
+            "PricingTicker": "HYG US",
+            "CompositeBBGID": "BBG000R2T3H9",
+            "ISIN": "US4642885135",
+        },
+        {
+            "SecurityName": "Call iShares iBoxx USD High Yield Corporate Bond ETF $80 22MAY2026",
+            "PricingTicker": "",
+            "UnderlyingBBGID": "BBG000R2T3H9",
+            "Quantity": 4000,
+        },
+    ]
+    idx = build_underlying_ticker_index(records)
+    assert idx.get("BBG000R2T3H9") == "HYG"
+    key = _diamond_match_key(records[1], underlying_index=idx)
+    assert key == "opt:HYG|2026-05-22|C|80"
+
+
 def test_cash_excluded() -> None:
     assert is_cash_position(company_symbol="CASH USD")
     assert reconcile_match_key(company_symbol="CASH USD") is None
@@ -287,6 +345,8 @@ if __name__ == "__main__":
     test_portfolio_details_display_ticker()
     test_match_key_equity_line_ticker()
     test_option_contract_key_cross_format()
+    test_option_security_field_and_long_description()
+    test_diamond_underlying_index_hyg_call()
     test_cash_excluded()
     test_secondary_id_merge()
     test_one_sided_alphadesk_only()

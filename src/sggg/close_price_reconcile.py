@@ -70,9 +70,37 @@ def _looks_like_option_description(text: Any) -> bool:
 
 
 _OPTION_COMPACT_RE = re.compile(
-    r"^([A-Z0-9][A-Z0-9.]*)\s+(?:(US)\s+)?(\d{1,2}/\d{1,2}/\d{2,4})\s+([PC])\s*(\d+(?:\.\d+)?)\s*(?:US)?\s*$",
+    r"^([A-Z0-9][A-Z0-9.]*)\s+(?:(US)\s+)?(\d{1,2}/\d{1,2}/\d{2,4})\s+([PC])\s*(\d+(?:\.\d+)?)(?:\s+(?:US|EQUITY))*\s*$",
     re.IGNORECASE,
 )
+_OPTION_LONG_RE = re.compile(
+    r"^(CALL|PUT)\s+.+?\$(\d+(?:\.\d+)?)\s+(\d{1,2})([A-Z]{3})(\d{2,4})\s*$",
+    re.IGNORECASE,
+)
+_MONTH_TO_NUM = {
+    "JAN": 1,
+    "FEB": 2,
+    "MAR": 3,
+    "APR": 4,
+    "MAY": 5,
+    "JUN": 6,
+    "JUL": 7,
+    "AUG": 8,
+    "SEP": 9,
+    "OCT": 10,
+    "NOV": 11,
+    "DEC": 12,
+}
+
+
+def _normalize_strike_key(strike: str) -> str:
+    try:
+        f = float(strike)
+    except ValueError:
+        return strike
+    if abs(f - round(f)) < 1e-9:
+        return str(int(round(f)))
+    return f"{f:.6f}".rstrip("0").rstrip(".")
 
 
 def _normalize_expiry_mdy(expiry: str) -> str:
@@ -88,19 +116,69 @@ def _normalize_expiry_mdy(expiry: str) -> str:
     return f"{y:04d}-{m:02d}-{d:02d}"
 
 
-def parse_option_contract_key(text: Any) -> Optional[str]:
+def _normalize_expiry_ddmonyyyy(day: str, mon: str, year: str) -> str:
+    try:
+        d = int(day)
+        y = int(year)
+        if y < 100:
+            y += 2000 if y < 70 else 1900
+        m = _MONTH_TO_NUM.get(mon.upper()[:3])
+        if not m:
+            return f"{year}-{mon}-{day}"
+        return f"{y:04d}-{m:02d}-{d:02d}"
+    except ValueError:
+        return f"{day}{mon}{year}"
+
+
+def parse_option_contract_key(
+    text: Any,
+    *,
+    underlying_root: Any = None,
+) -> Optional[str]:
     """
-    Normalize option lines like SPY 06/18/26 P675 US and SPY US 06/18/26 P702
-    to opt:SPY|2026-06-18|P|675.
+    Normalize option lines like SPY 06/18/26 P675 US, DRAM US 05/22/26 P51.5 EQUITY,
+    and AlphaDesk long names (Put Roundhill Memory ETF $51.50 22MAY2026) to
+    opt:ROOT|2026-05-22|P|51.5.
     """
     t = normalize_instrument_description(text)
     if not t:
         return None
     m = _OPTION_COMPACT_RE.match(t)
+    if m:
+        root, _mkt, expiry, cp, strike = m.groups()
+        return (
+            f"opt:{root.upper()}|{_normalize_expiry_mdy(expiry)}|{cp.upper()}|"
+            f"{_normalize_strike_key(strike)}"
+        )
+    root = _norm(underlying_root).upper()
+    if not root or len(root) > 12 or " " in root:
+        return None
+    m = _OPTION_LONG_RE.match(t)
     if not m:
         return None
-    root, _mkt, expiry, cp, strike = m.groups()
-    return f"opt:{root.upper()}|{_normalize_expiry_mdy(expiry)}|{cp.upper()}|{strike}"
+    cp_word, strike, day, mon, year = m.groups()
+    cp = "C" if cp_word.upper().startswith("C") else "P"
+    return (
+        f"opt:{root}|{_normalize_expiry_ddmonyyyy(day, mon, year)}|{cp}|"
+        f"{_normalize_strike_key(strike)}"
+    )
+
+
+def build_underlying_ticker_index(records: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Map Diamond UnderlyingBBGID / CompositeBBGID to equity root (e.g. HYG) from PricingTicker."""
+    index: Dict[str, str] = {}
+    for row in records:
+        pt = _norm(row.get("PricingTicker"))
+        if not pt:
+            continue
+        root = normalize_bbg_key(pt).split()[0] if normalize_bbg_key(pt) else ""
+        if not root or len(root) > 12:
+            continue
+        for field in ("CompositeBBGID", "UnderlyingBBGID"):
+            bbg = _norm(row.get(field))
+            if bbg:
+                index[bbg] = root
+    return index
 
 
 def is_cash_position(
@@ -366,8 +444,11 @@ def reconcile_match_key(
     isin: Any = None,
     cusip: Any = None,
     description: Any = None,
+    security: Any = None,
     security_name: Any = None,
     security_type: Any = None,
+    underlying_company_symbol: Any = None,
+    option_underlying_root: Any = None,
 ) -> Optional[str]:
     """
     Shared security key for Diamond vs PSC.
@@ -396,7 +477,15 @@ def reconcile_match_key(
         return f"sedol:{sed}"
 
     st = _norm(security_type)
+    opt_root = (
+        _norm(option_underlying_root).upper()
+        or _norm(underlying_company_symbol).upper()
+        or _norm(company_symbol).upper()
+    )
+    if opt_root and (" " in opt_root or len(opt_root) > 12):
+        opt_root = ""
     for candidate in (
+        security,
         company_symbol,
         bbg_ticker,
         security_name,
@@ -405,6 +494,11 @@ def reconcile_match_key(
         opt = parse_option_contract_key(candidate)
         if opt:
             return opt
+    if opt_root:
+        for candidate in (security, description, security_name, company_symbol):
+            opt = parse_option_contract_key(candidate, underlying_root=opt_root)
+            if opt:
+                return opt
 
     cs = _norm(company_symbol)
     sn = _norm(security_name)
@@ -478,6 +572,7 @@ def _parse_psc_reconcile_row(row: tuple) -> Dict[str, Any]:
         "quantity": float(row[8]) if row[8] is not None else 0.0,
         "close_price": float(row[9]) if row[9] is not None else None,
         "security": _norm(row[10]),
+        "underlying_company_symbol": _norm(row[11]) if len(row) > 11 else "",
     }
 
 
@@ -488,7 +583,8 @@ def fetch_psc_positions_for_reconcile(
 ) -> List[Dict[str, Any]]:
     sql = (
         "SELECT ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.BBG_TICKER, ph.ISIN, ph.CUSIP, sd.SEDOL, "
-        "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, ph.SECURITY "
+        "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, ph.SECURITY, "
+        "ph.UNDERLYING_COMPANY_SYMBOL "
         "FROM psc_position_history ph "
         "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
         "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? "
@@ -528,8 +624,10 @@ def _psc_match_key(row: Dict[str, Any]) -> Optional[str]:
         isin=row.get("isin"),
         cusip=row.get("cusip"),
         description=row.get("description"),
+        security=row.get("security"),
         security_name=row.get("company_symbol"),
         security_type=row.get("security_type"),
+        underlying_company_symbol=row.get("underlying_company_symbol"),
     )
 
 
@@ -812,7 +910,11 @@ def _normalize_quote_date(val: Any, valuation_date_iso: str) -> bool:
     return compact == val_compact
 
 
-def _diamond_match_key(row: Dict[str, Any]) -> Optional[str]:
+def _diamond_match_key(
+    row: Dict[str, Any],
+    *,
+    underlying_index: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
     sec_name = row.get("SecurityName")
     sec_type = row.get("SecurityType") or row.get("AssetType")
     if is_cash_position(
@@ -821,8 +923,18 @@ def _diamond_match_key(row: Dict[str, Any]) -> Optional[str]:
         security_type=sec_type,
     ):
         return None
+    opt_root = ""
+    if underlying_index:
+        for field in ("UnderlyingBBGID", "CompositeBBGID"):
+            bbg = _norm(row.get(field))
+            if bbg and bbg in underlying_index:
+                opt_root = underlying_index[bbg]
+                break
+    cs = _norm(row.get("CompanySymbol"))
+    if not opt_root and cs and len(cs) <= 12 and " " not in cs:
+        opt_root = cs.upper()
     return reconcile_match_key(
-        company_symbol=sec_name,
+        company_symbol=cs or sec_name,
         bbg_ticker=row.get("PricingTicker"),
         sedol=row.get("SEDOL"),
         isin=row.get("ISIN"),
@@ -830,6 +942,7 @@ def _diamond_match_key(row: Dict[str, Any]) -> Optional[str]:
         description=sec_name,
         security_name=sec_name,
         security_type=sec_type,
+        option_underlying_root=opt_root,
     )
 
 
@@ -841,6 +954,7 @@ def aggregate_diamond_by_security(
     out: Dict[str, Dict[str, Any]] = {}
     dated = [r for r in records if _normalize_quote_date(r.get("QuoteDate"), valuation_date_iso)]
     use_rows = dated if dated else records
+    underlying_index = build_underlying_ticker_index(records)
     for row in use_rows:
         sec_name = row.get("SecurityName")
         sec_type = row.get("SecurityType") or row.get("AssetType")
@@ -850,7 +964,7 @@ def aggregate_diamond_by_security(
             security_type=sec_type,
         ):
             continue
-        key = _diamond_match_key(row)
+        key = _diamond_match_key(row, underlying_index=underlying_index)
         if not key:
             continue
         signed = _diamond_signed_qty(row)

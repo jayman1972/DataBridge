@@ -284,21 +284,27 @@ def apply_diamond_price_discount(
     is_bond_like: bool = False,
 ) -> Optional[float]:
     """
-    Sinking-fund and similar bonds carry a non-zero Diamond PriceDiscount (sinking adjustment).
+    Sinking-fund bonds: PortfolioPrice is after the sinking discount; add PriceDiscount
+    back for a full-par comparable close (e.g. 71.882 + 26 ≈ 97.88 vs AlphaDesk).
 
-    PortfolioPrice is after the discount; AlphaDesk close aligns with PreDiscountPrice when
-    Diamond reports it in par points. Otherwise add PriceDiscount to the normalized close.
+    PreDiscountPrice is NOT always full par — it can be the current sinking factor (~27),
+    so only use it when it is clearly the restored quote (near normalized + discount).
     """
     discount = _nonzero_amount(price_discount)
     if discount is None:
         return normalized_close
-    if is_bond_like:
-        pre = _nonzero_amount(pre_discount_price)
-        if pre is not None and pre > 20:
-            return round(pre, 6)
     if normalized_close is None:
         return None
-    return round(normalized_close + discount, 6)
+    restored = round(normalized_close + discount, 6)
+    if not is_bond_like:
+        return restored
+    pre = _nonzero_amount(pre_discount_price)
+    if pre is None:
+        return restored
+    # Ignore sinking-factor PreDiscount (~27); accept full-par PreDiscount (~97).
+    if pre >= normalized_close + discount * 0.5 and pre >= restored - 1.0:
+        return round(pre, 6)
+    return restored
 
 
 def normalize_diamond_close_price(
@@ -317,8 +323,7 @@ def normalize_diamond_close_price(
     Diamond reports bond prices as fraction of par (0.99982); AlphaDesk uses 99.982.
     Options and equities are never scaled.
 
-    When PriceDiscount is set (sinking adjustment), restore comparable par close via
-    PreDiscountPrice or PortfolioPrice + PriceDiscount.
+    When PriceDiscount is set (sinking adjustment), add it to the normalized PortfolioPrice.
     """
     if price is None:
         return None
@@ -339,7 +344,9 @@ def normalize_diamond_close_price(
         description=description,
         security_name=security_name,
     )
-    if bond_like and 0 < p < 20:
+    has_sinking_discount = _nonzero_amount(price_discount) is not None
+    # Diamond often omits SecurityType on bonds; sinking PriceDiscount implies fractional par.
+    if (bond_like or has_sinking_discount) and 0 < p < 20:
         p = round(p * 100.0, 6)
     else:
         p = round(p, 6)
@@ -857,11 +864,14 @@ def aggregate_diamond_by_security(
             bbg_ticker=pricing,
             match_key=key,
         )
-        bond_like = is_bond_like_position(
-            security_type=sec_type,
-            company_symbol=sec_name,
-            security_name=sec_name,
-            match_key=key,
+        bond_like = (
+            is_bond_like_position(
+                security_type=sec_type,
+                company_symbol=sec_name,
+                security_name=sec_name,
+                match_key=key,
+            )
+            or _nonzero_amount(row.get("PriceDiscount")) is not None
         ) and not opt_like
         price_disc = row.get("PriceDiscount")
         close_f = normalize_diamond_close_price(

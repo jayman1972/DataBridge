@@ -61,6 +61,22 @@ def test_sinking_bond_price_discount_gnfpso() -> None:
         )
         == 97.573
     )
+    # Diamond often omits SecurityType; must still scale fractional par before adding discount.
+    assert (
+        normalize_diamond_close_price(
+            0.718267766,
+            security_name="Guara Norte Sarl 5.198% 15JUN2034",
+            price_discount=26.33,
+            pre_discount_price=97.498,
+        )
+        == 97.498
+    )
+    assert apply_diamond_price_discount(
+        27.048268,
+        price_discount=26.33,
+        pre_discount_price=27.048268,
+        is_bond_like=True,
+    ) == round(27.048268 + 26.33, 6)
     assert apply_diamond_price_discount(71.882, price_discount=26.33, is_bond_like=True) == round(
         71.882 + 26.33, 6
     )

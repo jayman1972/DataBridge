@@ -170,9 +170,11 @@ def detect_boxed_positions(positions: List[Dict[str, Any]]) -> List[Dict[str, An
             box_type = "tag_mismatch"
 
         sample = long_legs[0] if long_legs else short_legs[0]
+        ad_symbol = _norm(sample.get("company_symbol")) or _norm(sample.get("security"))
         boxes.append(
             {
                 "security_key": key,
+                "company_symbol": ad_symbol or None,
                 "description": sample.get("description") or sample.get("company_symbol"),
                 "bbg_ticker": sample.get("bbg_ticker"),
                 "sedol": sample.get("sedol"),

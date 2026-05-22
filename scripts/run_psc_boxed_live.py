@@ -96,6 +96,7 @@ def _paired_securities(positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             paired.append(
                 {
                     "security_key": key,
+                    "company_symbol": sample.get("company_symbol"),
                     "description": sample.get("description") or sample.get("company_symbol"),
                     "long_quantity": long_qty,
                     "short_quantity": short_qty,
@@ -150,7 +151,12 @@ def _print_boxes(
                 print(f"    … and {len(paired) - 20} more")
 
         for box in boxes:
-            label = box.get("description") or box.get("bbg_ticker") or box.get("security_key")
+            label = (
+                box.get("company_symbol")
+                or box.get("description")
+                or box.get("bbg_ticker")
+                or box.get("security_key")
+            )
             print(f"  BOX [{box.get('box_type')}]: {label}")
             print(f"       {box.get('box_type_label')}")
             print(

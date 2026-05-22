@@ -73,18 +73,20 @@ def test_portfolio_details_display_ticker() -> None:
     assert (
         portfolio_details_display_ticker(
             security_type="EquityOption",
-            company_symbol="USO",
-            bbg_ticker="USO 06/18/26 C87 US",
+            company_symbol="QQQ",
+            security="QQQ 05/21/26 P702 US",
+            bbg_ticker="QQQ US 05/21/26 P702 EQUITY",
         )
-        == "USO 06/18/26 C87 US"
+        == "QQQ 05/21/26 P702 US"
     )
     assert (
         portfolio_details_display_ticker(
             security_type="Bond",
-            company_symbol="TPC",
-            description="TPC 11 7/8 04/30/29",
+            company_symbol="TDW",
+            security="TDW 9.125 07-30 US",
+            description="TIDEWATER INC",
         )
-        == "TPC 11 7/8 04/30/29"
+        == "TDW 9.125 07-30 US"
     )
     assert (
         portfolio_details_display_ticker(

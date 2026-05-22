@@ -138,10 +138,11 @@ def is_bond_like_position(
     security_name: Any = None,
     match_key: Any = None,
 ) -> bool:
+    """PSC SECURITY_TYPE Bond (etc.) is authoritative; patterns are fallback for Diamond."""
+    if _is_bond_security_type(security_type):
+        return True
     mk = _norm(match_key)
     if mk.startswith("bond:"):
-        return True
-    if _is_bond_security_type(security_type):
         return True
     for text in (company_symbol, description, security_name):
         if _looks_like_bond_description(text):
@@ -181,12 +182,13 @@ def is_option_like_position(
     security_name: Any = None,
     match_key: Any = None,
 ) -> bool:
+    """PSC SECURITY_TYPE EquityOption is authoritative; patterns are fallback for Diamond."""
+    if _is_option_security_type(security_type):
+        return True
     mk = _norm(match_key)
     if mk.startswith("opt:"):
         return True
-    if _is_option_security_type(security_type):
-        return True
-    for text in (bbg_ticker, security, description, security_name, company_symbol):
+    for text in (security, bbg_ticker, description, security_name, company_symbol):
         if parse_option_contract_key(text) or _looks_like_option_description(text):
             return True
     return False
@@ -202,11 +204,10 @@ def portfolio_details_display_ticker(
     security_name: Any = None,
 ) -> str:
     """
-    Same display rules as dashboard Portfolio Details (PortfoliosTable.getDisplayedTicker).
+    Display label for reconcile Ticker column (AlphaDesk Security Ticker / ID).
 
-    Options: BBG_TICKER (e.g. SLV 06/18/26 C87 US).
-    Bonds: DESCRIPTION / bond-like SecurityName (e.g. TPC 11 7/8 04/30/29).
-    Equities: PSC SECURITY column when set (e.g. NEO.CA), else company_symbol.
+    PSC ph.SECURITY is authoritative for Bond and EquityOption (e.g. TDW 9.125 07-30 US).
+    Equities: SECURITY (e.g. ABX.CA) then company_symbol. Matching keys unchanged.
     """
     st = _norm(security_type)
     bbg = _norm(bbg_ticker)
@@ -215,31 +216,15 @@ def portfolio_details_display_ticker(
     desc = _norm(description)
     sn = _norm(security_name)
 
-    if is_option_like_position(
-        security_type=st,
-        company_symbol=cs,
-        description=desc,
-        bbg_ticker=bbg,
-        security=sec,
-        security_name=sn,
-    ):
-        return bbg or sec or desc or sn or cs or ""
+    if _is_option_security_type(st):
+        return sec or desc or cs or sn or bbg or ""
 
-    if is_bond_like_position(
-        security_type=st,
-        company_symbol=cs,
-        description=desc,
-        security_name=sn or sec,
-    ):
-        bond_lines = [
-            t
-            for t in (desc, sn, sec, bbg, cs)
-            if t and _looks_like_bond_description(t)
-        ]
-        if bond_lines:
-            return max(bond_lines, key=len)
-        if _is_bond_security_type(st):
-            return desc or sn or sec or bbg or cs or ""
+    if _is_bond_security_type(st):
+        return sec or desc or sn or cs or bbg or ""
+
+    st_u = st.upper().replace(" ", "")
+    if st_u in ("PREFERRED", "FXFORWARD") or st_u.startswith("FX"):
+        return sec or cs or desc or bbg or sn or ""
 
     return sec or cs or bbg or desc or sn or ""
 
@@ -399,6 +384,7 @@ def pick_display_ticker(
             company_symbol=dia.get("company_symbol"),
             description=dia.get("description"),
             bbg_ticker=dia.get("bbg_ticker"),
+            security=dia.get("security"),
             security_name=dia.get("security_name"),
         )
         if t:

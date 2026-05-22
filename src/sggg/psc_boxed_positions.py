@@ -4,25 +4,51 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from sggg.nav_sheet_parse import NAV_CHECKER_FUND_ID_TO_PSC, normalize_valuation_date
+from sggg.nav_sheet_parse import (
+    NAV_CHECKER_FUND_ID_TO_PSC,
+    NAV_CHECKER_PSC_PORTFOLIO_CANDIDATES,
+    normalize_valuation_date,
+)
 
 
 def _normalize_fund_guid(fund_id: str) -> str:
     return (fund_id or "").strip().upper()
 
 
-def psc_portfolio_for_fund_id(fund_id: str) -> Optional[str]:
-    """Resolve PSC portfolio name; fund GUID match is case-insensitive."""
+def _fund_guid_key(fund_id: str) -> Optional[str]:
     raw = (fund_id or "").strip()
     if not raw:
         return None
     if raw in NAV_CHECKER_FUND_ID_TO_PSC:
-        return NAV_CHECKER_FUND_ID_TO_PSC[raw]
+        return raw
     key_up = raw.upper()
-    for fid, portfolio in NAV_CHECKER_FUND_ID_TO_PSC.items():
+    for fid in NAV_CHECKER_FUND_ID_TO_PSC:
         if fid.upper() == key_up:
-            return portfolio
+            return fid
     return None
+
+
+def psc_portfolio_for_fund_id(fund_id: str) -> Optional[str]:
+    """Resolve primary PSC portfolio name; fund GUID match is case-insensitive."""
+    fid = _fund_guid_key(fund_id)
+    if not fid:
+        return None
+    return NAV_CHECKER_FUND_ID_TO_PSC.get(fid)
+
+
+def psc_portfolio_candidates_for_fund(fund_id: str) -> List[str]:
+    """Ordered PSC portfolio names to try (handles naming variants)."""
+    fid = _fund_guid_key(fund_id)
+    if not fid:
+        return []
+    primary = NAV_CHECKER_FUND_ID_TO_PSC.get(fid)
+    extras = NAV_CHECKER_PSC_PORTFOLIO_CANDIDATES.get(fid) or []
+    out: List[str] = []
+    for name in [primary, *extras]:
+        n = (name or "").strip()
+        if n and n not in out:
+            out.append(n)
+    return out
 
 # In-memory PSC position rows for follow-on price comparison (same Data Bridge process).
 _NAV_CHECKER_PSC_PORTFOLIO: Dict[str, List[Dict[str, Any]]] = {}

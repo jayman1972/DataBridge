@@ -37,7 +37,7 @@ FUND_CHOICES: List[Tuple[str, str, str]] = [
     ("41010000-7F7A-0A65-D559-45484608DB40", "tactical", "EHP Tact Growth Alt"),
     ("41323030-3031-4144-3637-303030364338", "select", "EHP Select Alt"),
     ("41010000-7F2A-D7E8-776F-45484608D91C", "strategic", "EHP Strat Inc Alt"),
-    ("01010000-801A-4995-8370-45484608DE57", "exponential", "Exponential Balanced Growth Fund"),
+    ("01010000-801A-4995-8370-45484608DE57", "exponential", "Expon Bal Grow Fund"),
 ]
 
 _ALIAS_TO_SPEC: Dict[str, Dict[str, str]] = {}

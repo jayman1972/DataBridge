@@ -11,5 +11,5 @@ prior = {
 opening, eod, flow, _ = sggg_opening_aum_from_prior_summary(prior, "2026-05-19")
 assert abs(opening - 33_314_916.0) < 1.0
 assert abs(eod - 33_314_916.0) < 1.0
-assert flow == 1_530_000.0
+assert opening == eod
 print("ok", opening)

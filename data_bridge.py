@@ -2962,7 +2962,10 @@ def sggg_diamond_nav_availability():
                     summary_close,
                     opening_equity_only=True,
                 )
-                if diamond_capital_flow is None:
+                if diamond_capital_flow is not None:
+                    # Amount still adjusts SGGG day change; omit verbose opening-equity label in UI.
+                    report_flow_label = None
+                else:
                     diamond_capital_flow, report_flow_label = capital_flow_net_from_summary(
                         summary_close,
                         opening_equity_only=False,

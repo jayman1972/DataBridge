@@ -770,7 +770,7 @@ def historical_debug():
 
 @app.route("/historical", methods=["POST"])
 def historical():
-    """Bloomberg historical data - format: { symbols, fields, start_date?, end_date? }."""
+    """Bloomberg historical data - format: { symbols, fields, start_date?, end_date?, overrides? }."""
     try:
         data = request.get_json() or {}
         symbols = data.get("symbols") or []
@@ -791,7 +791,10 @@ def historical():
             symbols[:8] if len(symbols) > 8 else symbols,
         )
 
-        # US Flash PMI: no override (RELEASE_STAGE_OVERRIDE=P fails in BDH). Use BDP + BDH from Edge Function.
+        overrides = data.get("overrides")
+        if overrides is not None and not isinstance(overrides, dict):
+            return jsonify({"error": "overrides must be an object/dict"}), 400
+
         historical_data = {}
         errors = []
         for ticker in symbols:
@@ -818,6 +821,7 @@ def historical():
                         fields=fields,
                         start_date=start_date,
                         end_date=end_date,
+                        overrides=overrides,
                     )
                     if records:
                         ser = _log_serialize(records)

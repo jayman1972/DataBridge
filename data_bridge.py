@@ -1023,11 +1023,17 @@ def sggg_portfolio():
             # Some PSC portfolios have minor naming variants (suffixes, spacing). Prefer an exact match,
             # and only fall back to a prefix LIKE when the exact match returns zero rows. This avoids
             # ambiguous matches like "EHP Alpha" accidentally pulling "EHP Alpha Hedge".
-            sql = (
+            sql_base = (
                 "SELECT "
                 "  ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.SECURITY_TYPE, "
                 "  ph.SEC_CCY AS Currency, ph.BBG_TICKER, ph.SECTOR, ph.COUNTRY, ph.LONG_SHORT, "
                 "  sd.SEDOL, "
+            )
+            sql_option_extra = (
+                "  MAX(sd.STRIKE) AS STRIKE, "
+                "  MAX(ph.SECURITY_DELTA) AS SECURITY_DELTA, "
+            )
+            sql_tail = (
                 "  SUM(ph.QUANTITY) AS QUANTITY, "
                 "  AVG(ph.AVG_PRICE) AS AVG_PRICE, "
                 "  MAX(ph.CLOSE_PRICE) AS CLOSE_PRICE, "
@@ -1047,19 +1053,37 @@ def sggg_portfolio():
                 "  ph.SEC_CCY, ph.BBG_TICKER, ph.SECTOR, ph.COUNTRY, ph.LONG_SHORT, sd.SEDOL "
                 "ORDER BY ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL"
             )
-            sql_exact = sql.replace(
-                "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
-                "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? ",
-            )
-            cursor.execute(sql_exact, (fund, query_date))
-            rows = cursor.fetchall()
-            if not rows:
-                sql_like = sql.replace(
-                    "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
-                    "WHERE ph.PORTFOLIO LIKE ? AND ph.POSN_DATE_INT = ? ",
-                )
-                cursor.execute(sql_like, (f"{fund}%", query_date))
-                rows = cursor.fetchall()
+            sql = sql_base + sql_tail
+            sql_with_options = sql_base + sql_option_extra + sql_tail
+
+            def _run_portfolio_query(sql_text: str, params: tuple):
+                cursor.execute(sql_text, params)
+                return cursor.fetchall()
+
+            rows = []
+            portfolio_sql_used = sql
+            for candidate_sql in (sql_with_options, sql):
+                try:
+                    sql_exact = candidate_sql.replace(
+                        "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
+                        "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? ",
+                    )
+                    rows = _run_portfolio_query(sql_exact, (fund, query_date))
+                    portfolio_sql_used = candidate_sql
+                    if not rows:
+                        sql_like = candidate_sql.replace(
+                            "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
+                            "WHERE ph.PORTFOLIO LIKE ? AND ph.POSN_DATE_INT = ? ",
+                        )
+                        rows = _run_portfolio_query(sql_like, (f"{fund}%", query_date))
+                        portfolio_sql_used = candidate_sql
+                    break
+                except Exception as opt_err:
+                    if candidate_sql is sql_with_options:
+                        print(f"[/sggg/portfolio] option columns unavailable, using base query: {opt_err}", flush=True)
+                        continue
+                    raise
+            has_option_columns = portfolio_sql_used is sql_with_options
             fund_nav = None
             # PORTFOLIO_NAV is the last selected column
             if rows and rows[0] and rows[0][-1] is not None:
@@ -1091,8 +1115,19 @@ def sggg_portfolio():
 
             positions = []
             for row in rows:
-                # EXPOSURE index after adding SEDOL + aggregations
-                exposure = _num(row[19]) if len(row) > 19 else None
+                if has_option_columns:
+                    strike = _num(row[11]) if len(row) > 11 else None
+                    security_delta = _num(row[12]) if len(row) > 12 else None
+                    qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, nav_i = (
+                        13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
+                    )
+                else:
+                    strike = None
+                    security_delta = None
+                    qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, nav_i = (
+                        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
+                    )
+                exposure = _num(row[exp_i]) if len(row) > exp_i else None
                 pct_nav = (exposure / fund_nav * 100) if (fund_nav and fund_nav != 0 and exposure is not None) else None
                 positions.append({
                     "strategy": _str(row[0]),
@@ -1106,17 +1141,19 @@ def sggg_portfolio():
                     "country": _str(row[8]),
                     "long_short": _str(row[9]),
                     "sedol": _str(row[10]),
-                    "quantity": _num(row[11]) if len(row) > 11 else None,
-                    "avg_price": _num(row[12]) if len(row) > 12 else None,
-                    "close_price": _num(row[13]) if len(row) > 13 else None,
-                    "price_profit": _num(row[14]) if len(row) > 14 else None,
-                    "FX_SETTLE_TO_BASE": row[15] if len(row) > 15 else None,
-                    "interest": _num(row[16]) if len(row) > 16 else None,
-                    "dividends": _num(row[17]) if len(row) > 17 else None,
-                    "value": _num(row[18]) if len(row) > 18 else None,
+                    "strike": strike,
+                    "security_delta": security_delta,
+                    "quantity": _num(row[qty_i]) if len(row) > qty_i else None,
+                    "avg_price": _num(row[avg_i]) if len(row) > avg_i else None,
+                    "close_price": _num(row[close_i]) if len(row) > close_i else None,
+                    "price_profit": _num(row[pprof_i]) if len(row) > pprof_i else None,
+                    "FX_SETTLE_TO_BASE": row[fx_i] if len(row) > fx_i else None,
+                    "interest": _num(row[int_i]) if len(row) > int_i else None,
+                    "dividends": _num(row[div_i]) if len(row) > div_i else None,
+                    "value": _num(row[val_i]) if len(row) > val_i else None,
                     "exposure": exposure,
                     "exposure_pct_nav": pct_nav,
-                    "day_profit": _num(row[20]) if len(row) > 20 else None,
+                    "day_profit": _num(row[dprof_i]) if len(row) > dprof_i else None,
                     "profit": None,  # PSC query doesn't have Profit column; can add if available
                 })
         finally:

@@ -1035,6 +1035,7 @@ def sggg_portfolio():
             )
             sql_tail = (
                 "  SUM(ph.FX_EXPOSURE_LOC) AS FX_EXPOSURE_LOC, "
+                "  SUM(ph.BETA_PCT_NAV) AS BETA_PCT_NAV, "
                 "  SUM(ph.QUANTITY) AS QUANTITY, "
                 "  AVG(ph.AVG_PRICE) AS AVG_PRICE, "
                 "  MAX(ph.CLOSE_PRICE) AS CLOSE_PRICE, "
@@ -1119,19 +1120,20 @@ def sggg_portfolio():
                 if has_option_columns:
                     strike = _num(row[11]) if len(row) > 11 else None
                     security_delta = _num(row[12]) if len(row) > 12 else None
-                    fx_loc_i, qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, nav_i = (
-                        13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+                    fx_loc_i, beta_pct_i, qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, nav_i = (
+                        13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25
                     )
                 else:
                     strike = None
                     security_delta = None
-                    fx_loc_i, qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, nav_i = (
-                        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22
+                    fx_loc_i, beta_pct_i, qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, nav_i = (
+                        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
                     )
                 exposure = _num(row[exp_i]) if len(row) > exp_i else None
                 pct_nav = (exposure / fund_nav * 100) if (fund_nav and fund_nav != 0 and exposure is not None) else None
                 fx_loc = _num(row[fx_loc_i]) if len(row) > fx_loc_i else None
                 fx_exposure_pct_nav = (fx_loc / fund_nav) if (fund_nav and fund_nav != 0 and fx_loc is not None) else None
+                beta_pct_nav = _num(row[beta_pct_i]) if len(row) > beta_pct_i else None
                 positions.append({
                     "strategy": _str(row[0]),
                     "trade_group": _str(row[1]),
@@ -1157,6 +1159,7 @@ def sggg_portfolio():
                     "exposure": exposure,
                     "exposure_pct_nav": pct_nav,
                     "fx_exposure_pct_nav": fx_exposure_pct_nav,
+                    "beta_pct_nav": beta_pct_nav,
                     "day_profit": _num(row[dprof_i]) if len(row) > dprof_i else None,
                     "profit": None,  # PSC query doesn't have Profit column; can add if available
                 })

@@ -1033,9 +1033,16 @@ def sggg_portfolio():
                 "  MAX(sd.STRIKE) AS STRIKE, "
                 "  MAX(ph.SECURITY_DELTA) AS SECURITY_DELTA, "
             )
-            sql_tail = (
-                "  SUM(ph.FX_EXPOSURE_LOC) AS FX_EXPOSURE_LOC, "
-                "  SUM(ph.BETA_PCT_NAV) AS BETA_PCT_NAV, "
+            sql_tail_from = (
+                "FROM psc_position_history ph "
+                "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
+                "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? "
+                "GROUP BY "
+                "  ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.SECURITY_TYPE, "
+                "  ph.SEC_CCY, ph.BBG_TICKER, ph.SECTOR, ph.COUNTRY, ph.LONG_SHORT, sd.SEDOL "
+                "ORDER BY ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL"
+            )
+            sql_tail_core = (
                 "  SUM(ph.QUANTITY) AS QUANTITY, "
                 "  AVG(ph.AVG_PRICE) AS AVG_PRICE, "
                 "  MAX(ph.CLOSE_PRICE) AS CLOSE_PRICE, "
@@ -1047,45 +1054,90 @@ def sggg_portfolio():
                 "  SUM(ph.EXPOSURE) AS EXPOSURE, "
                 "  SUM(ph.DAY_PROFIT) AS DAY_PROFIT, "
                 "  MAX(ph.PORTFOLIO_NAV) AS PORTFOLIO_NAV "
-                "FROM psc_position_history ph "
-                "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
-                "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? "
-                "GROUP BY "
-                "  ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.SECURITY_TYPE, "
-                "  ph.SEC_CCY, ph.BBG_TICKER, ph.SECTOR, ph.COUNTRY, ph.LONG_SHORT, sd.SEDOL "
-                "ORDER BY ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL"
             )
-            sql = sql_base + sql_tail
-            sql_with_options = sql_base + sql_option_extra + sql_tail
+
+            def _psc_metrics_fragment(mode: str) -> str:
+                # AlphaDesk columns: EXPOSURE PCT NAV, FX EXPOSURE PCT NAV, BETA PCT NAV
+                if mode == "pct_full":
+                    return (
+                        "  SUM(ph.EXPOSURE_PCT_NAV) AS EXPOSURE_PCT_NAV, "
+                        "  SUM(ph.FX_EXPOSURE_PCT_NAV) AS FX_EXPOSURE_PCT_NAV, "
+                        "  SUM(ph.BETA_PCT_NAV) AS BETA_PCT_NAV, "
+                    )
+                if mode == "pct_fx_beta":
+                    return (
+                        "  SUM(ph.FX_EXPOSURE_PCT_NAV) AS FX_EXPOSURE_PCT_NAV, "
+                        "  SUM(ph.BETA_PCT_NAV) AS BETA_PCT_NAV, "
+                    )
+                if mode == "loc_beta":
+                    return (
+                        "  SUM(ph.FX_EXPOSURE_LOC) AS FX_EXPOSURE_LOC, "
+                        "  SUM(ph.BETA_PCT_NAV) AS BETA_PCT_NAV, "
+                    )
+                return ""
+
+            def _build_portfolio_sql(metrics_mode: str, with_options: bool) -> str:
+                metrics = _psc_metrics_fragment(metrics_mode)
+                body = sql_base + (sql_option_extra if with_options else "") + metrics + sql_tail_core + sql_tail_from
+                return body
 
             def _run_portfolio_query(sql_text: str, params: tuple):
                 cursor.execute(sql_text, params)
                 return cursor.fetchall()
 
+            def _psc_pct_nav_fraction(v):
+                n = _num(v)
+                if n is None:
+                    return None
+                # PSC / AlphaDesk often stores 32.68 meaning 32.68%, not 0.3268
+                if abs(n) > 3:
+                    return n / 100.0
+                return n
+
             rows = []
-            portfolio_sql_used = sql
-            for candidate_sql in (sql_with_options, sql):
-                try:
-                    sql_exact = candidate_sql.replace(
-                        "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
-                        "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? ",
-                    )
-                    rows = _run_portfolio_query(sql_exact, (fund, query_date))
-                    portfolio_sql_used = candidate_sql
-                    if not rows:
-                        sql_like = candidate_sql.replace(
+            has_option_columns = False
+            metrics_mode = "none"
+            metrics_modes_to_try = ["pct_full", "pct_fx_beta", "loc_beta", "none"]
+
+            for metrics_mode_try in metrics_modes_to_try:
+                for with_options in (True, False):
+                    candidate_sql = _build_portfolio_sql(metrics_mode_try, with_options)
+                    try:
+                        sql_exact = candidate_sql.replace(
                             "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
-                            "WHERE ph.PORTFOLIO LIKE ? AND ph.POSN_DATE_INT = ? ",
+                            "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? ",
                         )
-                        rows = _run_portfolio_query(sql_like, (f"{fund}%", query_date))
-                        portfolio_sql_used = candidate_sql
+                        rows = _run_portfolio_query(sql_exact, (fund, query_date))
+                        if not rows:
+                            sql_like = candidate_sql.replace(
+                                "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
+                                "WHERE ph.PORTFOLIO LIKE ? AND ph.POSN_DATE_INT = ? ",
+                            )
+                            rows = _run_portfolio_query(sql_like, (f"{fund}%", query_date))
+                        if rows:
+                            has_option_columns = with_options
+                            metrics_mode = metrics_mode_try
+                            print(
+                                f"[/sggg/portfolio] metrics_mode={metrics_mode} options={with_options} rows={len(rows)}",
+                                flush=True,
+                            )
+                            break
+                    except Exception as err:
+                        if with_options:
+                            print(
+                                f"[/sggg/portfolio] query failed metrics={metrics_mode_try} options=True: {err}",
+                                flush=True,
+                            )
+                            continue
+                        print(
+                            f"[/sggg/portfolio] query failed metrics={metrics_mode_try} options=False: {err}",
+                            flush=True,
+                        )
+                if rows:
                     break
-                except Exception as opt_err:
-                    if candidate_sql is sql_with_options:
-                        print(f"[/sggg/portfolio] option columns unavailable, using base query: {opt_err}", flush=True)
-                        continue
-                    raise
-            has_option_columns = portfolio_sql_used is sql_with_options
+
+            if not rows:
+                raise RuntimeError("PSC portfolio query returned no rows for all SQL variants")
             fund_nav = None
             # PORTFOLIO_NAV is the last selected column
             if rows and rows[0] and rows[0][-1] is not None:
@@ -1117,23 +1169,49 @@ def sggg_portfolio():
 
             positions = []
             for row in rows:
-                if has_option_columns:
-                    strike = _num(row[11]) if len(row) > 11 else None
-                    security_delta = _num(row[12]) if len(row) > 12 else None
-                    fx_loc_i, beta_pct_i, qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, nav_i = (
-                        13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25
-                    )
-                else:
-                    strike = None
-                    security_delta = None
-                    fx_loc_i, beta_pct_i, qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, nav_i = (
-                        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
-                    )
+                strike = _num(row[11]) if has_option_columns and len(row) > 11 else None
+                security_delta = _num(row[12]) if has_option_columns and len(row) > 12 else None
+                i = 13 if has_option_columns else 11
+
+                exposure_pct_nav_frac = None
+                fx_exposure_pct_nav = None
+                beta_pct_nav = None
+
+                if metrics_mode == "pct_full":
+                    exposure_pct_nav_frac = _psc_pct_nav_fraction(row[i] if len(row) > i else None)
+                    fx_exposure_pct_nav = _psc_pct_nav_fraction(row[i + 1] if len(row) > i + 1 else None)
+                    beta_pct_nav = _psc_pct_nav_fraction(row[i + 2] if len(row) > i + 2 else None)
+                    i += 3
+                elif metrics_mode == "pct_fx_beta":
+                    fx_exposure_pct_nav = _psc_pct_nav_fraction(row[i] if len(row) > i else None)
+                    beta_pct_nav = _psc_pct_nav_fraction(row[i + 1] if len(row) > i + 1 else None)
+                    i += 2
+                elif metrics_mode == "loc_beta":
+                    fx_loc = _num(row[i] if len(row) > i else None)
+                    beta_pct_nav = _psc_pct_nav_fraction(row[i + 1] if len(row) > i + 1 else None)
+                    if fund_nav and fund_nav != 0 and fx_loc is not None:
+                        fx_exposure_pct_nav = fx_loc / fund_nav
+                    i += 2
+
+                qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, nav_i = (
+                    i,
+                    i + 1,
+                    i + 2,
+                    i + 3,
+                    i + 4,
+                    i + 5,
+                    i + 6,
+                    i + 7,
+                    i + 8,
+                    i + 9,
+                    i + 10,
+                )
                 exposure = _num(row[exp_i]) if len(row) > exp_i else None
-                pct_nav = (exposure / fund_nav * 100) if (fund_nav and fund_nav != 0 and exposure is not None) else None
-                fx_loc = _num(row[fx_loc_i]) if len(row) > fx_loc_i else None
-                fx_exposure_pct_nav = (fx_loc / fund_nav) if (fund_nav and fund_nav != 0 and fx_loc is not None) else None
-                beta_pct_nav = _num(row[beta_pct_i]) if len(row) > beta_pct_i else None
+                pct_nav = (
+                    (exposure_pct_nav_frac * 100)
+                    if exposure_pct_nav_frac is not None
+                    else ((exposure / fund_nav * 100) if (fund_nav and fund_nav != 0 and exposure is not None) else None)
+                )
                 positions.append({
                     "strategy": _str(row[0]),
                     "trade_group": _str(row[1]),

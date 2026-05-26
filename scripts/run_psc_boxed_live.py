@@ -254,12 +254,17 @@ def main() -> None:
                 print(f"ERROR {exc}")
             continue
 
-        boxed_by_fund, positions_by_fund, err = fetch_boxed_positions_for_funds(
+        boxed_by_fund, positions_by_fund, err, posn_dates_by_fund = fetch_boxed_positions_for_funds(
             fund_specs,
             valuation_date,
             store_portfolios=False,
             dsn=args.dsn,
         )
+        if posn_dates_by_fund:
+            print(
+                "    note: PSC posn-date fallback used for: "
+                + ", ".join(f"{fid}={d}" for fid, d in posn_dates_by_fund.items())
+            )
         n = _print_boxes(
             valuation_date,
             fund_specs,

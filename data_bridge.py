@@ -2367,7 +2367,7 @@ def sggg_psc_boxed_positions():
 
         dsn = (os.environ.get("SGGG_PSC_ODBC_DSN") or "PSC_VIEWER").strip() or "PSC_VIEWER"
         t0 = time.time()
-        boxed_by_fund, positions_by_fund, err = fetch_boxed_positions_for_funds(
+        boxed_by_fund, positions_by_fund, err, posn_dates_by_fund = fetch_boxed_positions_for_funds(
             fund_specs,
             valuation_date,
             store_portfolios=True,
@@ -2387,10 +2387,11 @@ def sggg_psc_boxed_positions():
                     spec["id"]: len(boxed_by_fund.get(spec["id"]) or [])
                     for spec in fund_specs
                 },
+                "psc_posn_dates_by_fund": posn_dates_by_fund,
                 "total_boxes": total_boxes,
                 "error": err,
                 "psc_boxed_sec": round(elapsed, 2),
-                "nav_checker_build": "sggg-psc-boxed-v16",
+                "nav_checker_build": "sggg-psc-boxed-v17",
             }
         )
     except Exception as e:
@@ -2963,12 +2964,18 @@ def sggg_diamond_nav_availability():
             "no",
         )
         boxed_by_fund: Dict[str, List[Dict[str, Any]]] = {}
+        psc_posn_dates_by_fund: Dict[str, str] = {}
         psc_boxed_sec = 0.0
         psc_boxed_error: Optional[str] = None
         if include_psc_boxed:
             t_psc_boxed = time.time()
             try:
-                boxed_by_fund, positions_by_fund, psc_boxed_error = fetch_boxed_positions_for_funds(
+                (
+                    boxed_by_fund,
+                    positions_by_fund,
+                    psc_boxed_error,
+                    psc_posn_dates_by_fund,
+                ) = fetch_boxed_positions_for_funds(
                     fund_specs,
                     valuation_date,
                     store_portfolios=True,
@@ -2996,6 +3003,9 @@ def sggg_diamond_nav_availability():
                 entry["boxed_positions"] = _boxed_positions_for_fund_id(
                     boxed_by_fund, entry.get("fund_id") or ""
                 )
+                _psc_actual = psc_posn_dates_by_fund.get(entry.get("fund_id") or "")
+                if _psc_actual:
+                    entry["psc_posn_date_actual"] = _psc_actual
                 results[idx] = entry
                 continue
 
@@ -3166,6 +3176,9 @@ def sggg_diamond_nav_availability():
             entry["boxed_positions"] = _boxed_positions_for_fund_id(
                 boxed_by_fund, entry.get("fund_id") or ""
             )
+            _psc_actual = psc_posn_dates_by_fund.get(entry.get("fund_id") or "")
+            if _psc_actual:
+                entry["psc_posn_date_actual"] = _psc_actual
             results[idx] = entry
 
         elapsed = time.time() - started
@@ -3247,7 +3260,7 @@ def sggg_diamond_nav_availability():
                 "diamond_calls_detail": sorted_calls,
                 "diamond_escalation": diamond_escalation,
                 "timing": {
-                    "nav_checker_build": "sggg-psc-boxed-v16",
+                    "nav_checker_build": "sggg-psc-boxed-v17",
                     "psc_boxed_total": sum(len(v or []) for v in boxed_by_fund.values())
                     if include_psc_boxed
                     else None,

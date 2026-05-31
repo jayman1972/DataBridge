@@ -59,6 +59,7 @@ For the **Diamond HTTP API** (GetPortfolio / trades), see [vendor/Diamond API Sp
 | USER_GROUP3 | varchar(20) | NO | | | |
 | POSN_STATUS | varchar(7) | NO | | | |
 | FX_EXPOSURE_LOC | decimal(20,4) | NO | 0 | | |
+| FX_EXPOSURE_DISPLAY_CCY | decimal(20,4) | YES | | | AlphaDesk “FX Exposure Display CCY”; FX % NAV = value / PORTFOLIO_NAV |
 | DAY_FX_PROFIT | decimal(19,4) | NO | | | |
 | FX_SECURITY_TO_BASE | decimal(19,9) | YES | | | |
 | FX_BASE_TO_DENOM | decimal(19,9) | YES | | | |
@@ -124,6 +125,8 @@ For the **Diamond HTTP API** (GetPortfolio / trades), see [vendor/Diamond API Sp
 - **AVG_PRICE**, **CLOSE_PRICE** – Cost and last close
 - **VALUE**, **EXPOSURE** – Position value and exposure
 - **DAY_PROFIT** – Daily P&L
+- **FX_EXPOSURE_DISPLAY_CCY** – FX exposure in portfolio display currency (AlphaDesk: “FX Exposure Display CCY”); divide by **PORTFOLIO_NAV** for FX % NAV
+- **FX_EXPOSURE_LOC** – FX exposure in local currency (legacy fallback)
 - **STRATEGY**, **TRADE_GROUP** – Grouping
 - **PORTFOLIO_NAV** – Fund NAV
 

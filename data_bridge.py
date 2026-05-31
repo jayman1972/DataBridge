@@ -1042,23 +1042,24 @@ def sggg_portfolio():
                 "  ph.SEC_CCY, ph.BBG_TICKER, ph.SECTOR, ph.COUNTRY, ph.LONG_SHORT, sd.SEDOL "
                 "ORDER BY ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL"
             )
-            sql_tail_core = (
-                "  SUM(ph.QUANTITY) AS QUANTITY, "
-                "  AVG(ph.AVG_PRICE) AS AVG_PRICE, "
-                "  MAX(ph.CLOSE_PRICE) AS CLOSE_PRICE, "
-                "  SUM(ph.PRICE_PROFIT) AS PRICE_PROFIT, "
-                "  MAX(ph.FX_SETTLE_TO_BASE) AS FX_SETTLE_TO_BASE, "
-                "  SUM(ph.INTEREST) AS INTEREST, "
-                "  SUM(ph.DIVIDENDS) AS DIVIDENDS, "
-                "  SUM(ph.VALUE) AS VALUE, "
-                "  SUM(ph.EXPOSURE) AS EXPOSURE, "
-                "  SUM(ph.DAY_PROFIT) AS DAY_PROFIT, "
-                "  SUM(ph.FX_EXPOSURE_LOC) AS FX_EXPOSURE_LOC, "
-                "  MAX(ph.PORTFOLIO_NAV) AS PORTFOLIO_NAV "
-            )
+            def _sql_tail_core(fx_exposure_col: str) -> str:
+                return (
+                    "  SUM(ph.QUANTITY) AS QUANTITY, "
+                    "  AVG(ph.AVG_PRICE) AS AVG_PRICE, "
+                    "  MAX(ph.CLOSE_PRICE) AS CLOSE_PRICE, "
+                    "  SUM(ph.PRICE_PROFIT) AS PRICE_PROFIT, "
+                    "  MAX(ph.FX_SETTLE_TO_BASE) AS FX_SETTLE_TO_BASE, "
+                    "  SUM(ph.INTEREST) AS INTEREST, "
+                    "  SUM(ph.DIVIDENDS) AS DIVIDENDS, "
+                    "  SUM(ph.VALUE) AS VALUE, "
+                    "  SUM(ph.EXPOSURE) AS EXPOSURE, "
+                    "  SUM(ph.DAY_PROFIT) AS DAY_PROFIT, "
+                    f"  SUM(ph.{fx_exposure_col}) AS FX_EXPOSURE, "
+                    "  MAX(ph.PORTFOLIO_NAV) AS PORTFOLIO_NAV "
+                )
 
             def _psc_metrics_fragment(mode: str) -> str:
-                # PSC pct columns (FX % NAV is derived from FX_EXPOSURE_LOC / PORTFOLIO_NAV in sql tail).
+                # PSC pct columns (FX % NAV = FX Exposure Display CCY / PORTFOLIO_NAV in sql tail).
                 if mode == "pct_full":
                     return (
                         "  SUM(ph.EXPOSURE_PCT_NAV) AS EXPOSURE_PCT_NAV, "
@@ -1070,9 +1071,9 @@ def sggg_portfolio():
                     )
                 return ""
 
-            def _build_portfolio_sql(metrics_mode: str, with_options: bool) -> str:
+            def _build_portfolio_sql(metrics_mode: str, with_options: bool, fx_exposure_col: str) -> str:
                 metrics = _psc_metrics_fragment(metrics_mode)
-                body = sql_base + (sql_option_extra if with_options else "") + metrics + sql_tail_core + sql_tail_from
+                body = sql_base + (sql_option_extra if with_options else "") + metrics + _sql_tail_core(fx_exposure_col) + sql_tail_from
                 return body
 
             def _run_portfolio_query(sql_text: str, params: tuple):
@@ -1091,42 +1092,48 @@ def sggg_portfolio():
             rows = []
             has_option_columns = False
             metrics_mode = "none"
+            fx_exposure_col_used = "FX_EXPOSURE_DISPLAY_CCY"
             metrics_modes_to_try = ["pct_full", "beta_only", "none"]
+            fx_exposure_cols_to_try = ("FX_EXPOSURE_DISPLAY_CCY", "FX_EXPOSURE_LOC")
 
-            for metrics_mode_try in metrics_modes_to_try:
-                for with_options in (True, False):
-                    candidate_sql = _build_portfolio_sql(metrics_mode_try, with_options)
-                    try:
-                        sql_exact = candidate_sql.replace(
-                            "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
-                            "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? ",
-                        )
-                        rows = _run_portfolio_query(sql_exact, (fund, query_date))
-                        if not rows:
-                            sql_like = candidate_sql.replace(
+            for fx_col in fx_exposure_cols_to_try:
+                for metrics_mode_try in metrics_modes_to_try:
+                    for with_options in (True, False):
+                        candidate_sql = _build_portfolio_sql(metrics_mode_try, with_options, fx_col)
+                        try:
+                            sql_exact = candidate_sql.replace(
                                 "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
-                                "WHERE ph.PORTFOLIO LIKE ? AND ph.POSN_DATE_INT = ? ",
+                                "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? ",
                             )
-                            rows = _run_portfolio_query(sql_like, (f"{fund}%", query_date))
-                        if rows:
-                            has_option_columns = with_options
-                            metrics_mode = metrics_mode_try
+                            rows = _run_portfolio_query(sql_exact, (fund, query_date))
+                            if not rows:
+                                sql_like = candidate_sql.replace(
+                                    "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
+                                    "WHERE ph.PORTFOLIO LIKE ? AND ph.POSN_DATE_INT = ? ",
+                                )
+                                rows = _run_portfolio_query(sql_like, (f"{fund}%", query_date))
+                            if rows:
+                                has_option_columns = with_options
+                                metrics_mode = metrics_mode_try
+                                fx_exposure_col_used = fx_col
+                                print(
+                                    f"[/sggg/portfolio] fx_col={fx_col} metrics_mode={metrics_mode} options={with_options} rows={len(rows)}",
+                                    flush=True,
+                                )
+                                break
+                        except Exception as err:
+                            if with_options:
+                                print(
+                                    f"[/sggg/portfolio] query failed fx_col={fx_col} metrics={metrics_mode_try} options=True: {err}",
+                                    flush=True,
+                                )
+                                continue
                             print(
-                                f"[/sggg/portfolio] metrics_mode={metrics_mode} options={with_options} rows={len(rows)}",
+                                f"[/sggg/portfolio] query failed fx_col={fx_col} metrics={metrics_mode_try} options=False: {err}",
                                 flush=True,
                             )
-                            break
-                    except Exception as err:
-                        if with_options:
-                            print(
-                                f"[/sggg/portfolio] query failed metrics={metrics_mode_try} options=True: {err}",
-                                flush=True,
-                            )
-                            continue
-                        print(
-                            f"[/sggg/portfolio] query failed metrics={metrics_mode_try} options=False: {err}",
-                            flush=True,
-                        )
+                    if rows:
+                        break
                 if rows:
                     break
 

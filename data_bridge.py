@@ -1053,25 +1053,19 @@ def sggg_portfolio():
                 "  SUM(ph.VALUE) AS VALUE, "
                 "  SUM(ph.EXPOSURE) AS EXPOSURE, "
                 "  SUM(ph.DAY_PROFIT) AS DAY_PROFIT, "
+                "  SUM(ph.FX_EXPOSURE_LOC) AS FX_EXPOSURE_LOC, "
                 "  MAX(ph.PORTFOLIO_NAV) AS PORTFOLIO_NAV "
             )
 
             def _psc_metrics_fragment(mode: str) -> str:
-                # AlphaDesk columns: EXPOSURE PCT NAV, FX EXPOSURE PCT NAV, BETA PCT NAV
+                # PSC pct columns (FX % NAV is derived from FX_EXPOSURE_LOC / PORTFOLIO_NAV in sql tail).
                 if mode == "pct_full":
                     return (
                         "  SUM(ph.EXPOSURE_PCT_NAV) AS EXPOSURE_PCT_NAV, "
-                        "  SUM(ph.FX_EXPOSURE_PCT_NAV) AS FX_EXPOSURE_PCT_NAV, "
                         "  SUM(ph.BETA_PCT_NAV) AS BETA_PCT_NAV, "
                     )
-                if mode == "pct_fx_beta":
+                if mode == "beta_only":
                     return (
-                        "  SUM(ph.FX_EXPOSURE_PCT_NAV) AS FX_EXPOSURE_PCT_NAV, "
-                        "  SUM(ph.BETA_PCT_NAV) AS BETA_PCT_NAV, "
-                    )
-                if mode == "loc_beta":
-                    return (
-                        "  SUM(ph.FX_EXPOSURE_LOC) AS FX_EXPOSURE_LOC, "
                         "  SUM(ph.BETA_PCT_NAV) AS BETA_PCT_NAV, "
                     )
                 return ""
@@ -1097,7 +1091,7 @@ def sggg_portfolio():
             rows = []
             has_option_columns = False
             metrics_mode = "none"
-            metrics_modes_to_try = ["pct_full", "pct_fx_beta", "loc_beta", "none"]
+            metrics_modes_to_try = ["pct_full", "beta_only", "none"]
 
             for metrics_mode_try in metrics_modes_to_try:
                 for with_options in (True, False):
@@ -1179,21 +1173,13 @@ def sggg_portfolio():
 
                 if metrics_mode == "pct_full":
                     exposure_pct_nav_frac = _psc_pct_nav_fraction(row[i] if len(row) > i else None)
-                    fx_exposure_pct_nav = _psc_pct_nav_fraction(row[i + 1] if len(row) > i + 1 else None)
-                    beta_pct_nav = _psc_pct_nav_fraction(row[i + 2] if len(row) > i + 2 else None)
-                    i += 3
-                elif metrics_mode == "pct_fx_beta":
-                    fx_exposure_pct_nav = _psc_pct_nav_fraction(row[i] if len(row) > i else None)
                     beta_pct_nav = _psc_pct_nav_fraction(row[i + 1] if len(row) > i + 1 else None)
                     i += 2
-                elif metrics_mode == "loc_beta":
-                    fx_loc = _num(row[i] if len(row) > i else None)
-                    beta_pct_nav = _psc_pct_nav_fraction(row[i + 1] if len(row) > i + 1 else None)
-                    if fund_nav and fund_nav != 0 and fx_loc is not None:
-                        fx_exposure_pct_nav = fx_loc / fund_nav
-                    i += 2
+                elif metrics_mode == "beta_only":
+                    beta_pct_nav = _psc_pct_nav_fraction(row[i] if len(row) > i else None)
+                    i += 1
 
-                qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, nav_i = (
+                qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, fx_exp_i, nav_i = (
                     i,
                     i + 1,
                     i + 2,
@@ -1205,8 +1191,13 @@ def sggg_portfolio():
                     i + 8,
                     i + 9,
                     i + 10,
+                    i + 11,
                 )
                 exposure = _num(row[exp_i]) if len(row) > exp_i else None
+                fx_exposure = _num(row[fx_exp_i]) if len(row) > fx_exp_i else None
+                fx_exposure_pct_nav = None
+                if fund_nav and fund_nav != 0 and fx_exposure is not None:
+                    fx_exposure_pct_nav = fx_exposure / fund_nav
                 pct_nav = (
                     (exposure_pct_nav_frac * 100)
                     if exposure_pct_nav_frac is not None
@@ -1236,6 +1227,7 @@ def sggg_portfolio():
                     "value": _num(row[val_i]) if len(row) > val_i else None,
                     "exposure": exposure,
                     "exposure_pct_nav": pct_nav,
+                    "fx_exposure": fx_exposure,
                     "fx_exposure_pct_nav": fx_exposure_pct_nav,
                     "beta_pct_nav": beta_pct_nav,
                     "day_profit": _num(row[dprof_i]) if len(row) > dprof_i else None,

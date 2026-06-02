@@ -878,11 +878,15 @@ def reference():
         if overrides is not None and not isinstance(overrides, dict):
             return jsonify({"error": "overrides must be an object/dict"}), 400
 
-        print(f"[DataBridge reference] REQUEST (full): symbols={symbols} fields={fields}", flush=True)
+        print(
+            f"[DataBridge reference] REQUEST (full): symbols={symbols} fields={fields} overrides={overrides}",
+            flush=True,
+        )
         _bbg_logger.info(
-            "reference REQUEST symbols=%d fields=%s sample=%s",
+            "reference REQUEST symbols=%d fields=%s overrides=%s sample=%s",
             len(symbols),
             fields,
+            overrides,
             symbols[:12] if len(symbols) > 12 else symbols,
         )
         ref_data = bloomberg_client.get_reference_data(tickers=symbols, fields=fields, overrides=overrides)

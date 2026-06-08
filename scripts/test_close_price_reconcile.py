@@ -13,12 +13,14 @@ from sggg.close_price_reconcile import (
     apply_diamond_price_discount,
     diamond_futures_contract_multiplier,
     is_cash_position,
+    merge_orphan_positions_by_close_and_notional,
     merge_positions_by_secondary_ids,
     normalize_bbg_key,
     normalize_diamond_close_price,
     normalize_diamond_futures_close,
     parse_futures_contract_key,
     parse_option_contract_key,
+    parse_preferred_bbg_key,
     portfolio_details_display_ticker,
     reconcile_match_key,
 )
@@ -138,8 +140,61 @@ def test_portfolio_details_display_ticker() -> None:
 
 
 def test_match_key_equity_line_ticker() -> None:
-    assert reconcile_match_key(bbg_ticker="HYG US Equity") == "line:HYG US"
+    assert reconcile_match_key(bbg_ticker="HYG US Equity") == "line:HYG"
+    assert reconcile_match_key(company_symbol="PSNY.US") == "line:PSNY"
     assert reconcile_match_key(bbg_ticker="HYG US", sedol="B4PJP68") == "sedol:B4PJP68"
+
+
+def test_preferred_bbg_match_key() -> None:
+    bep = "pref:BEP.PR.S.CA"
+    assert parse_preferred_bbg_key("BEP.PR.S.CA") == bep
+    assert reconcile_match_key(company_symbol="BEP.PR.S.CA", security_type="Preferred") == bep
+    assert reconcile_match_key(bbg_ticker="PWI.PR.A.CA") == "pref:PWI.PR.A.CA"
+
+
+def test_orphan_merge_preferred_and_equity() -> None:
+    psc = {
+        "pref:BEP.PR.S.CA": {
+            "match_key": "pref:BEP.PR.S.CA",
+            "ticker": "BEP.PR.S.CA",
+            "shares": 34000.0,
+            "close_price": 25.0,
+            "qty_multiplier": 1.0,
+            "security_type": "Preferred",
+            "is_preferred_like": True,
+        },
+        "line:PSNY": {
+            "match_key": "line:PSNY",
+            "ticker": "PSNY.US",
+            "shares": 14.0,
+            "close_price": 19.65,
+            "qty_multiplier": 1.0,
+            "security_type": "Stock",
+        },
+    }
+    dia = {
+        "line:BROOKFIELD RENEWABLE PARTNERS LP CLASS A PFD 5.75% - SERIES19": {
+            "match_key": "line:BROOKFIELD RENEWABLE PARTNERS LP CLASS A PFD 5.75% - SERIES19",
+            "ticker": "Brookfield Renewable Partners LP Class A PFD 5.75% - Series19",
+            "shares": 34000.0,
+            "close_price": 25.0,
+            "qty_multiplier": 1.0,
+            "security_type": "Preferred",
+            "is_preferred_like": True,
+        },
+        "line:POLESTAR AUTOMOTIVE HOLDING UK PLC": {
+            "match_key": "line:POLESTAR AUTOMOTIVE HOLDING UK PLC",
+            "ticker": "Polestar Automotive Holding UK PLC",
+            "shares": 14.0,
+            "close_price": 19.65,
+            "qty_multiplier": 1.0,
+            "security_type": "Stock",
+        },
+    }
+    psc_out, dia_out, n = merge_orphan_positions_by_close_and_notional(psc, dia)
+    assert n == 2
+    assert set(psc_out.keys()) == set(dia_out.keys())
+    assert len(psc_out) == 2
 
 
 def test_option_contract_key_cross_format() -> None:
@@ -430,6 +485,8 @@ if __name__ == "__main__":
     test_cadusd_cash_excluded()
     test_portfolio_details_display_ticker()
     test_match_key_equity_line_ticker()
+    test_preferred_bbg_match_key()
+    test_orphan_merge_preferred_and_equity()
     test_option_contract_key_cross_format()
     test_option_security_field_and_long_description()
     test_diamond_underlying_index_hyg_call()

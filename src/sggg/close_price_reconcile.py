@@ -268,6 +268,118 @@ _FUTURES_PRODUCT_ROOT: Dict[str, str] = {
     "E-MINI RUSSELL": "RTY",
     "RUSSELL 2000 E-MINI": "RTY",
 }
+_PREFERRED_BBG_DOTTED_RE = re.compile(
+    r"^([A-Z0-9][A-Z0-9.-]*)\.PR\.([A-Z0-9]+)\.CA$",
+    re.IGNORECASE,
+)
+_PREFERRED_BBG_SPACED_RE = re.compile(
+    r"^([A-Z0-9][A-Z0-9.-]*)\s+PR\s+([A-Z0-9]+)(?:\s+CA)?$",
+    re.IGNORECASE,
+)
+
+
+def _is_preferred_security_type(security_type: Any) -> bool:
+    u = _norm(security_type).upper().replace(" ", "")
+    if not u:
+        return False
+    return u in ("PREFERRED", "PREFERREDSHARE", "PFD", "PREF") or "PREFERRED" in u
+
+
+def _looks_like_preferred_description(text: Any) -> bool:
+    t = normalize_instrument_description(text)
+    if not t:
+        return False
+    if re.search(r"\b(PFD|PREFERRED|PREF(?:ERRED)?\s+SH)\b", t):
+        return True
+    return bool(re.search(r"\bSERIES\s*[A-Z0-9]+\b", t) and re.search(r"\d+(?:\.\d+)?\s*%", t))
+
+
+def parse_preferred_bbg_key(text: Any) -> Optional[str]:
+    """
+    Canonical preferred key from Bloomberg symbology.
+
+    AlphaDesk: BEP.PR.S.CA / PWI.PR.A.CA. Diamond PricingTicker when populated matches directly.
+    """
+    s = _norm(text).upper()
+    if not s:
+        return None
+    s = re.sub(r"\s+(EQUITY|CORP|PFD|PREFERRED)\s*$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+", " ", s).strip()
+    dotted = s.replace(" ", "")
+    m = _PREFERRED_BBG_DOTTED_RE.match(dotted)
+    if m:
+        root, series = m.group(1).upper(), m.group(2).upper()
+        return f"pref:{root}.PR.{series}.CA"
+    m = _PREFERRED_BBG_SPACED_RE.match(s)
+    if m:
+        root, series = m.group(1).upper(), m.group(2).upper()
+        return f"pref:{root}.PR.{series}.CA"
+    return None
+
+
+def is_preferred_like_position(
+    *,
+    security_type: Any = None,
+    company_symbol: Any = None,
+    description: Any = None,
+    bbg_ticker: Any = None,
+    security: Any = None,
+    security_name: Any = None,
+    match_key: Any = None,
+) -> bool:
+    if _is_preferred_security_type(security_type):
+        return True
+    mk = _norm(match_key)
+    if mk.startswith("pref:"):
+        return True
+    for candidate in (security, bbg_ticker, company_symbol):
+        if parse_preferred_bbg_key(candidate):
+            return True
+    for text in (description, security_name, company_symbol):
+        if _looks_like_preferred_description(text):
+            return True
+    return False
+
+
+def normalize_line_equity_key(text: Any) -> str:
+    """
+    Compact equity ticker for line: keys — PSNY.US / PSNY US / ABX.CA -> PSNY / ABX.
+    Long issuer names (with spaces) pass through unchanged.
+    """
+    s = normalize_bbg_key(text)
+    if not s:
+        return ""
+    if " " in s and not re.search(r"\s+US$", s, re.IGNORECASE):
+        return s
+    m = re.match(r"^([A-Z0-9][A-Z0-9.-]*)\.(CA|US|UN|UW|UQ|CN)$", s, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    m = re.match(r"^([A-Z0-9][A-Z0-9.-]*)\s+US$", s, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    return s
+
+
+def _line_key_profile(key: str, bucket: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Classify line: keys for orphan pairing — compact ticker, long name, or preferred description."""
+    if not key.startswith("line:"):
+        return None
+    body = key[5:]
+    desc = body
+    if bucket:
+        desc = (
+            bucket.get("description")
+            or bucket.get("security_name")
+            or bucket.get("ticker")
+            or body
+        )
+    if is_preferred_like_position(description=desc, match_key=key):
+        return "preferred_desc"
+    if " " in body and len(body) > 15:
+        return "long"
+    if body:
+        return "compact"
+    return None
 
 
 def _normalize_strike_key(strike: str) -> str:
@@ -711,6 +823,11 @@ def reconcile_match_key(
             year, month = expiry
             return f"fut:{fut_root}|{year:04d}-{month:02d}"
 
+    for candidate in (security, bbg_ticker, company_symbol, cusip):
+        pref = parse_preferred_bbg_key(candidate)
+        if pref:
+            return pref
+
     cs = _norm(company_symbol)
     sn = _norm(security_name)
     desc = _norm(description)
@@ -721,12 +838,16 @@ def reconcile_match_key(
     if (_is_bond_security_type(st) or _looks_like_bond_description(desc)) and _looks_like_bond_description(desc):
         return f"bond:{normalize_instrument_description(desc)}"
 
-    # Equities / ETFs: dashboard portfolio ticker = company_symbol || bbg_ticker
-    line = cs or normalize_bbg_key(bbg_ticker) or normalize_bbg_key(sn)
-    if line:
-        return f"line:{line}"
+    # Equities / ETFs: compact tickers normalize PSNY.US / PSNY US -> PSNY; long names stay as-is.
+    for raw in (cs, bbg_ticker, sn, desc):
+        compact = normalize_line_equity_key(raw)
+        if compact and " " not in compact and len(compact) <= 12:
+            return f"line:{compact}"
+        long_name = normalize_instrument_description(raw)
+        if long_name and " " in long_name and len(long_name) > 15:
+            return f"line:{long_name}"
 
-    bbg = normalize_bbg_key(bbg_ticker)
+    bbg = normalize_line_equity_key(bbg_ticker)
     if bbg:
         return f"line:{bbg}"
     return None
@@ -869,7 +990,7 @@ def _merge_bucket_into(target: Dict[str, Any], source: Dict[str, Any]) -> None:
 
 def _canonical_reconcile_key(*keys: str) -> str:
     """Pick one shared key when PSC and Diamond used different primary keys."""
-    order = ("isin:", "cusip:", "sedol:", "opt:", "fut:", "bond:", "line:")
+    order = ("isin:", "cusip:", "sedol:", "opt:", "fut:", "pref:", "bond:", "line:")
     for prefix in order:
         for k in keys:
             if k.startswith(prefix):
@@ -1001,6 +1122,130 @@ def merge_fund_unit_holdings_by_navpu(
     return psc_by_key, dia_by_key, merges
 
 
+def _closes_match_for_orphan_merge(
+    psc_close: Optional[float],
+    dia_close: Optional[float],
+) -> bool:
+    if psc_close is None or dia_close is None:
+        return False
+    pc, dc = float(psc_close), float(dia_close)
+    if abs(pc - dc) <= 0.011:
+        return True
+    denom = max(abs(pc), abs(dc), 1e-9)
+    return abs(pc - dc) / denom <= 0.0002
+
+
+def _orphan_pair_allowed(
+    pk: str,
+    psc: Dict[str, Any],
+    dk: str,
+    dia: Dict[str, Any],
+) -> bool:
+    if psc.get("is_option_like") or dia.get("is_option_like"):
+        return False
+    if psc.get("is_futures_like") or dia.get("is_futures_like"):
+        return False
+    if (psc.get("is_bond_like") or dia.get("is_bond_like")) and not (
+        is_preferred_like_position(
+            security_type=psc.get("security_type"),
+            company_symbol=psc.get("company_symbol"),
+            description=psc.get("description"),
+            bbg_ticker=psc.get("bbg_ticker"),
+            match_key=pk,
+        )
+        or is_preferred_like_position(
+            security_type=dia.get("security_type"),
+            company_symbol=dia.get("company_symbol"),
+            description=dia.get("description") or dia.get("security_name"),
+            security_name=dia.get("security_name"),
+            bbg_ticker=dia.get("bbg_ticker"),
+            match_key=dk,
+        )
+    ):
+        return False
+
+    p_pref = pk.startswith("pref:") or is_preferred_like_position(
+        security_type=psc.get("security_type"),
+        company_symbol=psc.get("company_symbol"),
+        description=psc.get("description") or psc.get("ticker"),
+        bbg_ticker=psc.get("bbg_ticker"),
+        match_key=pk,
+    )
+    d_pref = dk.startswith("pref:") or is_preferred_like_position(
+        security_type=dia.get("security_type"),
+        company_symbol=dia.get("company_symbol"),
+        description=dia.get("description") or dia.get("security_name") or dia.get("ticker"),
+        security_name=dia.get("security_name") or dia.get("ticker"),
+        bbg_ticker=dia.get("bbg_ticker"),
+        match_key=dk,
+    )
+    if p_pref and d_pref:
+        return True
+
+    p_prof = _line_key_profile(pk, psc)
+    d_prof = _line_key_profile(dk, dia)
+    if p_prof == "compact" and d_prof == "long":
+        return True
+    if p_prof == "long" and d_prof == "compact":
+        return True
+    return False
+
+
+def merge_orphan_positions_by_close_and_notional(
+    psc_by_key: Dict[str, Dict[str, Any]],
+    dia_by_key: Dict[str, Dict[str, Any]],
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], int]:
+    """
+    Pair unmatched PSC/Diamond rows when closes and notionals align.
+
+    Handles preferreds (BEP.PR.S.CA vs long PFD description) and equities where
+    AlphaDesk has a compact ticker but Diamond only has the issuer name (PSNY.US vs Polestar...).
+    """
+    psc_only = [k for k in psc_by_key if k not in dia_by_key]
+    dia_only = [k for k in dia_by_key if k not in psc_by_key]
+    used_dia: set = set()
+    merges = 0
+
+    for pk in list(psc_only):
+        psc = psc_by_key.get(pk)
+        if not psc:
+            continue
+        pc = psc.get("close_price")
+        if pc is None or float(pc) <= 0:
+            continue
+        best_dk: Optional[str] = None
+        best_score = 999.0
+        for dk in dia_only:
+            if dk in used_dia:
+                continue
+            dia = dia_by_key.get(dk)
+            if not dia:
+                continue
+            if not _orphan_pair_allowed(pk, psc, dk, dia):
+                continue
+            dc = dia.get("close_price")
+            if not _closes_match_for_orphan_merge(pc, dc):
+                continue
+            pn = _position_notional(psc)
+            dn = _position_notional(dia)
+            if pn < 100 or dn < 100:
+                continue
+            nv_rel = abs(pn - dn) / max(pn, dn)
+            if nv_rel > 0.05:
+                continue
+            if nv_rel < best_score:
+                best_score = nv_rel
+                best_dk = dk
+        if best_dk:
+            ck = _canonical_reconcile_key(pk, best_dk)
+            _rename_bucket(psc_by_key, pk, ck)
+            _rename_bucket(dia_by_key, best_dk, ck)
+            used_dia.add(best_dk)
+            merges += 1
+
+    return psc_by_key, dia_by_key, merges
+
+
 def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Roll PSC legs up to one row per reconcile_match_key (net shares, one close)."""
     out: Dict[str, Dict[str, Any]] = {}
@@ -1035,6 +1280,14 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             cusip=row.get("cusip"),
             match_key=key,
         )
+        pref_like = is_preferred_like_position(
+            security_type=row.get("security_type"),
+            company_symbol=row.get("company_symbol"),
+            description=row.get("description"),
+            bbg_ticker=row.get("bbg_ticker"),
+            security=row.get("security"),
+            match_key=key,
+        )
         contract_size = row.get("contract_size") or row.get("underlying_contract_size")
         mult = notional_quantity_multiplier(
             row.get("security_type"),
@@ -1055,7 +1308,7 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                 company_symbol=row.get("company_symbol"),
                 description=row.get("description"),
                 match_key=key,
-            ) and not opt_like and not fut_like
+            ) and not opt_like and not fut_like and not pref_like
             bucket = {
                 "match_key": key,
                 "ticker": display,
@@ -1073,6 +1326,7 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                 "is_bond_like": bond_like,
                 "is_option_like": opt_like,
                 "is_futures_like": fut_like,
+                "is_preferred_like": pref_like,
             }
             out[key] = bucket
         bucket["shares"] = float(bucket["shares"]) + signed
@@ -1223,6 +1477,13 @@ def aggregate_diamond_by_security(
             cusip=row.get("CUSIP"),
             match_key=key,
         )
+        pref_like = is_preferred_like_position(
+            security_type=sec_type,
+            company_symbol=sec_name,
+            security_name=sec_name,
+            bbg_ticker=pricing,
+            match_key=key,
+        )
         bond_like = (
             is_bond_like_position(
                 security_type=sec_type,
@@ -1231,7 +1492,7 @@ def aggregate_diamond_by_security(
                 match_key=key,
             )
             or _nonzero_amount(row.get("PriceDiscount")) is not None
-        ) and not opt_like and not fut_like
+        ) and not opt_like and not fut_like and not pref_like
         price_disc = row.get("PriceDiscount")
         if fut_like:
             close_f = normalize_diamond_futures_close(row)
@@ -1276,6 +1537,7 @@ def aggregate_diamond_by_security(
                 "is_bond_like": bond_like,
                 "is_option_like": opt_like,
                 "is_futures_like": fut_like,
+                "is_preferred_like": pref_like,
             }
             out[key] = bucket
         bucket["shares"] = float(bucket["shares"]) + signed
@@ -1399,6 +1661,10 @@ def build_close_price_reconciliation(
         psc_by_key, diamond_by_key
     )
     meta["fund_unit_merges"] = fund_merges
+    psc_by_key, diamond_by_key, orphan_merges = merge_orphan_positions_by_close_and_notional(
+        psc_by_key, diamond_by_key
+    )
+    meta["orphan_close_merges"] = orphan_merges
 
     all_keys = sorted(set(psc_by_key.keys()) | set(diamond_by_key.keys()))
     lines: List[Dict[str, Any]] = []

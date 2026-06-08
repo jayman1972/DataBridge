@@ -7,13 +7,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sggg.close_price_reconcile import (
     _compute_dollar_difference,
+    _diamond_match_key,
     aggregate_psc_by_security,
     align_diamond_bond_close,
     apply_diamond_price_discount,
+    diamond_futures_contract_multiplier,
     is_cash_position,
     merge_positions_by_secondary_ids,
     normalize_bbg_key,
     normalize_diamond_close_price,
+    normalize_diamond_futures_close,
+    parse_futures_contract_key,
     parse_option_contract_key,
     portfolio_details_display_ticker,
     reconcile_match_key,
@@ -298,6 +302,88 @@ def test_options_contract_multiplier() -> None:
     assert dollar_diff == round(10 * 100 * (5.30 - 5.25), 2)
 
 
+def test_futures_contract_key_nqm6() -> None:
+    nq = "fut:NQ|2026-06"
+    assert parse_futures_contract_key("NQM6 US") == nq
+    assert parse_futures_contract_key("NQM6 Index") == nq
+    assert (
+        reconcile_match_key(
+            bbg_ticker="NQM6 US",
+            security_type="Futures",
+        )
+        == nq
+    )
+    assert (
+        reconcile_match_key(
+            company_symbol="NASDAQ 100 E-MINI Jun26",
+            security_name="NASDAQ 100 E-MINI Jun26",
+            security_type="Futures",
+        )
+        == nq
+    )
+
+
+def test_diamond_futures_close_notional_to_index() -> None:
+    row = {
+        "PortfolioPrice": 609765.0,
+        "QuantityMultiplier": 20.0,
+        "PreDiscountPrice": 0.0,
+        "PriceMultiplier": 0.05,
+    }
+    assert normalize_diamond_futures_close(row) == 30488.25
+    assert diamond_futures_contract_multiplier(row) == 20.0
+    spi = {
+        "PortfolioPrice": 153875.0,
+        "PriceMultiplier": 0.04,
+        "PreDiscountPrice": 6155.0,
+        "QuantityMultiplier": 25.0,
+    }
+    assert normalize_diamond_futures_close(spi) == 6155.0
+
+
+def test_futures_match_and_price_reconcile() -> None:
+    psc_rows = [
+        {
+            "company_symbol": "NQM6",
+            "description": "NASDAQ 100 E-MINI Jun26",
+            "bbg_ticker": "NQM6 US",
+            "security": "NQM6 US",
+            "isin": "",
+            "cusip": "",
+            "sedol": "",
+            "security_type": "Futures",
+            "long_short": "LONG",
+            "quantity": 28,
+            "close_price": 30488.25,
+            "contract_size": 20.0,
+            "underlying_contract_size": 20.0,
+        },
+    ]
+    psc = aggregate_psc_by_security(psc_rows)
+    dia_key = _diamond_match_key(
+        {
+            "SecurityName": "NASDAQ 100 E-MINI Jun26",
+            "SecurityType": "Futures",
+            "PricingTicker": "NQM6 Index",
+            "PortfolioPrice": 609765.0,
+            "QuantityMultiplier": 20.0,
+            "Quantity": 28,
+        }
+    )
+    assert dia_key == "fut:NQ|2026-06"
+    assert next(iter(psc.keys())) == dia_key
+    psc_bucket = next(iter(psc.values()))
+    _, dollar_diff, _ = _compute_dollar_difference(
+        psc_bucket,
+        {
+            "shares": 28.0,
+            "close_price": 30488.25,
+            "qty_multiplier": 20.0,
+        },
+    )
+    assert dollar_diff == 0.0
+
+
 def test_aggregate_psc_net_shares() -> None:
     rows = [
         {
@@ -352,5 +438,8 @@ if __name__ == "__main__":
     test_one_sided_alphadesk_only()
     test_one_sided_diamond_only()
     test_options_contract_multiplier()
+    test_futures_contract_key_nqm6()
+    test_diamond_futures_close_notional_to_index()
+    test_futures_match_and_price_reconcile()
     test_aggregate_psc_net_shares()
     print("ok")

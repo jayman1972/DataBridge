@@ -262,6 +262,10 @@ class BLPAPIClient(BloombergClientBase):
 
                                         if "close_price" in record or len(record) > 1:
                                             records.append(record)
+                                        elif dataPoint.hasElement("date") and any(
+                                            dataPoint.hasElement(f) for f in fields
+                                        ):
+                                            records.append(record)
                                 elif _debug:
                                     print(f"[BLPAPI] No fieldData values - response empty")
                             elif _debug:

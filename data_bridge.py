@@ -2436,7 +2436,7 @@ def sggg_close_price_reconciliation():
                 "lines": lines,
                 "meta": meta,
                 "timing_sec": round(time.time() - t0, 2),
-                "nav_checker_build": "sggg-close-price-v29",
+                "nav_checker_build": "sggg-close-price-v30",
             }
         )
     except Exception as e:

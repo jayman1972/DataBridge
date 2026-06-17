@@ -357,6 +357,47 @@ def test_options_contract_multiplier() -> None:
     assert dollar_diff == round(10 * 100 * (5.30 - 5.25), 2)
 
 
+def test_futures_contract_key_nqu6_sep26() -> None:
+    nq = "fut:NQ|2026-09"
+    assert parse_futures_contract_key("NQU6 US") == nq
+    assert parse_futures_contract_key("NQU6 Index") == nq
+    assert (
+        reconcile_match_key(
+            bbg_ticker="NQU6 Index",
+            security_type="Futures",
+        )
+        == nq
+    )
+    assert (
+        reconcile_match_key(
+            company_symbol="NASDAQ 100 E-MINI Sep26",
+            security_name="NASDAQ 100 E-MINI Sep26",
+            security_type="Futures",
+        )
+        == nq
+    )
+    assert (
+        reconcile_match_key(
+            company_symbol="NQU6 Index",
+            description="NASDAQ 100 E-MINI Sep26",
+            cusip="NQU6",
+            security_type="Futures",
+        )
+        == nq
+    )
+    assert (
+        _diamond_match_key(
+            {
+                "SecurityName": "NASDAQ 100 E-MINI Sep26",
+                "SecurityType": "Futures",
+                "PricingTicker": "NQU6 Index",
+                "CUSIP": "NQU6",
+            }
+        )
+        == nq
+    )
+
+
 def test_futures_contract_key_nqm6() -> None:
     nq = "fut:NQ|2026-06"
     assert parse_futures_contract_key("NQM6 US") == nq
@@ -394,6 +435,43 @@ def test_diamond_futures_close_notional_to_index() -> None:
         "QuantityMultiplier": 25.0,
     }
     assert normalize_diamond_futures_close(spi) == 6155.0
+
+
+def test_futures_match_nqu6_sep26_with_pseudo_cusip() -> None:
+    """Diamond/PSC both store NQU6 as CUSIP — must still match on contract key."""
+    nq = "fut:NQ|2026-09"
+    psc_rows = [
+        {
+            "company_symbol": "NQU6 Index",
+            "description": "NASDAQ 100 E-MINI Sep26",
+            "bbg_ticker": "NQU6 Index",
+            "security": "NQU6 Index",
+            "isin": "",
+            "cusip": "NQU6",
+            "sedol": "",
+            "security_type": "Futures",
+            "long_short": "LONG",
+            "quantity": 12,
+            "close_price": 30313.75,
+            "contract_size": 20.0,
+            "underlying_contract_size": 20.0,
+        },
+    ]
+    psc = aggregate_psc_by_security(psc_rows)
+    dia_key = _diamond_match_key(
+        {
+            "SecurityName": "NASDAQ 100 E-MINI Sep26",
+            "SecurityType": "Futures",
+            "PricingTicker": "NQU6 Index",
+            "CUSIP": "NQU6",
+            "PortfolioPrice": 727530.0,
+            "QuantityMultiplier": 20.0,
+            "PreDiscountPrice": 30313.75,
+            "Quantity": 12,
+        }
+    )
+    assert dia_key == nq
+    assert next(iter(psc.keys())) == dia_key
 
 
 def test_futures_match_and_price_reconcile() -> None:
@@ -495,8 +573,10 @@ if __name__ == "__main__":
     test_one_sided_alphadesk_only()
     test_one_sided_diamond_only()
     test_options_contract_multiplier()
+    test_futures_contract_key_nqu6_sep26()
     test_futures_contract_key_nqm6()
     test_diamond_futures_close_notional_to_index()
+    test_futures_match_nqu6_sep26_with_pseudo_cusip()
     test_futures_match_and_price_reconcile()
     test_aggregate_psc_net_shares()
     print("ok")

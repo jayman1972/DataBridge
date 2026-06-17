@@ -55,6 +55,18 @@ def _is_futures_security_type(security_type: Any) -> bool:
     return u == "FUTURES" or u == "FUTURE" or u.startswith("FUTURES")
 
 
+def _is_plausible_cusip(cusip: Any) -> bool:
+    """True for standard 9-character CUSIPs (not futures tickers like NQU6)."""
+    c = _norm(cusip).upper()
+    return len(c) == 9 and bool(re.fullmatch(r"[A-Z0-9]{9}", c))
+
+
+def _is_plausible_sedol(sedol: Any) -> bool:
+    """True for standard 7-character SEDOLs."""
+    s = _norm(sedol).upper()
+    return len(s) == 7 and bool(re.fullmatch(r"[A-Z0-9]{7}", s))
+
+
 def _futures_year_from_digits(year_digits: str) -> int:
     y = int(year_digits)
     if y >= 100:
@@ -122,7 +134,10 @@ def parse_futures_contract_key(
         root, year, month = parts
         return f"fut:{root}|{year:04d}-{month:02d}"
     root = _norm(product_root).upper()
-    if not root or len(root) > 6 or " " in root:
+    parsed_root = _parse_bloomberg_futures_parts(root)
+    if parsed_root:
+        root = parsed_root[0]
+    elif not root or len(root) > 6 or " " in root:
         root = _futures_product_root_from_text(text) or ""
     expiry = _parse_futures_expiry_from_description(text)
     if root and expiry:
@@ -754,9 +769,7 @@ def reconcile_match_key(
     """
     Shared security key for Diamond vs PSC.
 
-    Order: ISIN / CUSIP / SEDOL, compact option contract, compact bond line (COMPANY_SYMBOL
-    style — same as dashboard portfolio ticker), then equity portfolio line ticker.
-    Long issuer names (AlphaDesk DESCRIPTION only) are not used for bonds.
+    Order: ISIN, options, futures, plausible CUSIP/SEDOL, preferreds, bonds, equity line tickers.
     """
     if is_cash_position(
         company_symbol=company_symbol,
@@ -770,12 +783,6 @@ def reconcile_match_key(
     iso = _norm(isin).upper()
     if iso:
         return f"isin:{iso}"
-    cus = _norm(cusip).upper()
-    if cus:
-        return f"cusip:{cus}"
-    sed = _norm(sedol).upper()
-    if sed:
-        return f"sedol:{sed}"
 
     st = _norm(security_type)
     opt_root = (
@@ -801,11 +808,12 @@ def reconcile_match_key(
             if opt:
                 return opt
 
-    fut_root = _norm(company_symbol).upper()
-    if fut_root and (" " in fut_root or len(fut_root) > 6):
-        fut_root = ""
-    if not fut_root:
-        fut_root = _futures_product_root_from_text(security_name or description or company_symbol) or ""
+    fut_root = _futures_product_root_from_text(security_name or description or company_symbol) or ""
+    cs_compact = _norm(company_symbol).upper()
+    if cs_compact and " " not in cs_compact:
+        parsed_cs = _parse_bloomberg_futures_parts(cs_compact)
+        if parsed_cs:
+            fut_root = parsed_cs[0]
     for candidate in (
         security,
         bbg_ticker,
@@ -822,6 +830,13 @@ def reconcile_match_key(
         if fut_root and expiry:
             year, month = expiry
             return f"fut:{fut_root}|{year:04d}-{month:02d}"
+
+    cus = _norm(cusip).upper()
+    if cus and _is_plausible_cusip(cus):
+        return f"cusip:{cus}"
+    sed = _norm(sedol).upper()
+    if sed and _is_plausible_sedol(sed):
+        return f"sedol:{sed}"
 
     for candidate in (security, bbg_ticker, company_symbol, cusip):
         pref = parse_preferred_bbg_key(candidate)
@@ -1023,8 +1038,13 @@ def merge_positions_by_secondary_ids(
         for key, bucket in by_key.items():
             for field in ("isin", "cusip", "sedol"):
                 val = _norm(bucket.get(field)).upper()
-                if val:
-                    dest.setdefault(f"{field}:{val}", set()).add(key)
+                if not val:
+                    continue
+                if field == "cusip" and not _is_plausible_cusip(val):
+                    continue
+                if field == "sedol" and not _is_plausible_sedol(val):
+                    continue
+                dest.setdefault(f"{field}:{val}", set()).add(key)
 
     _index("psc", psc_by_key, id_to_psc)
     _index("dia", dia_by_key, id_to_dia)
@@ -1143,6 +1163,8 @@ def _orphan_pair_allowed(
 ) -> bool:
     if psc.get("is_option_like") or dia.get("is_option_like"):
         return False
+    if psc.get("is_futures_like") and dia.get("is_futures_like"):
+        return True
     if psc.get("is_futures_like") or dia.get("is_futures_like"):
         return False
     if (psc.get("is_bond_like") or dia.get("is_bond_like")) and not (

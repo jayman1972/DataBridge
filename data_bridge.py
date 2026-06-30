@@ -927,6 +927,53 @@ def reference():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/bds", methods=["POST"])
+def bds():
+    """
+    Bloomberg bulk reference data (BDS) — e.g. INDX_MEMBERS for index constituents.
+
+    Request: { "symbols": ["SPX Index"], "fields": ["INDX_MEMBERS"], "overrides": {} }
+    Response: { "bds_data": { "SPX Index": { "INDX_MEMBERS": ["AAPL US Equity", ...] } }, "errors": [] }
+    """
+    try:
+        if bloomberg_client is None:
+            return jsonify({"error": "Bloomberg client not available"}), 503
+        if not hasattr(bloomberg_client, "get_bds_data"):
+            return jsonify({"error": "Bloomberg client does not support BDS (requires BLPAPI)"}), 501
+
+        data = request.get_json() or {}
+        symbols = data.get("symbols") or []
+        fields = data.get("fields") or []
+        overrides = data.get("overrides") or None
+        if not symbols or not fields:
+            return jsonify({"error": "symbols and fields are required"}), 400
+        if overrides is not None and not isinstance(overrides, dict):
+            return jsonify({"error": "overrides must be an object/dict"}), 400
+
+        bds_data = {}
+        errors = []
+        for ticker in symbols:
+            normalized = _normalize_bloomberg_ticker(ticker)
+            bds_data[ticker] = {}
+            for field in fields:
+                try:
+                    members = bloomberg_client.get_bds_data(
+                        ticker=normalized,
+                        field=field,
+                        overrides=overrides,
+                    )
+                    bds_data[ticker][field] = members
+                except Exception as exc:
+                    errors.append(f"{ticker}/{field}: {exc}")
+                    bds_data[ticker][field] = []
+
+        return jsonify({"bds_data": bds_data, "errors": errors}), 200
+    except Exception as e:
+        _bbg_logger.error("bds failed: %s", e, exc_info=True)
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 # ---------------------------------------------------------------------------
 # SGGG / PSC connection test (for IP whitelist / OpenVPN checks)
 # ---------------------------------------------------------------------------
@@ -4206,7 +4253,7 @@ if __name__ == "__main__":
         print(f"Supabase URL: {SUPABASE_URL}")
         print(f"Listening on http://127.0.0.1:{SERVICE_PORT}")
         print()
-        print("Endpoints: /health, /bloomberg-update, /bloomberg/quotes, /quotes, /historical, /historical-debug, /reference,")
+        print("Endpoints: /health, /bloomberg-update, /bloomberg/quotes, /quotes, /historical, /historical-debug, /reference, /bds,")
         print("  /economic-calendar, /clarifi/process, /clarifi/list, /ehp/process, /sggg/portfolio,")
         print("  /sggg/options-tax-reconciliation,")
         print("  /emsx/options-closeout-check,")

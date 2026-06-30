@@ -385,6 +385,125 @@ class BLPAPIClient(BloombergClientBase):
             if own_session:
                 sess.stop()
 
+    def _extract_bulk_field_strings(self, bulk_element: Any) -> List[str]:
+        """Parse a BDS bulk field (e.g. INDX_MEMBERS) into member ticker strings."""
+        out: List[str] = []
+        if bulk_element is None or bulk_element.isNull():
+            return out
+        try:
+            n = bulk_element.numValues()
+        except Exception:
+            n = 0
+        if n <= 0:
+            return out
+        for i in range(n):
+            try:
+                row = bulk_element.getValue(i)
+            except Exception:
+                try:
+                    row = bulk_element.getValueAsElement(i)
+                except Exception:
+                    continue
+            if row is None:
+                continue
+            # Table row (complex element)
+            if hasattr(row, "numElements") and callable(getattr(row, "numElements", None)):
+                try:
+                    for j in range(row.numElements()):
+                        col = row.getElement(j)
+                        if col.isNull():
+                            continue
+                        val = _coerce_blp_reference_value(col.getValue())
+                        if isinstance(val, str) and val.strip():
+                            out.append(val.strip())
+                            break
+                    continue
+                except Exception:
+                    pass
+            val = _coerce_blp_reference_value(row)
+            if isinstance(val, str) and val.strip():
+                out.append(val.strip())
+        # Dedupe preserving order
+        seen: set[str] = set()
+        deduped: List[str] = []
+        for s in out:
+            if s not in seen:
+                seen.add(s)
+                deduped.append(s)
+        return deduped
+
+    def get_bds_data(
+        self,
+        ticker: str,
+        field: str,
+        overrides: Optional[Dict[str, str]] = None,
+    ) -> List[str]:
+        """Fetch bulk reference data (BDS) for one security/field, e.g. INDX_MEMBERS."""
+        _debug = os.environ.get("DATA_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
+        if _debug:
+            print(f"[BLPAPI BDS] ticker={ticker!r} field={field!r} overrides={overrides}")
+
+        session = self._create_session()
+        if not session:
+            raise Exception("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
+
+        try:
+            ref_data_service = session.getService(self.service)
+            blp_request = ref_data_service.createRequest("ReferenceDataRequest")
+            blp_request.getElement("securities").appendValue(ticker)
+            blp_request.getElement("fields").appendValue(field)
+
+            if overrides:
+                overrides_el = blp_request.getElement("overrides")
+                for field_id, value in overrides.items():
+                    if field_id is None or value is None:
+                        continue
+                    fid = str(field_id).strip()
+                    val = str(value).strip()
+                    if not fid or not val:
+                        continue
+                    ov = overrides_el.appendElement()
+                    ov.setElement("fieldId", fid)
+                    ov.setElement("value", val)
+
+            session.sendRequest(blp_request)
+            members: List[str] = []
+
+            while True:
+                event = session.nextEvent(500)
+                if event.eventType() in (blpapi.Event.RESPONSE, blpapi.Event.PARTIAL_RESPONSE):
+                    for msg in event:
+                        if not msg.hasElement("securityData"):
+                            continue
+                        security_data_array = msg.getElement("securityData")
+                        for idx in range(security_data_array.numValues()):
+                            security_data = security_data_array.getValueAsElement(idx)
+                            if security_data.hasElement("securityError"):
+                                err = security_data.getElement("securityError")
+                                raise Exception(
+                                    f"{err.getElementAsString('category')} - "
+                                    f"{err.getElementAsString('message')}"
+                                )
+                            field_data = security_data.getElement("fieldData")
+                            if field_data.hasElement(field):
+                                bulk_elem = field_data.getElement(field)
+                                members = self._extract_bulk_field_strings(bulk_elem)
+                            elif security_data.hasElement("fieldExceptions"):
+                                field_exceptions = security_data.getElement("fieldExceptions")
+                                for j in range(field_exceptions.numValues()):
+                                    fe = field_exceptions.getValue(j)
+                                    if fe.getElementAsString("fieldId") == field:
+                                        err_info = fe.getElement("errorInfo")
+                                        raise Exception(err_info.getElementAsString("message"))
+                if event.eventType() == blpapi.Event.RESPONSE:
+                    break
+
+            if _debug:
+                print(f"[BLPAPI BDS] ticker={ticker!r} field={field!r} members={len(members)}")
+            return members
+        finally:
+            session.stop()
+
     def open_refdata_session(self) -> Any:
         """Open a Bloomberg session with //blp/refdata available. Caller must ``session.stop()``."""
         return self._create_session()

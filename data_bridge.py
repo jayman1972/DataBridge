@@ -2534,8 +2534,8 @@ def sggg_operations_reports_latest():
     if info is None:
         return jsonify({"error": "No saved report found on Operations Reports share"}), 404
 
-    download = (request.args.get("download") or "").strip().lower() in ("1", "true", "yes")
-    if download:
+    download = (request.args.get("download") or "").strip().lower()
+    if download in ("1", "true", "yes", "cumulative", "latest"):
         path = Path(info["saved_path"])
         if not path.is_file():
             return jsonify({"error": "Saved report file is missing"}), 404
@@ -2544,6 +2544,17 @@ def sggg_operations_reports_latest():
             mimetype="text/csv",
             as_attachment=True,
             download_name=info["filename"],
+        )
+    if download == "chunk":
+        chunk = info.get("run_chunk") or {}
+        chunk_path = chunk.get("saved_path")
+        if not chunk_path or not Path(chunk_path).is_file():
+            return jsonify({"error": "No per-run chunk found for this report"}), 404
+        return send_file(
+            Path(chunk_path),
+            mimetype="text/csv",
+            as_attachment=True,
+            download_name=chunk.get("filename") or Path(chunk_path).name,
         )
 
     if info.get("start_date") and len(str(info["start_date"])) == 8:

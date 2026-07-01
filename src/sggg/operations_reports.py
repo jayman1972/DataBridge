@@ -448,6 +448,20 @@ def _etfs_sql(etf_count: int) -> str:
     """
 
 
+def _latest_run_chunk_path(report_type: str) -> Optional[Path]:
+    meta = _load_report_meta(report_type)
+    chunk = meta.get("run_chunk_path")
+    if chunk:
+        path = Path(str(chunk))
+        if path.is_file():
+            return path
+    runs_dir = _report_dir(report_type) / "runs"
+    if not runs_dir.is_dir():
+        return None
+    candidates = sorted(runs_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime)
+    return candidates[-1] if candidates else None
+
+
 def get_latest_saved_report(report_type: str) -> Optional[dict[str, Any]]:
     """Metadata for the newest cumulative operations report on disk."""
     if report_type not in OPERATIONS_REPORT_TYPES:
@@ -473,6 +487,17 @@ def get_latest_saved_report(report_type: str) -> Optional[dict[str, Any]]:
         end_compact = meta.get("end_date")
         if end_compact and len(str(end_compact)) == 8:
             download_name = f"{report_type}_{end_compact}.csv"
+    run_chunk_path = _latest_run_chunk_path(report_type)
+    run_chunk_info: Optional[dict[str, Any]] = None
+    if run_chunk_path is not None:
+        chunk_stat = run_chunk_path.stat()
+        chunk_text = _read_text_stripping_bom(run_chunk_path)
+        run_chunk_info = {
+            "saved_path": str(run_chunk_path),
+            "filename": run_chunk_path.name,
+            "row_count": max(0, len(chunk_text.splitlines()) - 1),
+            "file_size_bytes": chunk_stat.st_size,
+        }
     return {
         "report_type": report_type,
         "filename": download_name,
@@ -482,6 +507,7 @@ def get_latest_saved_report(report_type: str) -> Optional[dict[str, Any]]:
         "start_date": meta.get("start_date"),
         "end_date": meta.get("end_date"),
         "file_size_bytes": stat.st_size,
+        "run_chunk": run_chunk_info,
     }
 
 

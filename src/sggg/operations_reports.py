@@ -98,26 +98,25 @@ def format_etf_securities_text(securities: Sequence[str]) -> str:
     return ", ".join(sorted(set(securities)))
 
 
-def etf_security_like_prefix(security: str) -> str:
-    """
-    PSC sometimes stores messy SECURITY values (e.g. QQQ.US OLD, QQQ 2.US).
-    Match on the root token before the first dot: QQQ.US -> QQQ%.
-    """
-    sym = security.strip().upper()
-    root = sym.split(".", 1)[0] if "." in sym else sym
-    return f"{root}%"
+# Known PSC SECURITY duplicates — exact extras only (no prefix/wildcard matching).
+PSC_ETF_SECURITY_ALIASES: dict[str, Tuple[str, ...]] = {
+    "QQQ.US": ("QQQ.US OLD",),
+}
 
 
-def etf_security_like_patterns(securities: Sequence[str]) -> List[str]:
-    patterns: List[str] = []
+def expand_etf_securities_for_query(securities: Sequence[str]) -> List[str]:
+    """Exact IN-list for PSC, plus configured alias rows when a canonical ticker is listed."""
+    out: List[str] = []
     seen: set[str] = set()
     for security in securities:
-        pattern = etf_security_like_prefix(security)
-        if pattern in seen:
-            continue
-        seen.add(pattern)
-        patterns.append(pattern)
-    return patterns
+        sym = security.strip().upper()
+        extras = PSC_ETF_SECURITY_ALIASES.get(sym, ())
+        for candidate in (sym, *extras):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            out.append(candidate)
+    return out
 
 
 def _portfolio_placeholders(n: int) -> str:
@@ -476,16 +475,16 @@ def _gross_pnl_by_side_sql() -> str:
     """
 
 
-def _etfs_sql(pattern_count: int) -> str:
+def _etfs_sql(etf_count: int) -> str:
     portfolio_ph = _portfolio_placeholders(len(OPERATIONS_PORTFOLIOS))
-    like_ph = " OR ".join("SECURITY LIKE ?" for _ in range(pattern_count))
+    etf_ph = _portfolio_placeholders(etf_count)
     return f"""
         SELECT POSN_DATE, SECURITY, DESCRIPTION, QUANTITY,
                VALUE / FX_SETTLE_TO_BASE as LOCAL_VALUE, VALUE, PORTFOLIO, ACCOUNT
         FROM psc_position_history
         WHERE PORTFOLIO in ({portfolio_ph})
         AND POSN_DATE >= ? AND POSN_DATE <= ?
-        AND ({like_ph})
+        AND SECURITY in ({etf_ph})
         ORDER BY SECURITY, PORTFOLIO, POSN_DATE
     """
 
@@ -599,10 +598,10 @@ def run_operations_report(
             if not etf_securities:
                 raise ValueError("etf_securities required for ETF report")
             securities = list(etf_securities)
-            etf_patterns = etf_security_like_patterns(securities)
+            query_securities = expand_etf_securities_for_query(securities)
             cursor.execute(
-                _etfs_sql(len(etf_patterns)),
-                [*OPERATIONS_PORTFOLIOS, query_start_compact, end_compact, *etf_patterns],
+                _etfs_sql(len(query_securities)),
+                [*OPERATIONS_PORTFOLIOS, query_start_compact, end_compact, *query_securities],
             )
 
         columns, rows = _fetchall_dicts(cursor)
@@ -643,7 +642,7 @@ def run_operations_report(
         if report_type == REPORT_ETFS and etf_securities:
             meta["etf_fingerprint"] = _etf_list_fingerprint(etf_securities)
             meta["etf_count"] = len(etf_securities)
-            meta["etf_match_patterns"] = etf_security_like_patterns(list(etf_securities))
+            meta["etf_query_securities"] = expand_etf_securities_for_query(list(etf_securities))
         if plan.get("existing_max_date"):
             meta["previous_max_date"] = plan["existing_max_date"]
         _write_report_meta(report_type, meta)

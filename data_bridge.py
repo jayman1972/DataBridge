@@ -236,7 +236,15 @@ BLOOMBERG_MAPPINGS = [
 ]
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(
+    app,
+    resources={
+        r"/*": {
+            "origins": "*",
+            "allow_headers": ["Content-Type", "Authorization", "ngrok-skip-browser-warning"],
+        }
+    },
+)
 
 SGGG_FUND_ID_TO_PSC_PORTFOLIO: Dict[str, str] = {
     # Matches the fund list hardcoded in market-dashboard Fund Admin NAV reports.
@@ -378,7 +386,10 @@ def _json_scalar_str(value: Any) -> str:
 def add_cors_headers(response):
     response.headers.add("Access-Control-Allow-Private-Network", "true")
     response.headers.add("Access-Control-Allow-Origin", "*")
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+    response.headers.add(
+        "Access-Control-Allow-Headers",
+        "Content-Type,Authorization,ngrok-skip-browser-warning",
+    )
     response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
     return response
 

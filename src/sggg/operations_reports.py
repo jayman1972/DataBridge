@@ -53,29 +53,8 @@ OPERATIONS_PORTFOLIOS: Tuple[str, ...] = (
     "EHP Alpha Hedge",
 )
 
-# Default ETF / levered product list from get_etfs.py (SECURITY column format).
-DEFAULT_ETF_SECURITIES: Tuple[str, ...] = (
-    "CJP.CA", "SPXS.US", "SPXL.US", "TZA.US", "TNA.US", "SHY.US", "TLT.US", "IEF.US",
-    "XRE.CA", "IHYG.GB", "HYG.US", "EMB.US", "XIU.CA", "XEG.CA", "XFN.CA", "XGD.CA",
-    "IYR.US", "SVXY.US", "TBT.US", "JNK.US", "QQQ.US", "HOU.CA", "HGD.CA", "IWM.US",
-    "SPY.US", "GDXJ.US", "ERX.US", "ERY.US", "SQQQ.US", "XOP.US", "TVIX.US", "TVIXF.US",
-    "VXX.US", "DIA.US", "EHF100I", "EHF200I", "EHF250I", "EHF300I", "EHF400I", "EHF500I",
-    "EHF550I", "EHF600I", "EHF700I", "EHF800I", "ARKK.US", "EEM.US", "EWD.US", "EWG.US",
-    "EWH.US", "EWJ.US", "EWL.US", "FXI.US", "MDY.US", "XLK.US", "XLV.US", "XLY.US",
-    "USO.US", "JPST.US", "TQQQ.US", "DBA.US", "DBC.US", "GLD.US", "MYY.US", "NNRG.CA",
-    "RWM.US", "SPXU.US", "VIXM.US", "VIXY.US", "XLF.US", "SARK.US", "EWC.US",
-    "FXC.US", "DLR.CA", "XLE.US", "XLU.US", "XLP.US", "XLI.US", "XLB.US", "RCD.US",
-    "SLX.US", "SOXX.US", "SKYY.US", "KWEB.US", "XBI.US", "XME.US", "SMH.US", "TBF.US",
-    "ETHH.CA", "BNO.US", "COPX.US", "EFZ.US", "SLV.US", "URA.US", "U.U.CA", "URNM.US",
-    "HOD.CA", "XHB.US", "EWA.US", "VIS.US", "SVIX.US", "YOLO.US", "MSOS.US", "ZAG.CA",
-    "SPHB.US", "UVIX.US", "UUP.US", "SDS.US", "RSP.US", "IBIT.US", "UGA.US",
-    "IYT.US", "MAGS.US", "BIL.US", "BILS.US", "SGOV.US", "SHV.US", "TBIL.US",
-    "IYH.US", "IYM.US", "VCR.US", "XLB.CA", "PSQ.US", "ETHA.US", "IYK.US",
-    "IHF.US", "VNQ.US", "EWZ.US", "EWZS.US", "KRE.US", "VB.US", "UNL.US", "SOLQ.CA",
-    "ITB.US", "IDV.US", "VGLT.US", "TUA.US", "BWX.US", "BTAL.US", "PPH.US", "EFA.US",
-    "GDX.US", "IVV.US", "VTWO.US", "USMV.US", "EWY.US", "IJR.US",
-)
-
+# Default ETF / levered product list is managed in the Fund Admin UI (saved per user).
+# The ETF report requires etf_securities from the client.
 ETF_SECURITY_RE = re.compile(r"^[A-Z0-9]+(?:\.[A-Z0-9]+)*(?:\.[A-Z]{2,3})?$")
 
 DEFAULT_OUTPUT_DIR = os.environ.get(
@@ -105,7 +84,7 @@ def parse_etf_securities_text(text: str) -> List[str]:
 
 
 def format_etf_securities_text(securities: Sequence[str]) -> str:
-    return ", ".join(securities)
+    return ", ".join(sorted(set(securities)))
 
 
 def _portfolio_placeholders(n: int) -> str:
@@ -222,7 +201,9 @@ def run_operations_report(
     elif report_type == REPORT_GROSS_PNL_BY_SIDE:
         cursor.execute(_gross_pnl_by_side_sql(), params_base)
     else:
-        securities = list(etf_securities or DEFAULT_ETF_SECURITIES)
+        if not etf_securities:
+            raise ValueError("etf_securities required for ETF report")
+        securities = list(etf_securities)
         cursor.execute(
             _etfs_sql(len(securities)),
             [*OPERATIONS_PORTFOLIOS, start_compact, end_compact, *securities],

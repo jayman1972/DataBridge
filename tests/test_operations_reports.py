@@ -1,10 +1,8 @@
 import unittest
 
-from sggg.operations_reports import (
-    DEFAULT_ETF_SECURITIES,
-    format_etf_securities_text,
-    parse_etf_securities_text,
-)
+from sggg.operations_reports import format_etf_securities_text, parse_etf_securities_text
+
+_SAMPLE_ETFS = ("SPY.US", "EHF100I", "QQQ.US", "U.U.CA")
 
 
 class OperationsReportsParseTest(unittest.TestCase):
@@ -16,9 +14,9 @@ class OperationsReportsParseTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_etf_securities_text("SPY@US")
 
-    def test_defaults_round_trip(self):
-        text = format_etf_securities_text(DEFAULT_ETF_SECURITIES)
-        self.assertGreater(len(parse_etf_securities_text(text)), 50)
+    def test_format_sorts_alphabetically(self):
+        text = format_etf_securities_text(list(reversed(_SAMPLE_ETFS)))
+        self.assertEqual(text.split(", "), sorted(_SAMPLE_ETFS))
 
 
 if __name__ == "__main__":

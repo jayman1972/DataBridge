@@ -80,10 +80,8 @@ from sggg.diamond_nav_store import load_snapshots_bulk, snapshot_usable, upsert_
 from sggg.psc_boxed_positions import fetch_boxed_positions_for_funds
 from sggg.close_price_reconcile import fetch_close_price_reconciliation
 from sggg.operations_reports import (
-    DEFAULT_ETF_SECURITIES,
     OPERATIONS_REPORT_TYPES,
     REPORT_ETFS,
-    format_etf_securities_text,
     parse_etf_securities_text,
     run_operations_report,
 )
@@ -2534,8 +2532,8 @@ def sggg_operations_reports():
     if report_type == REPORT_ETFS:
         raw_etfs = data.get("etf_securities")
         if raw_etfs is None:
-            etf_securities = list(DEFAULT_ETF_SECURITIES)
-        elif isinstance(raw_etfs, list):
+            return jsonify({"error": "etf_securities required for ETF report"}), 400
+        if isinstance(raw_etfs, list):
             try:
                 etf_securities = parse_etf_securities_text(", ".join(str(x) for x in raw_etfs))
             except ValueError as exc:
@@ -2582,19 +2580,6 @@ def sggg_operations_reports():
                 conn.close()
             except Exception:
                 pass
-
-
-@app.route("/sggg/operations-reports/defaults", methods=["GET"])
-def sggg_operations_reports_defaults():
-    """Default ETF security list and output directory for Fund Admin operations reports."""
-    return jsonify(
-        {
-            "etf_securities": list(DEFAULT_ETF_SECURITIES),
-            "etf_securities_text": format_etf_securities_text(DEFAULT_ETF_SECURITIES),
-            "output_dir": os.environ.get("OPERATIONS_REPORTS_DIR", r"W:\Operations Reports"),
-            "report_types": sorted(OPERATIONS_REPORT_TYPES),
-        }
-    )
 
 
 @app.route("/sggg/diamond/nav-availability", methods=["GET", "POST"])

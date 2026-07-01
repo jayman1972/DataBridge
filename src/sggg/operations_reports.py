@@ -352,14 +352,14 @@ def _gross_pnl_by_side_sql() -> str:
             POSN_DATE,
             STRATEGY,
             PORTFOLIO,
-            SUM((VALUE>=0)*VALUE) As [Long Market Value],
-            SUM((VALUE<0)*VALUE) As [Short Market Value],
-            SUM((VALUE>=0)*DAY_PROFIT) As [Long PnL],
-            SUM((VALUE<0)*DAY_PROFIT) As [Short PnL],
-            SUM((VALUE>=0)*EXPOSURE)/PORTFOLIO_NAV As [Long Exposure],
-            SUM((VALUE<0)*EXPOSURE)/PORTFOLIO_NAV As [Short Exposure],
-            SUM(EXPOSURE)/PORTFOLIO_NAV As [Net Exposure],
-            (SUM((VALUE>=0)*EXPOSURE)-SUM((VALUE<0)*EXPOSURE))/PORTFOLIO_NAV As [Gross Exposure],
+            SUM((VALUE>=0)*VALUE) AS `Long Market Value`,
+            SUM((VALUE<0)*VALUE) AS `Short Market Value`,
+            SUM((VALUE>=0)*DAY_PROFIT) AS `Long PnL`,
+            SUM((VALUE<0)*DAY_PROFIT) AS `Short PnL`,
+            SUM((VALUE>=0)*EXPOSURE)/PORTFOLIO_NAV AS `Long Exposure`,
+            SUM((VALUE<0)*EXPOSURE)/PORTFOLIO_NAV AS `Short Exposure`,
+            SUM(EXPOSURE)/PORTFOLIO_NAV AS `Net Exposure`,
+            (SUM((VALUE>=0)*EXPOSURE)-SUM((VALUE<0)*EXPOSURE))/PORTFOLIO_NAV AS `Gross Exposure`,
             PORTFOLIO_NAV
         FROM psc_position_history
         WHERE POSN_DATE >= ? AND POSN_DATE <= ?

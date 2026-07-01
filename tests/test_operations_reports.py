@@ -5,6 +5,7 @@ from sggg.operations_reports import (
     REPORT_ETFS,
     _append_csv,
     _compact_add_days,
+    _gross_pnl_by_side_sql,
     _max_posn_date_in_csv,
     format_etf_securities_text,
     parse_etf_securities_text,
@@ -70,6 +71,11 @@ class OperationsReportsIncrementalTest(unittest.TestCase):
             etf_securities=["SPY.US"],
         )
         self.assertEqual(plan["reason"], "no_existing_file")
+
+    def test_gross_pnl_sql_uses_mysql_aliases_not_sql_server_brackets(self):
+        sql = _gross_pnl_by_side_sql()
+        self.assertNotIn("[Long Market Value]", sql)
+        self.assertIn("`Long Market Value`", sql)
 
 
 if __name__ == "__main__":

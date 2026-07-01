@@ -22,7 +22,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone, time as dt_time, date as date_type
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_file
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 import requests
@@ -82,6 +82,7 @@ from sggg.close_price_reconcile import fetch_close_price_reconciliation
 from sggg.operations_reports import (
     OPERATIONS_REPORT_TYPES,
     REPORT_ETFS,
+    get_latest_saved_report,
     parse_etf_securities_text,
     run_operations_report,
 )
@@ -2506,6 +2507,50 @@ def sggg_close_price_reconciliation():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/sggg/operations-reports/latest", methods=["GET"])
+def sggg_operations_reports_latest():
+    """
+    Return metadata for the newest saved operations report, or download the CSV file.
+
+    Query:
+      - report_type: country_breakdown | gross_pnl_by_side | etfs
+      - download: optional 1/true to return the file as an attachment
+    """
+    report_type = (request.args.get("report_type") or "").strip().lower()
+    if report_type not in OPERATIONS_REPORT_TYPES:
+        return jsonify(
+            {
+                "error": f"report_type must be one of: {', '.join(sorted(OPERATIONS_REPORT_TYPES))}",
+            }
+        ), 400
+
+    try:
+        info = get_latest_saved_report(report_type)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    if info is None:
+        return jsonify({"error": "No saved report found on Operations Reports share"}), 404
+
+    download = (request.args.get("download") or "").strip().lower() in ("1", "true", "yes")
+    if download:
+        path = Path(info["saved_path"])
+        if not path.is_file():
+            return jsonify({"error": "Saved report file is missing"}), 404
+        return send_file(
+            path,
+            mimetype="text/csv",
+            as_attachment=True,
+            download_name=info["filename"],
+        )
+
+    if info.get("start_date") and len(str(info["start_date"])) == 8:
+        info["start_date"] = _compact_to_ymd(str(info["start_date"]))
+    if info.get("end_date") and len(str(info["end_date"])) == 8:
+        info["end_date"] = _compact_to_ymd(str(info["end_date"]))
+    return jsonify(info)
 
 
 @app.route("/sggg/operations-reports", methods=["POST"])

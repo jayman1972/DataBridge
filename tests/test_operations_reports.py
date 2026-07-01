@@ -8,6 +8,7 @@ from sggg.operations_reports import (
     _gross_pnl_by_side_sql,
     _max_posn_date_in_csv,
     format_etf_securities_text,
+    get_latest_saved_report,
     parse_etf_securities_text,
     resolve_incremental_query_range,
 )
@@ -76,6 +77,10 @@ class OperationsReportsIncrementalTest(unittest.TestCase):
         sql = _gross_pnl_by_side_sql()
         self.assertNotIn("[Long Market Value]", sql)
         self.assertIn("`Long Market Value`", sql)
+
+    def test_get_latest_saved_report_unknown_type(self):
+        with self.assertRaises(ValueError):
+            get_latest_saved_report("not_a_report")
 
 
 if __name__ == "__main__":

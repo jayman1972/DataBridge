@@ -383,6 +383,39 @@ def _etfs_sql(etf_count: int) -> str:
     """
 
 
+def get_latest_saved_report(report_type: str) -> Optional[dict[str, Any]]:
+    """Metadata for the newest cumulative operations report on disk."""
+    if report_type not in OPERATIONS_REPORT_TYPES:
+        raise ValueError(f"Unknown report_type: {report_type}")
+    path = _find_existing_report_path(report_type)
+    if path is None or not path.is_file():
+        return None
+    meta = _load_report_meta(report_type)
+    stat = path.stat()
+    updated_at = meta.get("updated_at")
+    if not updated_at:
+        updated_at = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+    row_count = meta.get("row_count")
+    if row_count is None:
+        csv_text = _read_text_stripping_bom(path)
+        row_count = max(0, len(csv_text.splitlines()) - 1)
+    download_name = path.name
+    if path == _full_report_path(report_type):
+        end_compact = meta.get("end_date")
+        if end_compact and len(str(end_compact)) == 8:
+            download_name = f"{report_type}_{end_compact}.csv"
+    return {
+        "report_type": report_type,
+        "filename": download_name,
+        "saved_path": str(path),
+        "row_count": row_count,
+        "updated_at": updated_at,
+        "start_date": meta.get("start_date"),
+        "end_date": meta.get("end_date"),
+        "file_size_bytes": stat.st_size,
+    }
+
+
 def run_operations_report(
     cursor,
     report_type: str,

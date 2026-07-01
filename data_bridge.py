@@ -79,6 +79,14 @@ from sggg.compliance_check_estimates import compliance_aum_change_ex_flows, esti
 from sggg.diamond_nav_store import load_snapshots_bulk, snapshot_usable, upsert_snapshot
 from sggg.psc_boxed_positions import fetch_boxed_positions_for_funds
 from sggg.close_price_reconcile import fetch_close_price_reconciliation
+from sggg.operations_reports import (
+    DEFAULT_ETF_SECURITIES,
+    OPERATIONS_REPORT_TYPES,
+    REPORT_ETFS,
+    format_etf_securities_text,
+    parse_etf_securities_text,
+    run_operations_report,
+)
 
 from supabase import create_client, Client
 
@@ -2489,6 +2497,104 @@ def sggg_close_price_reconciliation():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/sggg/operations-reports", methods=["POST"])
+def sggg_operations_reports():
+    """
+    Run Fund Admin operations CSV reports against PSC (ODBC DSN=PSC_VIEWER).
+
+    Body:
+      - report_type: country_breakdown | gross_pnl_by_side | etfs
+      - start_date: YYYY-MM-DD
+      - end_date: YYYY-MM-DD
+      - etf_securities: optional list of SECURITY values (etfs report only)
+      - save_to_disk: optional bool (default true) — write to OPERATIONS_REPORTS_DIR
+    """
+    data = request.get_json(silent=True) or {}
+    report_type = (data.get("report_type") or "").strip().lower()
+    if report_type not in OPERATIONS_REPORT_TYPES:
+        return jsonify(
+            {
+                "error": f"report_type must be one of: {', '.join(sorted(OPERATIONS_REPORT_TYPES))}",
+            }
+        ), 400
+
+    start_date = _compact_to_ymd(data.get("start_date") or "")
+    end_date = _compact_to_ymd(data.get("end_date") or "")
+    if not start_date or not end_date:
+        return jsonify({"error": "start_date and end_date required (YYYY-MM-DD)"}), 400
+    if start_date > end_date:
+        return jsonify({"error": "start_date must be on or before end_date"}), 400
+
+    start_compact = _ymd_to_compact(start_date)
+    end_compact = _ymd_to_compact(end_date)
+
+    etf_securities = None
+    if report_type == REPORT_ETFS:
+        raw_etfs = data.get("etf_securities")
+        if raw_etfs is None:
+            etf_securities = list(DEFAULT_ETF_SECURITIES)
+        elif isinstance(raw_etfs, list):
+            try:
+                etf_securities = parse_etf_securities_text(", ".join(str(x) for x in raw_etfs))
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+        else:
+            try:
+                etf_securities = parse_etf_securities_text(str(raw_etfs))
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+
+    save_to_disk = data.get("save_to_disk", True)
+    if isinstance(save_to_disk, str):
+        save_to_disk = save_to_disk.strip().lower() not in ("0", "false", "no")
+
+    pyodbc, err = _pyodbc_or_503()
+    if err:
+        return err
+
+    conn = None
+    try:
+        conn = pyodbc.connect("DSN=PSC_VIEWER")
+        cursor = conn.cursor()
+        t0 = time.time()
+        result = run_operations_report(
+            cursor,
+            report_type,
+            start_compact,
+            end_compact,
+            etf_securities=etf_securities,
+            save_to_disk=bool(save_to_disk),
+        )
+        result["start_date"] = start_date
+        result["end_date"] = end_date
+        result["timing_sec"] = round(time.time() - t0, 2)
+        if report_type == REPORT_ETFS and etf_securities is not None:
+            result["etf_securities"] = list(etf_securities)
+        return jsonify(result)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@app.route("/sggg/operations-reports/defaults", methods=["GET"])
+def sggg_operations_reports_defaults():
+    """Default ETF security list and output directory for Fund Admin operations reports."""
+    return jsonify(
+        {
+            "etf_securities": list(DEFAULT_ETF_SECURITIES),
+            "etf_securities_text": format_etf_securities_text(DEFAULT_ETF_SECURITIES),
+            "output_dir": os.environ.get("OPERATIONS_REPORTS_DIR", r"W:\Operations Reports"),
+            "report_types": sorted(OPERATIONS_REPORT_TYPES),
+        }
+    )
 
 
 @app.route("/sggg/diamond/nav-availability", methods=["GET", "POST"])

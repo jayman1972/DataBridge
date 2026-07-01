@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
@@ -116,22 +117,81 @@ def _rows_to_csv(columns: Sequence[str], rows: Sequence[dict]) -> str:
     return buf.getvalue()
 
 
-def _save_csv(csv_text: str, report_type: str, stamp: Optional[datetime] = None) -> str:
-    stamp = stamp or datetime.now()
-    out_dir = Path(DEFAULT_OUTPUT_DIR)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{report_type}_{stamp.strftime('%Y%m%d_%H%M%S')}.csv"
-    path = out_dir / filename
-    # UTF-8 BOM helps Excel open numeric/date columns reliably on Windows.
+def _save_csv_to(path: Path, csv_text: str) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(csv_text, encoding="utf-8-sig", newline="")
     return str(path)
 
 
+def _archive_previous_latest(report_type: str, stamp: datetime) -> Optional[str]:
+    """Keep one backup of the prior cumulative file before overwriting latest.csv."""
+    latest_path = _latest_report_path(report_type)
+    legacy_full = _full_report_path(report_type)
+    source = latest_path if latest_path.is_file() else legacy_full if legacy_full.is_file() else None
+    if source is None:
+        return None
+    archive_dir = _report_dir(report_type) / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / f"latest_{stamp.strftime('%Y%m%d_%H%M%S')}.csv"
+    shutil.copy2(source, archive_path)
+    return str(archive_path)
+
+
+def _save_run_outputs(
+    *,
+    report_type: str,
+    merged_csv: str,
+    new_chunk_csv: Optional[str],
+    stamp: datetime,
+) -> dict[str, Optional[str]]:
+    """
+    Persist cumulative latest.csv plus a small per-run chunk (not another full copy).
+
+    Layout under W:\\Operations Reports:
+      country_breakdown/latest.csv          — cumulative file used for incremental runs
+      country_breakdown/runs/YYYYMMDD.csv — rows added in this run only
+      country_breakdown/archive/latest_*  — previous cumulative before overwrite
+    """
+    report_dir = _report_dir(report_type)
+    runs_dir = report_dir / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+
+    archived_path = _archive_previous_latest(report_type, stamp)
+
+    run_chunk_path: Optional[str] = None
+    if new_chunk_csv and len(new_chunk_csv.splitlines()) > 1:
+        run_chunk_path = _save_csv_to(
+            runs_dir / f"{stamp.strftime('%Y%m%d_%H%M%S')}.csv",
+            new_chunk_csv,
+        )
+
+    latest_path = _latest_report_path(report_type)
+    saved_path = _save_csv_to(latest_path, merged_csv)
+
+    return {
+        "saved_path": saved_path,
+        "run_chunk_path": run_chunk_path,
+        "archived_path": archived_path,
+    }
+
+
+def _report_dir(report_type: str) -> Path:
+    return Path(DEFAULT_OUTPUT_DIR) / report_type
+
+
+def _latest_report_path(report_type: str) -> Path:
+    return _report_dir(report_type) / "latest.csv"
+
+
 def _full_report_path(report_type: str) -> Path:
+    """Legacy flat cumulative filename (pre-subfolder layout)."""
     return Path(DEFAULT_OUTPUT_DIR) / f"{report_type}{FULL_REPORT_SUFFIX}.csv"
 
 
 def _full_report_meta_path(report_type: str) -> Path:
+    latest_meta = _report_dir(report_type) / f"latest{META_SUFFIX}"
+    if latest_meta.is_file():
+        return latest_meta
     return Path(DEFAULT_OUTPUT_DIR) / f"{report_type}{FULL_REPORT_SUFFIX}{META_SUFFIX}"
 
 
@@ -197,9 +257,14 @@ def _append_csv(existing_csv: str, new_csv: str) -> str:
 
 
 def _find_existing_report_path(report_type: str) -> Optional[Path]:
-    full_path = _full_report_path(report_type)
-    if full_path.is_file():
-        return full_path
+    latest_path = _latest_report_path(report_type)
+    if latest_path.is_file():
+        return latest_path
+
+    legacy_full = _full_report_path(report_type)
+    if legacy_full.is_file():
+        return legacy_full
+
     out_dir = Path(DEFAULT_OUTPUT_DIR)
     if not out_dir.is_dir():
         return None
@@ -224,16 +289,16 @@ def _load_report_meta(report_type: str) -> dict[str, Any]:
 
 
 def _write_report_meta(report_type: str, meta: dict[str, Any]) -> None:
-    meta_path = _full_report_meta_path(report_type)
+    meta_path = _report_dir(report_type) / f"latest{META_SUFFIX}"
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    # Legacy flat meta path for backward compatibility.
+    legacy_meta = Path(DEFAULT_OUTPUT_DIR) / f"{report_type}{FULL_REPORT_SUFFIX}{META_SUFFIX}"
+    legacy_meta.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
 def _save_full_report(csv_text: str, report_type: str) -> str:
-    path = _full_report_path(report_type)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(csv_text, encoding="utf-8-sig", newline="")
-    return str(path)
+    return _save_csv_to(_latest_report_path(report_type), csv_text)
 
 
 def resolve_incremental_query_range(
@@ -400,7 +465,11 @@ def get_latest_saved_report(report_type: str) -> Optional[dict[str, Any]]:
         csv_text = _read_text_stripping_bom(path)
         row_count = max(0, len(csv_text.splitlines()) - 1)
     download_name = path.name
-    if path == _full_report_path(report_type):
+    if path.name == "latest.csv" or path == _latest_report_path(report_type):
+        end_compact = meta.get("end_date")
+        if end_compact and len(str(end_compact)) == 8:
+            download_name = f"{report_type}_{end_compact}.csv"
+    elif path == _full_report_path(report_type):
         end_compact = meta.get("end_date")
         if end_compact and len(str(end_compact)) == 8:
             download_name = f"{report_type}_{end_compact}.csv"
@@ -443,6 +512,7 @@ def run_operations_report(
     rows_queried = 0
     columns: List[str] = []
     merged_csv: str
+    new_chunk_csv: Optional[str] = None
 
     if plan.get("skipped_query") and existing_csv:
         merged_csv = existing_csv
@@ -468,17 +538,26 @@ def run_operations_report(
 
         columns, rows = _fetchall_dicts(cursor)
         rows_queried = len(rows)
-        new_csv = _rows_to_csv(columns, rows)
-        merged_csv = _append_csv(existing_csv, new_csv) if existing_csv else new_csv
+        new_chunk_csv = _rows_to_csv(columns, rows)
+        merged_csv = _append_csv(existing_csv, new_chunk_csv) if existing_csv else new_chunk_csv
 
     row_count = max(0, len(merged_csv.splitlines()) - 1) if merged_csv else 0
     saved_path: Optional[str] = None
+    run_chunk_path: Optional[str] = None
+    archived_path: Optional[str] = None
     stamp = datetime.now()
     download_name = f"{report_type}_{stamp.strftime('%Y%m%d_%H%M%S')}.csv"
 
     if save_to_disk and merged_csv:
-        saved_path = _save_full_report(merged_csv, report_type)
-        _save_csv(merged_csv, report_type, stamp)
+        outputs = _save_run_outputs(
+            report_type=report_type,
+            merged_csv=merged_csv,
+            new_chunk_csv=new_chunk_csv,
+            stamp=stamp,
+        )
+        saved_path = outputs["saved_path"]
+        run_chunk_path = outputs.get("run_chunk_path")
+        archived_path = outputs.get("archived_path")
         meta: dict[str, Any] = {
             "report_type": report_type,
             "updated_at": stamp.isoformat(timespec="seconds"),
@@ -489,6 +568,8 @@ def run_operations_report(
             "last_query_start": query_start_compact,
             "last_query_end": end_compact,
             "last_rows_queried": rows_queried,
+            "run_chunk_path": run_chunk_path,
+            "archived_path": archived_path,
         }
         if report_type == REPORT_ETFS and etf_securities:
             meta["etf_fingerprint"] = _etf_list_fingerprint(etf_securities)
@@ -506,6 +587,8 @@ def run_operations_report(
         "csv": merged_csv,
         "filename": download_name,
         "saved_path": saved_path,
+        "run_chunk_path": run_chunk_path,
+        "archived_path": archived_path,
         "incremental": bool(plan.get("incremental")),
         "incremental_reason": plan.get("reason"),
         "query_start_date": query_start_compact,

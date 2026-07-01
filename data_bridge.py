@@ -2519,6 +2519,8 @@ def sggg_operations_reports():
       - end_date: YYYY-MM-DD
       - etf_securities: optional list of SECURITY values (etfs report only)
       - save_to_disk: optional bool (default true) — write to OPERATIONS_REPORTS_DIR
+      - incremental: optional bool (default true) — append to existing cumulative CSV on disk
+      - force_full_rebuild: optional bool (default false) — ignore on-disk history and re-query full range
     """
     data = request.get_json(silent=True) or {}
     report_type = (data.get("report_type") or "").strip().lower()
@@ -2559,6 +2561,14 @@ def sggg_operations_reports():
     if isinstance(save_to_disk, str):
         save_to_disk = save_to_disk.strip().lower() not in ("0", "false", "no")
 
+    incremental = data.get("incremental", True)
+    if isinstance(incremental, str):
+        incremental = incremental.strip().lower() not in ("0", "false", "no")
+
+    force_full_rebuild = data.get("force_full_rebuild", False)
+    if isinstance(force_full_rebuild, str):
+        force_full_rebuild = force_full_rebuild.strip().lower() in ("1", "true", "yes")
+
     pyodbc, err = _pyodbc_or_503()
     if err:
         return err
@@ -2575,9 +2585,13 @@ def sggg_operations_reports():
             end_compact,
             etf_securities=etf_securities,
             save_to_disk=bool(save_to_disk),
+            incremental=bool(incremental),
+            force_full_rebuild=bool(force_full_rebuild),
         )
         result["start_date"] = start_date
         result["end_date"] = end_date
+        if result.get("query_start_date"):
+            result["query_start_date"] = _compact_to_ymd(str(result["query_start_date"]))
         result["timing_sec"] = round(time.time() - t0, 2)
         if report_type == REPORT_ETFS and etf_securities is not None:
             result["etf_securities"] = list(etf_securities)

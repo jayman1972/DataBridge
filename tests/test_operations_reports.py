@@ -5,8 +5,11 @@ from sggg.operations_reports import (
     REPORT_ETFS,
     _append_csv,
     _compact_add_days,
+    _etfs_sql,
     _gross_pnl_by_side_sql,
     _max_posn_date_in_csv,
+    etf_security_like_patterns,
+    etf_security_like_prefix,
     format_etf_securities_text,
     get_latest_saved_report,
     parse_etf_securities_text,
@@ -34,6 +37,18 @@ class OperationsReportsParseTest(unittest.TestCase):
     def test_format_sorts_alphabetically(self):
         text = format_etf_securities_text(list(reversed(_SAMPLE_ETFS)))
         self.assertEqual(text.split(", "), sorted(_SAMPLE_ETFS))
+
+    def test_etf_like_prefix_matches_psc_variants(self):
+        self.assertEqual(etf_security_like_prefix("QQQ.US"), "QQQ%")
+        self.assertEqual(etf_security_like_prefix("U.U.CA"), "U.U%")
+        self.assertEqual(etf_security_like_prefix("EHF100I"), "EHF100I%")
+        patterns = etf_security_like_patterns(["QQQ.US", "SPY.US", "QQQ.CA"])
+        self.assertEqual(patterns, ["QQQ%", "SPY%"])
+
+    def test_etfs_sql_uses_like_not_exact_in(self):
+        sql = _etfs_sql(2)
+        self.assertIn("SECURITY LIKE ?", sql)
+        self.assertNotIn("SECURITY in", sql.lower())
 
 
 class OperationsReportsIncrementalTest(unittest.TestCase):

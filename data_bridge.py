@@ -2516,7 +2516,7 @@ def sggg_operations_reports_latest():
 
     Query:
       - report_type: country_breakdown | gross_pnl_by_side | etfs
-      - download: optional 1/true to return the file as an attachment
+      - download: optional cumulative | period (or legacy chunk) to download a file
     """
     report_type = (request.args.get("report_type") or "").strip().lower()
     if report_type not in OPERATIONS_REPORT_TYPES:
@@ -2545,16 +2545,16 @@ def sggg_operations_reports_latest():
             as_attachment=True,
             download_name=info["filename"],
         )
-    if download == "chunk":
-        chunk = info.get("run_chunk") or {}
-        chunk_path = chunk.get("saved_path")
-        if not chunk_path or not Path(chunk_path).is_file():
-            return jsonify({"error": "No per-run chunk found for this report"}), 404
+    if download == "chunk" or download == "period":
+        period = info.get("period_report") or {}
+        period_path = period.get("saved_path")
+        if not period_path or not Path(period_path).is_file():
+            return jsonify({"error": "No period report found for this date range"}), 404
         return send_file(
-            Path(chunk_path),
+            Path(period_path),
             mimetype="text/csv",
             as_attachment=True,
-            download_name=chunk.get("filename") or Path(chunk_path).name,
+            download_name=period.get("filename") or Path(period_path).name,
         )
 
     if info.get("start_date") and len(str(info["start_date"])) == 8:

@@ -6,12 +6,14 @@ from sggg.operations_reports import (
     _append_csv,
     _compact_add_days,
     _etfs_sql,
+    _filter_csv_by_posn_date_range,
     _gross_pnl_by_side_sql,
     _max_posn_date_in_csv,
     expand_etf_securities_for_query,
     format_etf_securities_text,
     get_latest_saved_report,
     parse_etf_securities_text,
+    period_report_filename,
     resolve_incremental_query_range,
 )
 
@@ -46,6 +48,18 @@ class OperationsReportsParseTest(unittest.TestCase):
         sql = _etfs_sql(2)
         self.assertIn("SECURITY in (?,?)", sql.replace(" ", ""))
         self.assertNotIn("LIKE", sql)
+
+    def test_period_report_filename(self):
+        self.assertEqual(
+            period_report_filename("20250630", "20260630"),
+            "06302025_06302026.csv",
+        )
+
+    def test_filter_csv_by_date_range(self):
+        csv_text = _COUNTRY_HEADER + _COUNTRY_ROW_A + _COUNTRY_ROW_B
+        filtered = _filter_csv_by_posn_date_range(csv_text, "20260301", "20260301")
+        self.assertIn("20260301", filtered)
+        self.assertNotIn("20260331", filtered)
 
 
 class OperationsReportsIncrementalTest(unittest.TestCase):

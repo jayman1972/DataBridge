@@ -119,6 +119,45 @@ def expand_etf_securities_for_query(securities: Sequence[str]) -> List[str]:
     return out
 
 
+def _filter_csv_by_posn_date_range(
+    csv_text: str, start_compact: str, end_compact: str
+) -> str:
+    """Slice cumulative CSV to the UI-requested POSN_DATE window."""
+    reader = csv.reader(io.StringIO(csv_text))
+    try:
+        header = next(reader)
+    except StopIteration:
+        return csv_text
+    try:
+        date_idx = header.index(POSN_DATE_COLUMN)
+    except ValueError:
+        return csv_text
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(header)
+    for row in reader:
+        if date_idx >= len(row):
+            continue
+        compact = _normalize_posn_date_compact(row[date_idx])
+        if compact and start_compact <= compact <= end_compact:
+            writer.writerow(row)
+    return buf.getvalue()
+
+
+def _compact_to_period_token(compact: str) -> str:
+    """YYYYMMDD -> MMDDYYYY for run filenames (e.g. 06302025)."""
+    if len(compact) != 8:
+        return compact
+    return f"{compact[4:6]}{compact[6:8]}{compact[0:4]}"
+
+
+def period_report_filename(start_compact: str, end_compact: str) -> str:
+    return (
+        f"{_compact_to_period_token(start_compact)}"
+        f"_{_compact_to_period_token(end_compact)}.csv"
+    )
+
+
 def _portfolio_placeholders(n: int) -> str:
     return ",".join("?" * n)
 
@@ -182,16 +221,14 @@ def _save_run_outputs(
     *,
     report_type: str,
     merged_csv: str,
-    new_chunk_csv: Optional[str],
+    requested_start_compact: str,
+    requested_end_compact: str,
     stamp: datetime,
 ) -> dict[str, Optional[str]]:
     """
-    Persist cumulative latest.csv plus a small per-run chunk (not another full copy).
-
-    Layout under W:\\Operations Reports:
-      country_breakdown/latest.csv          — cumulative file used for incremental runs
-      country_breakdown/runs/YYYYMMDD.csv — rows added in this run only
-      country_breakdown/archive/latest_*  — previous cumulative before overwrite
+    Persist:
+      - latest.csv — full cumulative history (incremental runs append here)
+      - runs/MMDDYYYY_MMDDYYYY.csv — UI date-range slice for this run
     """
     report_dir = _report_dir(report_type)
     runs_dir = report_dir / "runs"
@@ -199,19 +236,18 @@ def _save_run_outputs(
 
     archived_path = _archive_previous_latest(report_type, stamp)
 
-    run_chunk_path: Optional[str] = None
-    if new_chunk_csv and len(new_chunk_csv.splitlines()) > 1:
-        run_chunk_path = _save_csv_to(
-            runs_dir / f"{stamp.strftime('%Y%m%d_%H%M%S')}.csv",
-            new_chunk_csv,
-        )
+    period_csv = _filter_csv_by_posn_date_range(
+        merged_csv, requested_start_compact, requested_end_compact
+    )
+    period_name = period_report_filename(requested_start_compact, requested_end_compact)
+    period_path = _save_csv_to(runs_dir / period_name, period_csv)
 
     latest_path = _latest_report_path(report_type)
     saved_path = _save_csv_to(latest_path, merged_csv)
 
     return {
         "saved_path": saved_path,
-        "run_chunk_path": run_chunk_path,
+        "period_report_path": period_path,
         "archived_path": archived_path,
     }
 
@@ -489,18 +525,24 @@ def _etfs_sql(etf_count: int) -> str:
     """
 
 
-def _latest_run_chunk_path(report_type: str) -> Optional[Path]:
+def _latest_period_report_path(report_type: str) -> Optional[Path]:
     meta = _load_report_meta(report_type)
-    chunk = meta.get("run_chunk_path")
-    if chunk:
-        path = Path(str(chunk))
+    period = meta.get("period_report_path")
+    if period:
+        path = Path(str(period))
         if path.is_file():
             return path
     runs_dir = _report_dir(report_type) / "runs"
     if not runs_dir.is_dir():
         return None
-    candidates = sorted(runs_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime)
-    return candidates[-1] if candidates else None
+    candidates = [
+        p
+        for p in runs_dir.glob("*.csv")
+        if re.fullmatch(r"\d{8}_\d{8}\.csv", p.name)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def get_latest_saved_report(report_type: str) -> Optional[dict[str, Any]]:
@@ -528,16 +570,18 @@ def get_latest_saved_report(report_type: str) -> Optional[dict[str, Any]]:
         end_compact = meta.get("end_date")
         if end_compact and len(str(end_compact)) == 8:
             download_name = f"{report_type}_{end_compact}.csv"
-    run_chunk_path = _latest_run_chunk_path(report_type)
-    run_chunk_info: Optional[dict[str, Any]] = None
-    if run_chunk_path is not None:
-        chunk_stat = run_chunk_path.stat()
-        chunk_text = _read_text_stripping_bom(run_chunk_path)
-        run_chunk_info = {
-            "saved_path": str(run_chunk_path),
-            "filename": run_chunk_path.name,
-            "row_count": max(0, len(chunk_text.splitlines()) - 1),
-            "file_size_bytes": chunk_stat.st_size,
+    period_path = _latest_period_report_path(report_type)
+    period_info: Optional[dict[str, Any]] = None
+    if period_path is not None:
+        period_stat = period_path.stat()
+        period_text = _read_text_stripping_bom(period_path)
+        period_info = {
+            "saved_path": str(period_path),
+            "filename": period_path.name,
+            "row_count": max(0, len(period_text.splitlines()) - 1),
+            "file_size_bytes": period_stat.st_size,
+            "start_date": meta.get("period_start_date") or meta.get("start_date"),
+            "end_date": meta.get("period_end_date") or meta.get("end_date"),
         }
     return {
         "report_type": report_type,
@@ -548,7 +592,7 @@ def get_latest_saved_report(report_type: str) -> Optional[dict[str, Any]]:
         "start_date": meta.get("start_date"),
         "end_date": meta.get("end_date"),
         "file_size_bytes": stat.st_size,
-        "run_chunk": run_chunk_info,
+        "period_report": period_info,
     }
 
 
@@ -611,8 +655,9 @@ def run_operations_report(
 
     row_count = max(0, len(merged_csv.splitlines()) - 1) if merged_csv else 0
     saved_path: Optional[str] = None
-    run_chunk_path: Optional[str] = None
+    period_report_path: Optional[str] = None
     archived_path: Optional[str] = None
+    period_row_count = 0
     stamp = datetime.now()
     download_name = f"{report_type}_{stamp.strftime('%Y%m%d_%H%M%S')}.csv"
 
@@ -620,12 +665,16 @@ def run_operations_report(
         outputs = _save_run_outputs(
             report_type=report_type,
             merged_csv=merged_csv,
-            new_chunk_csv=new_chunk_csv,
+            requested_start_compact=start_compact,
+            requested_end_compact=end_compact,
             stamp=stamp,
         )
         saved_path = outputs["saved_path"]
-        run_chunk_path = outputs.get("run_chunk_path")
+        period_report_path = outputs.get("period_report_path")
         archived_path = outputs.get("archived_path")
+        if period_report_path:
+            period_text = _read_text_stripping_bom(Path(period_report_path))
+            period_row_count = max(0, len(period_text.splitlines()) - 1)
         meta: dict[str, Any] = {
             "report_type": report_type,
             "updated_at": stamp.isoformat(timespec="seconds"),
@@ -636,7 +685,10 @@ def run_operations_report(
             "last_query_start": query_start_compact,
             "last_query_end": end_compact,
             "last_rows_queried": rows_queried,
-            "run_chunk_path": run_chunk_path,
+            "period_report_path": period_report_path,
+            "period_start_date": start_compact,
+            "period_end_date": end_compact,
+            "period_row_count": period_row_count,
             "archived_path": archived_path,
         }
         if report_type == REPORT_ETFS and etf_securities:
@@ -656,7 +708,8 @@ def run_operations_report(
         "csv": merged_csv,
         "filename": download_name,
         "saved_path": saved_path,
-        "run_chunk_path": run_chunk_path,
+        "period_report_path": period_report_path,
+        "period_row_count": period_row_count,
         "archived_path": archived_path,
         "incremental": bool(plan.get("incremental")),
         "incremental_reason": plan.get("reason"),

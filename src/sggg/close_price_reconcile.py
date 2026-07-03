@@ -936,11 +936,9 @@ def _parse_psc_reconcile_row(row: tuple) -> Dict[str, Any]:
         "underlying_contract_size": underlying_contract_size,
         "day_profit": _optional_float(row[14]) if len(row) > 14 else None,
         "prev_posn_date_int": _compact_int_str(row[15]) if len(row) > 15 else None,
-        "realized_profit": _optional_float(row[16]) if len(row) > 16 else None,
-        "unrealized_profit": _optional_float(row[17]) if len(row) > 17 else None,
-        "sec_ccy": _norm(row[18]) if len(row) > 18 else "",
-        "portfolio_ccy": _norm(row[19]) if len(row) > 19 else "",
-        "fx_settle_to_base": _optional_float(row[20]) if len(row) > 20 else None,
+        "sec_ccy": _norm(row[16]) if len(row) > 16 else "",
+        "portfolio_ccy": _norm(row[17]) if len(row) > 17 else "",
+        "fx_settle_to_base": _optional_float(row[18]) if len(row) > 18 else None,
     }
 
 
@@ -953,15 +951,14 @@ def fetch_psc_positions_for_reconcile(
         "SELECT ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.BBG_TICKER, ph.ISIN, ph.CUSIP, sd.SEDOL, "
         "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, ph.SECURITY, "
         "ph.UNDERLYING_COMPANY_SYMBOL, ph.CONTRACT_SIZE, ph.UNDERLYING_CONTRACT_SIZE, "
-        "ph.DAY_PROFIT, ph.PREV_POSN_DATE_INT, ph.REALIZED_PROFIT, ph.UNREALIZED_PROFIT, "
+        "ph.DAY_PROFIT, ph.PREV_POSN_DATE_INT, "
         "ph.SEC_CCY, ph.PORTFOLIO_CCY, ph.FX_SETTLE_TO_BASE "
         "FROM psc_position_history ph "
         "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
         "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? "
         "AND ("
         "  (ph.QUANTITY IS NOT NULL AND ABS(ph.QUANTITY) > 0.0001) "
-        "  OR ABS(COALESCE(ph.REALIZED_PROFIT, 0)) > 0.005 "
-        "  OR ABS(COALESCE(ph.UNREALIZED_PROFIT, 0)) > 0.005"
+        "  OR ABS(COALESCE(ph.DAY_PROFIT, 0)) > 0.005"
         ")"
     )
     sql_like = sql.replace(
@@ -1026,15 +1023,12 @@ def _sum_optional_amounts(*values: Any) -> Optional[float]:
 
 def _psc_pnl_to_base(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    AlphaDesk realized/unrealized profit fields are local/security currency.
+    AlphaDesk DAY_PROFIT is the daily report P&L line item.
 
     Convert them to the fund base currency using FX_SETTLE_TO_BASE so the
     comparison is on the same basis as Diamond Base P&L.
     """
-    local_pnl = _sum_optional_amounts(
-        row.get("realized_profit"),
-        row.get("unrealized_profit"),
-    )
+    local_pnl = _optional_float(row.get("day_profit"))
     if local_pnl is None:
         return None, None, None
     fx = _optional_float(row.get("fx_settle_to_base"))
@@ -1053,8 +1047,8 @@ def infer_reference_date_from_psc(
     Use AlphaDesk's prior position date as Diamond's ReferenceDate.
 
     This keeps Diamond's "since reference date" P&L aligned with AlphaDesk's
-    realized + unrealized report window, especially across holidays where the
-    previous valuation date is not simply the previous weekday.
+    daily P&L window, especially across holidays where the previous valuation
+    date is not simply the previous weekday.
     """
     candidates = psc_portfolio_candidates_for_fund(fund_id)
     if not candidates:
@@ -1407,7 +1401,7 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             continue
         signed = _signed_qty(row.get("quantity"), row.get("long_short"))
         alphadesk_pnl, alphadesk_pnl_local, fx_settle_to_base = _psc_pnl_to_base(row)
-        # Same-day trades can end with zero quantity but still carry realized P&L.
+        # Same-day trades can end with zero quantity but still carry daily P&L.
         if abs(signed) <= 0.0001 and (
             alphadesk_pnl is None or abs(alphadesk_pnl) <= 0.005
         ):

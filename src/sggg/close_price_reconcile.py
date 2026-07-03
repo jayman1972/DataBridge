@@ -938,6 +938,9 @@ def _parse_psc_reconcile_row(row: tuple) -> Dict[str, Any]:
         "prev_posn_date_int": _compact_int_str(row[15]) if len(row) > 15 else None,
         "realized_profit": _optional_float(row[16]) if len(row) > 16 else None,
         "unrealized_profit": _optional_float(row[17]) if len(row) > 17 else None,
+        "sec_ccy": _norm(row[18]) if len(row) > 18 else "",
+        "portfolio_ccy": _norm(row[19]) if len(row) > 19 else "",
+        "fx_settle_to_base": _optional_float(row[20]) if len(row) > 20 else None,
     }
 
 
@@ -950,7 +953,8 @@ def fetch_psc_positions_for_reconcile(
         "SELECT ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.BBG_TICKER, ph.ISIN, ph.CUSIP, sd.SEDOL, "
         "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, ph.SECURITY, "
         "ph.UNDERLYING_COMPANY_SYMBOL, ph.CONTRACT_SIZE, ph.UNDERLYING_CONTRACT_SIZE, "
-        "ph.DAY_PROFIT, ph.PREV_POSN_DATE_INT, ph.REALIZED_PROFIT, ph.UNREALIZED_PROFIT "
+        "ph.DAY_PROFIT, ph.PREV_POSN_DATE_INT, ph.REALIZED_PROFIT, ph.UNREALIZED_PROFIT, "
+        "ph.SEC_CCY, ph.PORTFOLIO_CCY, ph.FX_SETTLE_TO_BASE "
         "FROM psc_position_history ph "
         "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
         "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? "
@@ -1018,6 +1022,25 @@ def _sum_optional_amounts(*values: Any) -> Optional[float]:
     if not present:
         return None
     return round(sum(present), 2)
+
+
+def _psc_pnl_to_base(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    AlphaDesk realized/unrealized profit fields are local/security currency.
+
+    Convert them to the fund base currency using FX_SETTLE_TO_BASE so the
+    comparison is on the same basis as Diamond Base P&L.
+    """
+    local_pnl = _sum_optional_amounts(
+        row.get("realized_profit"),
+        row.get("unrealized_profit"),
+    )
+    if local_pnl is None:
+        return None, None, None
+    fx = _optional_float(row.get("fx_settle_to_base"))
+    if fx is None or fx <= 0:
+        fx = 1.0
+    return round(local_pnl * fx, 2), local_pnl, fx
 
 
 def infer_reference_date_from_psc(
@@ -1383,10 +1406,7 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
         if not key:
             continue
         signed = _signed_qty(row.get("quantity"), row.get("long_short"))
-        alphadesk_pnl = _sum_optional_amounts(
-            row.get("realized_profit"),
-            row.get("unrealized_profit"),
-        )
+        alphadesk_pnl, alphadesk_pnl_local, fx_settle_to_base = _psc_pnl_to_base(row)
         # Same-day trades can end with zero quantity but still carry realized P&L.
         if abs(signed) <= 0.0001 and (
             alphadesk_pnl is None or abs(alphadesk_pnl) <= 0.005
@@ -1448,7 +1468,11 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                 "shares": 0.0,
                 "close_price": row.get("close_price"),
                 "alphadesk_pnl": 0.0,
+                "alphadesk_pnl_local": 0.0,
                 "alphadesk_pnl_present": False,
+                "fx_settle_to_base": fx_settle_to_base,
+                "sec_ccy": row.get("sec_ccy"),
+                "portfolio_ccy": row.get("portfolio_ccy"),
                 "prev_posn_date_int": row.get("prev_posn_date_int"),
                 "qty_multiplier": mult,
                 "security_type": row.get("security_type"),
@@ -1464,7 +1488,17 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
         bucket["shares"] = float(bucket["shares"]) + signed
         if alphadesk_pnl is not None:
             bucket["alphadesk_pnl"] = float(bucket.get("alphadesk_pnl") or 0) + alphadesk_pnl
+            bucket["alphadesk_pnl_local"] = (
+                float(bucket.get("alphadesk_pnl_local") or 0)
+                + float(alphadesk_pnl_local or 0)
+            )
             bucket["alphadesk_pnl_present"] = True
+        if fx_settle_to_base is not None:
+            bucket["fx_settle_to_base"] = fx_settle_to_base
+        if row.get("sec_ccy") and not bucket.get("sec_ccy"):
+            bucket["sec_ccy"] = row.get("sec_ccy")
+        if row.get("portfolio_ccy") and not bucket.get("portfolio_ccy"):
+            bucket["portfolio_ccy"] = row.get("portfolio_ccy")
         if row.get("close_price") is not None:
             bucket["close_price"] = row.get("close_price")
         if row.get("prev_posn_date_int") and not bucket.get("prev_posn_date_int"):
@@ -1857,6 +1891,11 @@ def build_close_price_reconciliation(
             if psc and psc.get("alphadesk_pnl_present")
             else None
         )
+        alphadesk_pnl_local = (
+            round(float(psc.get("alphadesk_pnl_local") or 0), 2)
+            if psc and psc.get("alphadesk_pnl_present")
+            else None
+        )
         pnl_difference = (
             round(diamond_pnl - alphadesk_pnl, 2)
             if diamond_pnl is not None and alphadesk_pnl is not None
@@ -1869,6 +1908,10 @@ def build_close_price_reconciliation(
                 "ticker": ticker or key,
                 "diamond_pnl": diamond_pnl,
                 "alphadesk_pnl": alphadesk_pnl,
+                "alphadesk_pnl_local": alphadesk_pnl_local,
+                "alphadesk_sec_ccy": psc.get("sec_ccy") if psc else None,
+                "alphadesk_portfolio_ccy": psc.get("portfolio_ccy") if psc else None,
+                "alphadesk_fx_settle_to_base": psc.get("fx_settle_to_base") if psc else None,
                 "pnl_difference": pnl_difference,
                 "diamond_close": dia_close,
                 "alphadesk_close": psc_close,

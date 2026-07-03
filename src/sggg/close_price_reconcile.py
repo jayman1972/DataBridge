@@ -1025,8 +1025,8 @@ def _psc_pnl_to_base(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[flo
     """
     AlphaDesk DAY_PROFIT is the daily report P&L line item.
 
-    Convert them to the fund base currency using FX_SETTLE_TO_BASE so the
-    comparison is on the same basis as Diamond Base P&L.
+    PSC stamps this in portfolio/base currency already; keep FX metadata only
+    for diagnostics.
     """
     local_pnl = _optional_float(row.get("day_profit"))
     if local_pnl is None:
@@ -1034,7 +1034,7 @@ def _psc_pnl_to_base(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[flo
     fx = _optional_float(row.get("fx_settle_to_base"))
     if fx is None or fx <= 0:
         fx = 1.0
-    return round(local_pnl * fx, 2), local_pnl, fx
+    return round(local_pnl, 2), local_pnl, fx
 
 
 def infer_reference_date_from_psc(
@@ -1677,9 +1677,12 @@ def aggregate_diamond_by_security(
             if fut_like
             else notional_quantity_multiplier(sec_type, pricing or sec_name)
         )
-        diamond_pnl = _sum_optional_amounts(
-            row.get("BaseUnrealizedGainLossSinceReferenceDate"),
-            row.get("BaseRealizedGainLossSinceReferenceDate"),
+        diamond_total_unrealized = _optional_float(row.get("BaseTotalUnrealizedGainLoss"))
+        diamond_unrealized_since_ref = _optional_float(
+            row.get("BaseUnrealizedGainLossSinceReferenceDate")
+        )
+        diamond_realized_since_ref = _optional_float(
+            row.get("BaseRealizedGainLossSinceReferenceDate")
         )
         bucket = out.get(key)
         if not bucket:
@@ -1698,8 +1701,12 @@ def aggregate_diamond_by_security(
                 "bbg_ticker": pricing,
                 "shares": 0.0,
                 "close_price": close_f,
-                "diamond_pnl": 0.0,
-                "diamond_pnl_present": False,
+                "diamond_total_unrealized": 0.0,
+                "diamond_total_unrealized_present": False,
+                "diamond_unrealized_since_ref": 0.0,
+                "diamond_unrealized_since_ref_present": False,
+                "diamond_realized_since_ref": 0.0,
+                "diamond_realized_since_ref_present": False,
                 "qty_multiplier": mult,
                 "security_type": sec_type,
                 "isin": row.get("ISIN"),
@@ -1712,9 +1719,24 @@ def aggregate_diamond_by_security(
             }
             out[key] = bucket
         bucket["shares"] = float(bucket["shares"]) + signed
-        if diamond_pnl is not None:
-            bucket["diamond_pnl"] = float(bucket.get("diamond_pnl") or 0) + diamond_pnl
-            bucket["diamond_pnl_present"] = True
+        if diamond_total_unrealized is not None:
+            bucket["diamond_total_unrealized"] = (
+                float(bucket.get("diamond_total_unrealized") or 0)
+                + diamond_total_unrealized
+            )
+            bucket["diamond_total_unrealized_present"] = True
+        if diamond_unrealized_since_ref is not None:
+            bucket["diamond_unrealized_since_ref"] = (
+                float(bucket.get("diamond_unrealized_since_ref") or 0)
+                + diamond_unrealized_since_ref
+            )
+            bucket["diamond_unrealized_since_ref_present"] = True
+        if diamond_realized_since_ref is not None:
+            bucket["diamond_realized_since_ref"] = (
+                float(bucket.get("diamond_realized_since_ref") or 0)
+                + diamond_realized_since_ref
+            )
+            bucket["diamond_realized_since_ref_present"] = True
         if close_f is not None:
             bucket["close_price"] = close_f
         if fut_like:
@@ -1774,6 +1796,8 @@ def build_close_price_reconciliation(
     valuation_date_iso: str,
     diamond_raw: Any,
     *,
+    prior_diamond_raw: Any = None,
+    reference_date_iso: Optional[str] = None,
     dsn: str = "PSC_VIEWER",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
@@ -1822,6 +1846,14 @@ def build_close_price_reconciliation(
     diamond_records = flatten_diamond_portfolio_records(diamond_raw)
     meta["diamond_positions"] = len(diamond_records)
     diamond_by_key = aggregate_diamond_by_security(diamond_records, valuation_date_iso)
+    prior_diamond_by_key: Dict[str, Dict[str, Any]] = {}
+    if prior_diamond_raw is not None and reference_date_iso:
+        prior_diamond_records = flatten_diamond_portfolio_records(prior_diamond_raw)
+        meta["diamond_prior_positions"] = len(prior_diamond_records)
+        prior_diamond_by_key = aggregate_diamond_by_security(
+            prior_diamond_records,
+            reference_date_iso,
+        )
     if diamond_records and not diamond_by_key:
         meta["diamond_date_warning"] = (
             "No Diamond rows matched valuation date on QuoteDate; check GetPortfolio response."
@@ -1875,11 +1907,42 @@ def build_close_price_reconciliation(
         if dia and dia_close is not None:
             dia = {**dia, "close_price": dia_close}
         price_diff, dollar_diff, shares = _compute_dollar_difference(psc, dia)
-        diamond_pnl = (
-            round(float(dia.get("diamond_pnl") or 0), 2)
-            if dia and dia.get("diamond_pnl_present")
+        prior_dia = prior_diamond_by_key.get(key)
+        diamond_pnl: Optional[float] = None
+        diamond_total_unrealized = (
+            float(dia.get("diamond_total_unrealized") or 0)
+            if dia and dia.get("diamond_total_unrealized_present")
             else None
         )
+        diamond_prior_total_unrealized = (
+            float(prior_dia.get("diamond_total_unrealized") or 0)
+            if prior_dia and prior_dia.get("diamond_total_unrealized_present")
+            else None
+        )
+        diamond_realized_since_ref = (
+            float(dia.get("diamond_realized_since_ref") or 0)
+            if dia and dia.get("diamond_realized_since_ref_present")
+            else 0.0
+        )
+        if diamond_total_unrealized is not None and diamond_prior_total_unrealized is not None:
+            diamond_pnl = round(
+                diamond_total_unrealized
+                - diamond_prior_total_unrealized
+                + diamond_realized_since_ref,
+                2,
+            )
+        elif dia and (
+            dia.get("diamond_unrealized_since_ref_present")
+            or dia.get("diamond_realized_since_ref_present")
+        ):
+            # Fallback only: Diamond's API "SinceReferenceDate" value has not
+            # matched the PDF change column for all rows, but it is better than
+            # blank when the prior snapshot is unavailable.
+            diamond_pnl = round(
+                float(dia.get("diamond_unrealized_since_ref") or 0)
+                + float(dia.get("diamond_realized_since_ref") or 0),
+                2,
+            )
         alphadesk_pnl = (
             round(float(psc.get("alphadesk_pnl") or 0), 2)
             if psc and psc.get("alphadesk_pnl_present")
@@ -1901,6 +1964,9 @@ def build_close_price_reconciliation(
                 "match_key": key,
                 "ticker": ticker or key,
                 "diamond_pnl": diamond_pnl,
+                "diamond_total_unrealized": diamond_total_unrealized,
+                "diamond_prior_total_unrealized": diamond_prior_total_unrealized,
+                "diamond_realized_since_reference": diamond_realized_since_ref,
                 "alphadesk_pnl": alphadesk_pnl,
                 "alphadesk_pnl_local": alphadesk_pnl_local,
                 "alphadesk_sec_ccy": psc.get("sec_ccy") if psc else None,
@@ -1974,7 +2040,23 @@ def fetch_close_price_reconciliation(
         )
     except Exception as exc:
         return [], {"fund_id": fund_id, "valuation_date": valuation_date_norm}, str(exc)
-    lines, meta = build_close_price_reconciliation(fund_id, valuation_date_norm, raw)
+    prior_raw = None
+    prior_error = None
+    if reference_date:
+        try:
+            prior_raw = diamond_client.get_portfolio(
+                fund_id=fund_id,
+                valuation_date=reference_date,
+            )
+        except Exception as exc:
+            prior_error = str(exc)
+    lines, meta = build_close_price_reconciliation(
+        fund_id,
+        valuation_date_norm,
+        raw,
+        prior_diamond_raw=prior_raw,
+        reference_date_iso=reference_date,
+    )
     meta["fund_id"] = fund_id
     meta["valuation_date"] = valuation_date_norm
     meta["diamond_reference_date"] = reference_date
@@ -1983,4 +2065,6 @@ def fetch_close_price_reconciliation(
         meta["diamond_reference_psc_portfolio"] = reference_portfolio
     if reference_error:
         meta["diamond_reference_warning"] = reference_error
+    if prior_error:
+        meta["diamond_prior_warning"] = prior_error
     return lines, meta, None

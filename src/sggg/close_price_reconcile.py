@@ -936,6 +936,8 @@ def _parse_psc_reconcile_row(row: tuple) -> Dict[str, Any]:
         "underlying_contract_size": underlying_contract_size,
         "day_profit": _optional_float(row[14]) if len(row) > 14 else None,
         "prev_posn_date_int": _compact_int_str(row[15]) if len(row) > 15 else None,
+        "realized_profit": _optional_float(row[16]) if len(row) > 16 else None,
+        "unrealized_profit": _optional_float(row[17]) if len(row) > 17 else None,
     }
 
 
@@ -948,11 +950,15 @@ def fetch_psc_positions_for_reconcile(
         "SELECT ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.BBG_TICKER, ph.ISIN, ph.CUSIP, sd.SEDOL, "
         "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, ph.SECURITY, "
         "ph.UNDERLYING_COMPANY_SYMBOL, ph.CONTRACT_SIZE, ph.UNDERLYING_CONTRACT_SIZE, "
-        "ph.DAY_PROFIT, ph.PREV_POSN_DATE_INT "
+        "ph.DAY_PROFIT, ph.PREV_POSN_DATE_INT, ph.REALIZED_PROFIT, ph.UNREALIZED_PROFIT "
         "FROM psc_position_history ph "
         "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
         "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? "
-        "AND ph.QUANTITY IS NOT NULL AND ABS(ph.QUANTITY) > 0.0001"
+        "AND ("
+        "  (ph.QUANTITY IS NOT NULL AND ABS(ph.QUANTITY) > 0.0001) "
+        "  OR ABS(COALESCE(ph.REALIZED_PROFIT, 0)) > 0.005 "
+        "  OR ABS(COALESCE(ph.UNREALIZED_PROFIT, 0)) > 0.005"
+        ")"
     )
     sql_like = sql.replace(
         "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ?",
@@ -1023,9 +1029,9 @@ def infer_reference_date_from_psc(
     """
     Use AlphaDesk's prior position date as Diamond's ReferenceDate.
 
-    This keeps Diamond's "since reference date" P&L aligned with PSC DAY_PROFIT,
-    especially across holidays where the previous valuation date is not simply
-    the previous weekday.
+    This keeps Diamond's "since reference date" P&L aligned with AlphaDesk's
+    realized + unrealized report window, especially across holidays where the
+    previous valuation date is not simply the previous weekday.
     """
     candidates = psc_portfolio_candidates_for_fund(fund_id)
     if not candidates:
@@ -1377,7 +1383,14 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
         if not key:
             continue
         signed = _signed_qty(row.get("quantity"), row.get("long_short"))
-        if abs(signed) <= 0.0001:
+        alphadesk_pnl = _sum_optional_amounts(
+            row.get("realized_profit"),
+            row.get("unrealized_profit"),
+        )
+        # Same-day trades can end with zero quantity but still carry realized P&L.
+        if abs(signed) <= 0.0001 and (
+            alphadesk_pnl is None or abs(alphadesk_pnl) <= 0.005
+        ):
             continue
         opt_like = is_option_like_position(
             security_type=row.get("security_type"),
@@ -1410,7 +1423,6 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             row.get("bbg_ticker") or row.get("description") or row.get("security"),
             contract_size=contract_size,
         )
-        day_profit = _optional_float(row.get("day_profit"))
         bucket = out.get(key)
         if not bucket:
             display = portfolio_details_display_ticker(
@@ -1450,8 +1462,8 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             }
             out[key] = bucket
         bucket["shares"] = float(bucket["shares"]) + signed
-        if day_profit is not None:
-            bucket["alphadesk_pnl"] = float(bucket.get("alphadesk_pnl") or 0) + day_profit
+        if alphadesk_pnl is not None:
+            bucket["alphadesk_pnl"] = float(bucket.get("alphadesk_pnl") or 0) + alphadesk_pnl
             bucket["alphadesk_pnl_present"] = True
         if row.get("close_price") is not None:
             bucket["close_price"] = row.get("close_price")

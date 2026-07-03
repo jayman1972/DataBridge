@@ -939,6 +939,7 @@ def _parse_psc_reconcile_row(row: tuple) -> Dict[str, Any]:
         "sec_ccy": _norm(row[16]) if len(row) > 16 else "",
         "portfolio_ccy": _norm(row[17]) if len(row) > 17 else "",
         "fx_settle_to_base": _optional_float(row[18]) if len(row) > 18 else None,
+        "dividends": _optional_float(row[19]) if len(row) > 19 else None,
     }
 
 
@@ -952,13 +953,14 @@ def fetch_psc_positions_for_reconcile(
         "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, ph.SECURITY, "
         "ph.UNDERLYING_COMPANY_SYMBOL, ph.CONTRACT_SIZE, ph.UNDERLYING_CONTRACT_SIZE, "
         "ph.DAY_PROFIT, ph.PREV_POSN_DATE_INT, "
-        "ph.SEC_CCY, ph.PORTFOLIO_CCY, ph.FX_SETTLE_TO_BASE "
+        "ph.SEC_CCY, ph.PORTFOLIO_CCY, ph.FX_SETTLE_TO_BASE, ph.DIVIDENDS "
         "FROM psc_position_history ph "
         "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
         "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? "
         "AND ("
         "  (ph.QUANTITY IS NOT NULL AND ABS(ph.QUANTITY) > 0.0001) "
-        "  OR ABS(COALESCE(ph.DAY_PROFIT, 0)) > 0.005"
+        "  OR ABS(COALESCE(ph.DAY_PROFIT, 0)) > 0.005 "
+        "  OR ABS(COALESCE(ph.DIVIDENDS, 0)) > 0.005"
         ")"
     )
     sql_like = sql.replace(
@@ -1401,9 +1403,12 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             continue
         signed = _signed_qty(row.get("quantity"), row.get("long_short"))
         alphadesk_pnl, alphadesk_pnl_local, fx_settle_to_base = _psc_pnl_to_base(row)
-        # Same-day trades can end with zero quantity but still carry daily P&L.
+        alphadesk_dividends = _optional_float(row.get("dividends"))
+        # Same-day trades can end with zero quantity but still carry daily P&L/dividends.
         if abs(signed) <= 0.0001 and (
             alphadesk_pnl is None or abs(alphadesk_pnl) <= 0.005
+        ) and (
+            alphadesk_dividends is None or abs(alphadesk_dividends) <= 0.005
         ):
             continue
         opt_like = is_option_like_position(
@@ -1464,6 +1469,8 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                 "alphadesk_pnl": 0.0,
                 "alphadesk_pnl_local": 0.0,
                 "alphadesk_pnl_present": False,
+                "alphadesk_dividends": 0.0,
+                "alphadesk_dividends_present": False,
                 "fx_settle_to_base": fx_settle_to_base,
                 "sec_ccy": row.get("sec_ccy"),
                 "portfolio_ccy": row.get("portfolio_ccy"),
@@ -1487,6 +1494,11 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                 + float(alphadesk_pnl_local or 0)
             )
             bucket["alphadesk_pnl_present"] = True
+        if alphadesk_dividends is not None:
+            bucket["alphadesk_dividends"] = (
+                float(bucket.get("alphadesk_dividends") or 0) + alphadesk_dividends
+            )
+            bucket["alphadesk_dividends_present"] = True
         if fx_settle_to_base is not None:
             bucket["fx_settle_to_base"] = fx_settle_to_base
         if row.get("sec_ccy") and not bucket.get("sec_ccy"):
@@ -1631,12 +1643,17 @@ def aggregate_diamond_by_security(
         diamond_realized_since_ref = _optional_float(
             row.get("BaseRealizedGainLossSinceReferenceDate")
         )
+        diamond_dividends = _sum_optional_amounts(
+            row.get("BaseDividendIncomeSinceReferenceDate"),
+            row.get("BaseWithholdingTaxSinceReferenceDate"),
+        )
         has_material_pnl = any(
             abs(v) > 0.005
             for v in (
                 diamond_total_unrealized,
                 diamond_unrealized_since_ref,
                 diamond_realized_since_ref,
+                diamond_dividends,
             )
             if v is not None
         )
@@ -1716,6 +1733,8 @@ def aggregate_diamond_by_security(
                 "diamond_unrealized_since_ref_present": False,
                 "diamond_realized_since_ref": 0.0,
                 "diamond_realized_since_ref_present": False,
+                "diamond_dividends": 0.0,
+                "diamond_dividends_present": False,
                 "qty_multiplier": mult,
                 "security_type": sec_type,
                 "isin": row.get("ISIN"),
@@ -1746,6 +1765,11 @@ def aggregate_diamond_by_security(
                 + diamond_realized_since_ref
             )
             bucket["diamond_realized_since_ref_present"] = True
+        if diamond_dividends is not None:
+            bucket["diamond_dividends"] = (
+                float(bucket.get("diamond_dividends") or 0) + diamond_dividends
+            )
+            bucket["diamond_dividends_present"] = True
         if close_f is not None:
             bucket["close_price"] = close_f
         if fut_like:
@@ -1962,6 +1986,21 @@ def build_close_price_reconciliation(
             if psc and psc.get("alphadesk_pnl_present")
             else None
         )
+        diamond_dividends = (
+            round(float(dia.get("diamond_dividends") or 0), 2)
+            if dia and dia.get("diamond_dividends_present")
+            else None
+        )
+        alphadesk_dividends = (
+            round(float(psc.get("alphadesk_dividends") or 0), 2)
+            if psc and psc.get("alphadesk_dividends_present")
+            else None
+        )
+        dividend_difference = (
+            round(diamond_dividends - alphadesk_dividends, 2)
+            if diamond_dividends is not None and alphadesk_dividends is not None
+            else None
+        )
         pnl_difference = (
             round(diamond_pnl - alphadesk_pnl, 2)
             if diamond_pnl is not None and alphadesk_pnl is not None
@@ -1982,6 +2021,9 @@ def build_close_price_reconciliation(
                 "alphadesk_portfolio_ccy": psc.get("portfolio_ccy") if psc else None,
                 "alphadesk_fx_settle_to_base": psc.get("fx_settle_to_base") if psc else None,
                 "pnl_difference": pnl_difference,
+                "diamond_dividends": diamond_dividends,
+                "alphadesk_dividends": alphadesk_dividends,
+                "dividend_difference": dividend_difference,
                 "diamond_close": dia_close,
                 "alphadesk_close": psc_close,
                 "price_difference": price_diff,
@@ -2021,6 +2063,19 @@ def build_close_price_reconciliation(
     )
     meta["total_pnl_difference"] = round(
         sum(float(r["pnl_difference"] or 0) for r in lines if r.get("pnl_difference") is not None),
+        2,
+    )
+    meta["lines_with_dividend_diff"] = sum(
+        1
+        for r in lines
+        if r.get("dividend_difference") is not None and abs(float(r["dividend_difference"])) > 0.01
+    )
+    meta["total_dividend_difference"] = round(
+        sum(
+            float(r["dividend_difference"] or 0)
+            for r in lines
+            if r.get("dividend_difference") is not None
+        ),
         2,
     )
     return lines, meta

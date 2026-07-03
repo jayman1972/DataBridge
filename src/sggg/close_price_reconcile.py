@@ -1624,7 +1624,23 @@ def aggregate_diamond_by_security(
         if not key:
             continue
         signed = _diamond_signed_qty(row)
-        if abs(signed) <= 0.0001:
+        diamond_total_unrealized = _optional_float(row.get("BaseTotalUnrealizedGainLoss"))
+        diamond_unrealized_since_ref = _optional_float(
+            row.get("BaseUnrealizedGainLossSinceReferenceDate")
+        )
+        diamond_realized_since_ref = _optional_float(
+            row.get("BaseRealizedGainLossSinceReferenceDate")
+        )
+        has_material_pnl = any(
+            abs(v) > 0.005
+            for v in (
+                diamond_total_unrealized,
+                diamond_unrealized_since_ref,
+                diamond_realized_since_ref,
+            )
+            if v is not None
+        )
+        if abs(signed) <= 0.0001 and not has_material_pnl:
             continue
         pricing = row.get("PricingTicker")
         opt_like = is_option_like_position(
@@ -1676,13 +1692,6 @@ def aggregate_diamond_by_security(
             diamond_futures_contract_multiplier(row)
             if fut_like
             else notional_quantity_multiplier(sec_type, pricing or sec_name)
-        )
-        diamond_total_unrealized = _optional_float(row.get("BaseTotalUnrealizedGainLoss"))
-        diamond_unrealized_since_ref = _optional_float(
-            row.get("BaseUnrealizedGainLossSinceReferenceDate")
-        )
-        diamond_realized_since_ref = _optional_float(
-            row.get("BaseRealizedGainLossSinceReferenceDate")
         )
         bucket = out.get(key)
         if not bucket:

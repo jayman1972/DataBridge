@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from sggg.nav_sheet_parse import normalize_valuation_date
+from sggg.nav_sheet_parse import normalize_valuation_date, prior_business_day_iso
 from sggg.psc_boxed_positions import (
     _norm,
     _side,
@@ -934,6 +934,8 @@ def _parse_psc_reconcile_row(row: tuple) -> Dict[str, Any]:
         "underlying_company_symbol": _norm(row[11]) if len(row) > 11 else "",
         "contract_size": contract_size,
         "underlying_contract_size": underlying_contract_size,
+        "day_profit": _optional_float(row[14]) if len(row) > 14 else None,
+        "prev_posn_date_int": _compact_int_str(row[15]) if len(row) > 15 else None,
     }
 
 
@@ -945,7 +947,8 @@ def fetch_psc_positions_for_reconcile(
     sql = (
         "SELECT ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.BBG_TICKER, ph.ISIN, ph.CUSIP, sd.SEDOL, "
         "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, ph.SECURITY, "
-        "ph.UNDERLYING_COMPANY_SYMBOL, ph.CONTRACT_SIZE, ph.UNDERLYING_CONTRACT_SIZE "
+        "ph.UNDERLYING_COMPANY_SYMBOL, ph.CONTRACT_SIZE, ph.UNDERLYING_CONTRACT_SIZE, "
+        "ph.DAY_PROFIT, ph.PREV_POSN_DATE_INT "
         "FROM psc_position_history ph "
         "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
         "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? "
@@ -977,6 +980,90 @@ def fetch_psc_positions_for_fund(
     return [], (candidates[0] if candidates else None)
 
 
+def _compact_int_str(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    try:
+        return f"{int(value):08d}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _compact_to_iso(compact: Any) -> Optional[str]:
+    s = _compact_int_str(compact)
+    if not s or len(s) != 8:
+        return None
+    return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v == v else None
+
+
+def _sum_optional_amounts(*values: Any) -> Optional[float]:
+    nums = [_optional_float(v) for v in values]
+    present = [v for v in nums if v is not None]
+    if not present:
+        return None
+    return round(sum(present), 2)
+
+
+def infer_reference_date_from_psc(
+    fund_id: str,
+    valuation_date_iso: str,
+    *,
+    dsn: str = "PSC_VIEWER",
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Use AlphaDesk's prior position date as Diamond's ReferenceDate.
+
+    This keeps Diamond's "since reference date" P&L aligned with PSC DAY_PROFIT,
+    especially across holidays where the previous valuation date is not simply
+    the previous weekday.
+    """
+    candidates = psc_portfolio_candidates_for_fund(fund_id)
+    if not candidates:
+        return None, None, f"No PSC portfolio mapping for fund {fund_id}"
+    try:
+        import pyodbc
+    except ImportError:
+        return None, None, "pyodbc not installed"
+
+    val_compact = normalize_valuation_date(valuation_date_iso).replace("-", "")
+    sql_exact = (
+        "SELECT MAX(PREV_POSN_DATE_INT) FROM psc_position_history "
+        "WHERE PORTFOLIO = ? AND POSN_DATE_INT = ? "
+        "AND PREV_POSN_DATE_INT IS NOT NULL"
+    )
+    sql_like = sql_exact.replace("WHERE PORTFOLIO = ?", "WHERE PORTFOLIO LIKE ?")
+    conn = None
+    try:
+        conn = pyodbc.connect(f"DSN={dsn}")
+        cursor = conn.cursor()
+        for portfolio in candidates:
+            for sql, port in ((sql_exact, portfolio), (sql_like, f"{portfolio}%")):
+                cursor.execute(sql, (port, val_compact))
+                row = cursor.fetchone()
+                ref_iso = _compact_to_iso(row[0] if row else None)
+                if ref_iso and ref_iso < normalize_valuation_date(valuation_date_iso):
+                    return ref_iso, portfolio, None
+        return None, candidates[0], None
+    except Exception as exc:
+        return None, candidates[0], str(exc)
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _psc_match_key(row: Dict[str, Any]) -> Optional[str]:
     return reconcile_match_key(
         company_symbol=row.get("company_symbol"),
@@ -994,6 +1081,13 @@ def _psc_match_key(row: Dict[str, Any]) -> Optional[str]:
 
 def _merge_bucket_into(target: Dict[str, Any], source: Dict[str, Any]) -> None:
     target["shares"] = float(target.get("shares") or 0) + float(source.get("shares") or 0)
+    for pnl_field, present_field in (
+        ("alphadesk_pnl", "alphadesk_pnl_present"),
+        ("diamond_pnl", "diamond_pnl_present"),
+    ):
+        if source.get(present_field):
+            target[pnl_field] = float(target.get(pnl_field) or 0) + float(source.get(pnl_field) or 0)
+            target[present_field] = True
     if source.get("close_price") is not None:
         target["close_price"] = source["close_price"]
     for field in ("isin", "cusip", "sedol"):
@@ -1316,6 +1410,7 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             row.get("bbg_ticker") or row.get("description") or row.get("security"),
             contract_size=contract_size,
         )
+        day_profit = _optional_float(row.get("day_profit"))
         bucket = out.get(key)
         if not bucket:
             display = portfolio_details_display_ticker(
@@ -1340,6 +1435,9 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                 "security": row.get("security"),
                 "shares": 0.0,
                 "close_price": row.get("close_price"),
+                "alphadesk_pnl": 0.0,
+                "alphadesk_pnl_present": False,
+                "prev_posn_date_int": row.get("prev_posn_date_int"),
                 "qty_multiplier": mult,
                 "security_type": row.get("security_type"),
                 "isin": row.get("isin"),
@@ -1352,8 +1450,13 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             }
             out[key] = bucket
         bucket["shares"] = float(bucket["shares"]) + signed
+        if day_profit is not None:
+            bucket["alphadesk_pnl"] = float(bucket.get("alphadesk_pnl") or 0) + day_profit
+            bucket["alphadesk_pnl_present"] = True
         if row.get("close_price") is not None:
             bucket["close_price"] = row.get("close_price")
+        if row.get("prev_posn_date_int") and not bucket.get("prev_posn_date_int"):
+            bucket["prev_posn_date_int"] = row.get("prev_posn_date_int")
         bucket["ticker"] = portfolio_details_display_ticker(
             security_type=row.get("security_type"),
             company_symbol=row.get("company_symbol"),
@@ -1534,6 +1637,10 @@ def aggregate_diamond_by_security(
             if fut_like
             else notional_quantity_multiplier(sec_type, pricing or sec_name)
         )
+        diamond_pnl = _sum_optional_amounts(
+            row.get("BaseUnrealizedGainLossSinceReferenceDate"),
+            row.get("BaseRealizedGainLossSinceReferenceDate"),
+        )
         bucket = out.get(key)
         if not bucket:
             bucket = {
@@ -1551,6 +1658,8 @@ def aggregate_diamond_by_security(
                 "bbg_ticker": pricing,
                 "shares": 0.0,
                 "close_price": close_f,
+                "diamond_pnl": 0.0,
+                "diamond_pnl_present": False,
                 "qty_multiplier": mult,
                 "security_type": sec_type,
                 "isin": row.get("ISIN"),
@@ -1563,6 +1672,9 @@ def aggregate_diamond_by_security(
             }
             out[key] = bucket
         bucket["shares"] = float(bucket["shares"]) + signed
+        if diamond_pnl is not None:
+            bucket["diamond_pnl"] = float(bucket.get("diamond_pnl") or 0) + diamond_pnl
+            bucket["diamond_pnl_present"] = True
         if close_f is not None:
             bucket["close_price"] = close_f
         if fut_like:
@@ -1723,11 +1835,29 @@ def build_close_price_reconciliation(
         if dia and dia_close is not None:
             dia = {**dia, "close_price": dia_close}
         price_diff, dollar_diff, shares = _compute_dollar_difference(psc, dia)
+        diamond_pnl = (
+            round(float(dia.get("diamond_pnl") or 0), 2)
+            if dia and dia.get("diamond_pnl_present")
+            else None
+        )
+        alphadesk_pnl = (
+            round(float(psc.get("alphadesk_pnl") or 0), 2)
+            if psc and psc.get("alphadesk_pnl_present")
+            else None
+        )
+        pnl_difference = (
+            round(diamond_pnl - alphadesk_pnl, 2)
+            if diamond_pnl is not None and alphadesk_pnl is not None
+            else None
+        )
         ticker = pick_display_ticker(psc, dia)
         lines.append(
             {
                 "match_key": key,
                 "ticker": ticker or key,
+                "diamond_pnl": diamond_pnl,
+                "alphadesk_pnl": alphadesk_pnl,
+                "pnl_difference": pnl_difference,
                 "diamond_close": dia_close,
                 "alphadesk_close": psc_close,
                 "price_difference": price_diff,
@@ -1760,6 +1890,15 @@ def build_close_price_reconciliation(
         sum(float(r["dollar_difference"] or 0) for r in lines if r.get("dollar_difference") is not None),
         2,
     )
+    meta["lines_with_pnl_diff"] = sum(
+        1
+        for r in lines
+        if r.get("pnl_difference") is not None and abs(float(r["pnl_difference"])) > 0.01
+    )
+    meta["total_pnl_difference"] = round(
+        sum(float(r["pnl_difference"] or 0) for r in lines if r.get("pnl_difference") is not None),
+        2,
+    )
     return lines, meta
 
 
@@ -1769,14 +1908,30 @@ def fetch_close_price_reconciliation(
     diamond_client: Any,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[str]]:
     """Load Diamond portfolio and PSC, return reconciliation lines."""
+    valuation_date_norm = normalize_valuation_date(valuation_date_iso)
+    reference_date, reference_portfolio, reference_error = infer_reference_date_from_psc(
+        fund_id,
+        valuation_date_norm,
+    )
+    reference_source = "alphadesk_prev_posn_date"
+    if not reference_date:
+        reference_date = prior_business_day_iso(valuation_date_norm)
+        reference_source = "prior_business_day_fallback"
     try:
         raw = diamond_client.get_portfolio(
             fund_id=fund_id,
-            valuation_date=normalize_valuation_date(valuation_date_iso),
+            valuation_date=valuation_date_norm,
+            reference_date=reference_date,
         )
     except Exception as exc:
-        return [], {"fund_id": fund_id, "valuation_date": valuation_date_iso}, str(exc)
-    lines, meta = build_close_price_reconciliation(fund_id, valuation_date_iso, raw)
+        return [], {"fund_id": fund_id, "valuation_date": valuation_date_norm}, str(exc)
+    lines, meta = build_close_price_reconciliation(fund_id, valuation_date_norm, raw)
     meta["fund_id"] = fund_id
-    meta["valuation_date"] = normalize_valuation_date(valuation_date_iso)
+    meta["valuation_date"] = valuation_date_norm
+    meta["diamond_reference_date"] = reference_date
+    meta["diamond_reference_date_source"] = reference_source
+    if reference_portfolio:
+        meta["diamond_reference_psc_portfolio"] = reference_portfolio
+    if reference_error:
+        meta["diamond_reference_warning"] = reference_error
     return lines, meta, None

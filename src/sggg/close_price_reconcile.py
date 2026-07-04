@@ -940,6 +940,8 @@ def _parse_psc_reconcile_row(row: tuple) -> Dict[str, Any]:
         "portfolio_ccy": _norm(row[17]) if len(row) > 17 else "",
         "fx_settle_to_base": _optional_float(row[18]) if len(row) > 18 else None,
         "dividends": _optional_float(row[19]) if len(row) > 19 else None,
+        "posn_date_int": _compact_int_str(row[20]) if len(row) > 20 else None,
+        "dividend_ex_date_int": _compact_int_str(row[21]) if len(row) > 21 else None,
     }
 
 
@@ -953,14 +955,15 @@ def fetch_psc_positions_for_reconcile(
         "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, ph.SECURITY, "
         "ph.UNDERLYING_COMPANY_SYMBOL, ph.CONTRACT_SIZE, ph.UNDERLYING_CONTRACT_SIZE, "
         "ph.DAY_PROFIT, ph.PREV_POSN_DATE_INT, "
-        "ph.SEC_CCY, ph.PORTFOLIO_CCY, ph.FX_SETTLE_TO_BASE, ph.DIVIDENDS "
+        "ph.SEC_CCY, ph.PORTFOLIO_CCY, ph.FX_SETTLE_TO_BASE, ph.DIVIDENDS, "
+        "ph.POSN_DATE_INT, sd.DIVIDEND_EX_DATE_INT "
         "FROM psc_position_history ph "
         "LEFT JOIN psc_security_data sd ON ph.security_sn = sd.security_sn "
         "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? "
         "AND ("
         "  (ph.QUANTITY IS NOT NULL AND ABS(ph.QUANTITY) > 0.0001) "
         "  OR ABS(COALESCE(ph.DAY_PROFIT, 0)) > 0.005 "
-        "  OR ABS(COALESCE(ph.DIVIDENDS, 0)) > 0.005"
+        "  OR (sd.DIVIDEND_EX_DATE_INT = ph.POSN_DATE_INT AND ABS(COALESCE(ph.DIVIDENDS, 0)) > 0.005)"
         ")"
     )
     sql_like = sql.replace(
@@ -1013,6 +1016,17 @@ def _optional_float(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return v if v == v else None
+
+
+def _psc_same_ex_date_dividends(row: Dict[str, Any]) -> Optional[float]:
+    dividends = _optional_float(row.get("dividends"))
+    if dividends is None:
+        return None
+    posn_date = _compact_int_str(row.get("posn_date_int"))
+    ex_date = _compact_int_str(row.get("dividend_ex_date_int"))
+    if not posn_date or ex_date != posn_date:
+        return None
+    return dividends
 
 
 def _sum_optional_amounts(*values: Any) -> Optional[float]:
@@ -1403,7 +1417,7 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             continue
         signed = _signed_qty(row.get("quantity"), row.get("long_short"))
         alphadesk_pnl, alphadesk_pnl_local, fx_settle_to_base = _psc_pnl_to_base(row)
-        alphadesk_dividends = _optional_float(row.get("dividends"))
+        alphadesk_dividends = _psc_same_ex_date_dividends(row)
         # Same-day trades can end with zero quantity but still carry daily P&L/dividends.
         if abs(signed) <= 0.0001 and (
             alphadesk_pnl is None or abs(alphadesk_pnl) <= 0.005

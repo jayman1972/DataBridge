@@ -553,6 +553,52 @@ def test_aggregate_psc_net_shares() -> None:
     assert row["shares"] == 45000.0
 
 
+def test_alphadesk_dividends_require_matching_ex_date() -> None:
+    rows = [
+        {
+            "company_symbol": "PXT.CA",
+            "description": "PAREX RESOURCES INC",
+            "bbg_ticker": "PXT CN Equity",
+            "security": "PXT.CA",
+            "isin": "",
+            "cusip": "",
+            "sedol": "B575D14",
+            "security_type": "Stock",
+            "long_short": "LONG",
+            "quantity": 24500,
+            "close_price": 12.34,
+            "dividends": 7353.50,
+            "posn_date_int": "20260630",
+            "dividend_ex_date_int": "20260608",
+        },
+        {
+            "company_symbol": "BDGI.CA",
+            "description": "BADGER INFRASTRUCTURE SOLUTI",
+            "bbg_ticker": "BDGI CN Equity",
+            "security": "BDGI.CA",
+            "isin": "",
+            "cusip": "",
+            "sedol": "BLCW7S7",
+            "security_type": "Stock",
+            "long_short": "LONG",
+            "quantity": 0,
+            "close_price": 40.00,
+            "dividends": 1833.00,
+            "posn_date_int": "20260630",
+            "dividend_ex_date_int": "20260630",
+        },
+    ]
+
+    agg = aggregate_psc_by_security(rows)
+
+    pxt = agg["sedol:B575D14"]
+    bdgi = agg["sedol:BLCW7S7"]
+    assert pxt["alphadesk_dividends_present"] is False
+    assert pxt["alphadesk_dividends"] == 0.0
+    assert bdgi["alphadesk_dividends_present"] is True
+    assert bdgi["alphadesk_dividends"] == 1833.00
+
+
 if __name__ == "__main__":
     test_bbg_key_normalization()
     test_bond_compact_match_key()
@@ -579,4 +625,5 @@ if __name__ == "__main__":
     test_futures_match_nqu6_sep26_with_pseudo_cusip()
     test_futures_match_and_price_reconcile()
     test_aggregate_psc_net_shares()
+    test_alphadesk_dividends_require_matching_ex_date()
     print("ok")

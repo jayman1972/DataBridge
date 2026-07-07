@@ -11,6 +11,8 @@ from sggg.close_price_reconcile import (
     aggregate_psc_by_security,
     align_diamond_bond_close,
     apply_diamond_price_discount,
+    build_trade_index_by_match_key,
+    compute_daily_pnl,
     diamond_futures_contract_multiplier,
     is_cash_position,
     merge_orphan_positions_by_close_and_notional,
@@ -599,6 +601,61 @@ def test_alphadesk_dividends_require_matching_ex_date() -> None:
     assert bdgi["alphadesk_dividends"] == 1833.00
 
 
+def test_cg_ca_daily_mtm_pnl() -> None:
+    """EHP Alpha Strategies CG.CA Jul 6 2026 — MTM should match AlphaDesk DAY_PROFIT."""
+    pos_t = {
+        "SecurityName": "Centerra Gold Inc.",
+        "SecurityType": "Common Stock",
+        "PricingTicker": "CG CN",
+        "PortfolioPrice": 23.5,
+        "Quantity": 58500.0,
+        "LongShort": "Long",
+        "QuantityMultiplier": 1.0,
+        "PriceMultiplier": 1.0,
+        "LocalMarketValue": 1374750.0,
+        "BaseMarketValue": 1374750.0,
+        "BaseDividendIncomeSinceReferenceDate": 0.0,
+    }
+    pos_prior = {
+        "SecurityName": "Centerra Gold Inc.",
+        "SecurityType": "Common Stock",
+        "PricingTicker": "CG CN",
+        "PortfolioPrice": 24.41,
+        "Quantity": 59100.0,
+        "LongShort": "Long",
+        "QuantityMultiplier": 1.0,
+        "PriceMultiplier": 1.0,
+        "LocalMarketValue": 1442631.0,
+        "BaseMarketValue": 1442631.0,
+        "BaseDividendIncomeSinceReferenceDate": 3773.0,
+    }
+    trades = [
+        {
+            "Ticker": "CG",
+            "SecurityName": "Centerra Gold Inc.",
+            "TradeDate": "2026-07-06T00:00:00",
+            "TradeType": "Sell",
+            "Quantity": -600.0,
+            "LocalAmountPerShare": 23.6427,
+            "LocalNetAmount": 14185.62,
+            "BaseNetAmount": 14185.62,
+            "IsReversal": False,
+            "IsCancel": False,
+        }
+    ]
+    trade_index = build_trade_index_by_match_key(trades, "2026-07-06")
+    key = reconcile_match_key(company_symbol="CG", security_name="Centerra Gold Inc.")
+    assert key is not None
+    assert key in trade_index
+    pnl = compute_daily_pnl(
+        position_T=pos_t,
+        position_prior=pos_prior,
+        trades_for_symbol=trade_index[key],
+    )
+    assert pnl is not None
+    assert abs(pnl - (-53695.38)) < 1.0
+
+
 if __name__ == "__main__":
     test_bbg_key_normalization()
     test_bond_compact_match_key()
@@ -626,4 +683,5 @@ if __name__ == "__main__":
     test_futures_match_and_price_reconcile()
     test_aggregate_psc_net_shares()
     test_alphadesk_dividends_require_matching_ex_date()
+    test_cg_ca_daily_mtm_pnl()
     print("ok")

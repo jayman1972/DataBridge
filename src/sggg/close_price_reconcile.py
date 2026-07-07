@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1848,6 +1850,7 @@ def build_close_price_reconciliation(
     *,
     prior_diamond_raw: Any = None,
     reference_date_iso: Optional[str] = None,
+    trades_raw: Any = None,
     dsn: str = "PSC_VIEWER",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
@@ -1896,7 +1899,12 @@ def build_close_price_reconciliation(
     diamond_records = flatten_diamond_portfolio_records(diamond_raw)
     meta["diamond_positions"] = len(diamond_records)
     diamond_by_key = aggregate_diamond_by_security(diamond_records, valuation_date_iso)
+    prior_diamond_records: List[Dict[str, Any]] = []
     prior_diamond_by_key: Dict[str, Dict[str, Any]] = {}
+    pos_t_by_key: Dict[str, Dict[str, Any]] = {}
+    pos_prior_by_key: Dict[str, Dict[str, Any]] = {}
+    trade_index: Dict[str, List[Dict[str, Any]]] = {}
+    trade_qty_mismatches: List[Dict[str, Any]] = []
     if prior_diamond_raw is not None and reference_date_iso:
         prior_diamond_records = flatten_diamond_portfolio_records(prior_diamond_raw)
         meta["diamond_prior_positions"] = len(prior_diamond_records)
@@ -1904,6 +1912,20 @@ def build_close_price_reconciliation(
             prior_diamond_records,
             reference_date_iso,
         )
+        pos_t_by_key = _index_diamond_positions_by_match_key(diamond_records, valuation_date_iso)
+        pos_prior_by_key = _index_diamond_positions_by_match_key(
+            prior_diamond_records,
+            reference_date_iso,
+        )
+    if trades_raw is not None and reference_date_iso:
+        underlying_index = build_underlying_ticker_index(diamond_records)
+        trade_index = build_trade_index_by_match_key(
+            flatten_diamond_trade_records(trades_raw),
+            valuation_date_iso,
+            underlying_index=underlying_index,
+        )
+        meta["diamond_trades_on_T"] = sum(len(v) for v in trade_index.values())
+    meta["diamond_pnl_method"] = "daily_mtm"
     if diamond_records and not diamond_by_key:
         meta["diamond_date_warning"] = (
             "No Diamond rows matched valuation date on QuoteDate; check GetPortfolio response."
@@ -1958,6 +1980,9 @@ def build_close_price_reconciliation(
             dia = {**dia, "close_price": dia_close}
         price_diff, dollar_diff, shares = _compute_dollar_difference(psc, dia)
         prior_dia = prior_diamond_by_key.get(key)
+        pos_T = pos_t_by_key.get(key)
+        pos_prior = pos_prior_by_key.get(key)
+        trades_for_symbol = trade_index.get(key, [])
         diamond_pnl: Optional[float] = None
         diamond_total_unrealized = (
             float(dia.get("diamond_total_unrealized") or 0)
@@ -1974,7 +1999,25 @@ def build_close_price_reconciliation(
             if dia and dia.get("diamond_realized_since_ref_present")
             else 0.0
         )
-        if diamond_total_unrealized is not None and diamond_prior_total_unrealized is not None:
+        if pos_T is not None or pos_prior is not None:
+            diamond_pnl = compute_daily_pnl(
+                position_T=pos_T,
+                position_prior=pos_prior,
+                trades_for_symbol=trades_for_symbol,
+                bond_like=bond_like,
+                option_like=option_like,
+                futures_like=futures_like,
+            )
+            mismatch = audit_trade_quantity_continuity(
+                pos_T,
+                pos_prior,
+                trades_for_symbol,
+                match_key=key,
+                ticker=pick_display_ticker(psc, dia) or key,
+            )
+            if mismatch:
+                trade_qty_mismatches.append(mismatch)
+        elif diamond_total_unrealized is not None and diamond_prior_total_unrealized is not None:
             diamond_pnl = round(
                 diamond_total_unrealized
                 - diamond_prior_total_unrealized
@@ -1985,9 +2028,7 @@ def build_close_price_reconciliation(
             dia.get("diamond_unrealized_since_ref_present")
             or dia.get("diamond_realized_since_ref_present")
         ):
-            # Fallback only: Diamond's API "SinceReferenceDate" value has not
-            # matched the PDF change column for all rows, but it is better than
-            # blank when the prior snapshot is unavailable.
+            # Fallback when prior snapshot / trades unavailable.
             diamond_pnl = round(
                 float(dia.get("diamond_unrealized_since_ref") or 0)
                 + float(dia.get("diamond_realized_since_ref") or 0),
@@ -2095,6 +2136,8 @@ def build_close_price_reconciliation(
         ),
         2,
     )
+    if trade_qty_mismatches:
+        meta["trade_qty_mismatches"] = trade_qty_mismatches
     return lines, meta
 
 
@@ -2195,6 +2238,265 @@ def _summarize_debug_record(record: Dict[str, Any], fields: Tuple[str, ...]) -> 
     out = {field: record.get(field) for field in fields if field in record}
     out["_full_record"] = record
     return out
+
+
+def _d(value: Any) -> Decimal:
+    """Safe decimal parse — Diamond fields arrive as strings or floats."""
+    if value is None or value == "":
+        return Decimal("0")
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return Decimal("0")
+
+
+def _trade_date_iso(trade: Dict[str, Any]) -> str:
+    raw = _norm(trade.get("TradeDate") or trade.get("ValuationDate"))
+    return raw[:10] if len(raw) >= 10 else raw
+
+
+def _position_base_income(row: Optional[Dict[str, Any]]) -> Decimal:
+    if not row:
+        return Decimal("0")
+    dividend = _d(row.get("BaseDividendIncomeSinceReferenceDate"))
+    interest = _d(row.get("BaseInterestIncomeSinceReferenceDate"))
+    withholding = _d(row.get("BaseWithholdingTaxSinceReferenceDate"))
+    return dividend + interest - withholding
+
+
+def _position_fx_to_base(row: Dict[str, Any]) -> Decimal:
+    local_mv = _d(row.get("LocalMarketValue"))
+    base_mv = _d(row.get("BaseMarketValue"))
+    if local_mv != 0:
+        return base_mv / local_mv
+    return Decimal("1")
+
+
+def _position_price_multiplier_for_mtm(
+    row: Dict[str, Any],
+    *,
+    bond_like: bool,
+    option_like: bool,
+    futures_like: bool,
+) -> Decimal:
+    if futures_like:
+        return _d(diamond_futures_contract_multiplier(row))
+    sec_type = row.get("SecurityType") or row.get("AssetType")
+    pricing = row.get("PricingTicker") or row.get("SecurityName")
+    mult = notional_quantity_multiplier(sec_type, pricing)
+    return _d(mult)
+
+
+def _position_close_for_mtm(
+    row: Dict[str, Any],
+    *,
+    bond_like: bool,
+    option_like: bool,
+    futures_like: bool,
+) -> Decimal:
+    sec_name = row.get("SecurityName")
+    sec_type = row.get("SecurityType") or row.get("AssetType")
+    pricing = row.get("PricingTicker")
+    if futures_like:
+        return _d(normalize_diamond_futures_close(row))
+    return _d(
+        normalize_diamond_close_price(
+            row.get("PortfolioPrice"),
+            security_name=sec_name,
+            security_type=sec_type,
+            bbg_ticker=pricing,
+            is_bond_like=bond_like,
+            is_option_like=option_like,
+            price_discount=row.get("PriceDiscount"),
+            pre_discount_price=row.get("PreDiscountPrice"),
+        )
+    )
+
+
+def _merge_position_legs(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+    net_qty = sum(_diamond_signed_qty(row) for row in rows)
+    main = max(rows, key=lambda row: abs(_diamond_signed_qty(row)))
+    merged = dict(main)
+    merged["Quantity"] = float(net_qty)
+    return merged
+
+
+def _index_diamond_positions_by_match_key(
+    records: List[Dict[str, Any]],
+    valuation_date_iso: str,
+) -> Dict[str, Dict[str, Any]]:
+    dated = [r for r in records if _normalize_quote_date(r.get("QuoteDate"), valuation_date_iso)]
+    use_rows = dated if dated else records
+    underlying_index = build_underlying_ticker_index(records)
+    legs: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in use_rows:
+        key = _diamond_match_key(row, underlying_index=underlying_index)
+        if not key:
+            continue
+        legs[key].append(row)
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, rows in legs.items():
+        merged = _merge_position_legs(rows)
+        if merged is not None:
+            out[key] = merged
+    return out
+
+
+def _trade_match_key(
+    trade: Dict[str, Any],
+    *,
+    underlying_index: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    opt_root = ""
+    bbg = _norm(trade.get("BBGID"))
+    if underlying_index and bbg and bbg in underlying_index:
+        opt_root = underlying_index[bbg]
+    ticker = _norm(trade.get("Ticker"))
+    if not opt_root and ticker and len(ticker) <= 12 and " " not in ticker:
+        opt_root = ticker.upper()
+    return reconcile_match_key(
+        company_symbol=ticker or trade.get("SecurityName"),
+        bbg_ticker=ticker,
+        sedol=trade.get("SEDOL"),
+        isin=trade.get("ISIN"),
+        cusip=trade.get("CUSIP"),
+        description=trade.get("SecurityName"),
+        security_name=trade.get("SecurityName"),
+        option_underlying_root=opt_root,
+    )
+
+
+def build_trade_index_by_match_key(
+    trades: List[Dict[str, Any]],
+    valuation_date_iso: str,
+    *,
+    underlying_index: Optional[Dict[str, str]] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Group same-day trades on valuation_date by reconcile match key.
+
+    Each entry: qty (signed +buy / -sell), local trade price, fx to base.
+    """
+    valuation_date = normalize_valuation_date(valuation_date_iso)
+    idx: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for trade in trades:
+        if str(trade.get("IsReversal") or "").lower() == "true":
+            continue
+        if str(trade.get("IsCancel") or "").lower() == "true":
+            continue
+        trade_date = _trade_date_iso(trade)
+        if trade_date and trade_date != valuation_date:
+            continue
+        key = _trade_match_key(trade, underlying_index=underlying_index)
+        if not key:
+            continue
+        qty = _d(trade.get("Quantity"))
+        trade_type = _norm(trade.get("TradeType")).upper()
+        if trade_type == "SELL" and qty > 0:
+            qty = -qty
+        elif trade_type == "BUY" and qty < 0:
+            qty = abs(qty)
+        price = _d(trade.get("LocalAmountPerShare"))
+        local_net = _d(trade.get("LocalNetAmount"))
+        base_net = _d(trade.get("BaseNetAmount"))
+        fx = Decimal("1")
+        if local_net != 0:
+            fx = abs(base_net / local_net)
+        idx[key].append({"qty": qty, "price": price, "fx": fx})
+    return idx
+
+
+def compute_daily_pnl(
+    position_T: Optional[Dict[str, Any]],
+    position_prior: Optional[Dict[str, Any]],
+    trades_for_symbol: List[Dict[str, Any]],
+    *,
+    bond_like: bool = False,
+    option_like: bool = False,
+    futures_like: bool = False,
+    income_from_t_snapshot_only: bool = True,
+) -> Optional[float]:
+    """
+    True daily MTM in base ccy from two Diamond snapshots plus same-day trades.
+
+    pnl = (Price_T - Price_prior) * Qty_prior * mult * fx_T
+        + sum((Price_T - TradePrice) * TradeQty * mult * fx_T)
+        + income booked on T (dividend/coupon accrual on the T snapshot)
+    """
+    if position_T is None:
+        return None
+
+    price_T = _position_close_for_mtm(
+        position_T,
+        bond_like=bond_like,
+        option_like=option_like,
+        futures_like=futures_like,
+    )
+    if position_prior is not None:
+        price_prior = _position_close_for_mtm(
+            position_prior,
+            bond_like=bond_like,
+            option_like=option_like,
+            futures_like=futures_like,
+        )
+        qty_prior = _d(_diamond_signed_qty(position_prior))
+    else:
+        price_prior = price_T
+        qty_prior = Decimal("0")
+
+    fx_T = _position_fx_to_base(position_T)
+    mult = _position_price_multiplier_for_mtm(
+        position_T,
+        bond_like=bond_like,
+        option_like=option_like,
+        futures_like=futures_like,
+    )
+
+    mtm_carry = (price_T - price_prior) * qty_prior * mult * fx_T
+
+    mtm_trades = Decimal("0")
+    for trade in trades_for_symbol:
+        trade_fx = trade.get("fx") or fx_T
+        mtm_trades += (price_T - trade["price"]) * trade["qty"] * mult * trade_fx
+
+    if income_from_t_snapshot_only:
+        income_delta = _position_base_income(position_T)
+    else:
+        income_delta = _position_base_income(position_T) - _position_base_income(position_prior)
+
+    return round(float(mtm_carry + mtm_trades + income_delta), 2)
+
+
+def audit_trade_quantity_continuity(
+    position_T: Optional[Dict[str, Any]],
+    position_prior: Optional[Dict[str, Any]],
+    trades_for_symbol: List[Dict[str, Any]],
+    *,
+    match_key: str,
+    ticker: str,
+) -> Optional[Dict[str, Any]]:
+    """Log when qty_T != qty_prior + sum(trade qty) — catches timezone / booking issues."""
+    if not trades_for_symbol:
+        return None
+    qty_T = _d(_diamond_signed_qty(position_T)) if position_T else Decimal("0")
+    qty_prior = _d(_diamond_signed_qty(position_prior)) if position_prior else Decimal("0")
+    trade_sum = sum(trade["qty"] for trade in trades_for_symbol)
+    expected = qty_prior + trade_sum
+    if abs(qty_T - expected) <= Decimal("0.01"):
+        return None
+    return {
+        "match_key": match_key,
+        "ticker": ticker,
+        "qty_prior": float(qty_prior),
+        "trade_qty_sum": float(trade_sum),
+        "qty_T": float(qty_T),
+        "expected_qty_T": float(expected),
+        "difference": float(qty_T - expected),
+    }
 
 
 def flatten_diamond_trade_records(raw: Any) -> List[Dict[str, Any]]:
@@ -2317,6 +2619,8 @@ def fetch_close_price_reconciliation(
         return [], {"fund_id": fund_id, "valuation_date": valuation_date_norm}, str(exc)
     prior_raw = None
     prior_error = None
+    trades_raw = None
+    trades_error = None
     if reference_date:
         try:
             prior_raw = diamond_client.get_portfolio(
@@ -2325,12 +2629,22 @@ def fetch_close_price_reconciliation(
             )
         except Exception as exc:
             prior_error = str(exc)
+        try:
+            trades_raw = diamond_client.get_portfolio_trades(
+                fund_parent_id=fund_id,
+                start_date=reference_date,
+                end_date=valuation_date_norm,
+                date_type="ValuationDate",
+            )
+        except Exception as exc:
+            trades_error = str(exc)
     lines, meta = build_close_price_reconciliation(
         fund_id,
         valuation_date_norm,
         raw,
         prior_diamond_raw=prior_raw,
         reference_date_iso=reference_date,
+        trades_raw=trades_raw,
     )
     meta["fund_id"] = fund_id
     meta["valuation_date"] = valuation_date_norm
@@ -2342,19 +2656,9 @@ def fetch_close_price_reconciliation(
         meta["diamond_reference_warning"] = reference_error
     if prior_error:
         meta["diamond_prior_warning"] = prior_error
+    if trades_error:
+        meta["diamond_trades_warning"] = trades_error
     if debug_ticker:
-        trades_raw = None
-        trades_error = None
-        if reference_date:
-            try:
-                trades_raw = diamond_client.get_portfolio_trades(
-                    fund_parent_id=fund_id,
-                    start_date=reference_date,
-                    end_date=valuation_date_norm,
-                    date_type="ValuationDate",
-                )
-            except Exception as exc:
-                trades_error = str(exc)
         meta["debug"] = build_close_price_debug_payload(
             fund_id,
             valuation_date_norm,

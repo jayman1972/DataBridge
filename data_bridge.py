@@ -78,7 +78,7 @@ from sggg.nav_sheet_parse import (
 from sggg.compliance_check_estimates import compliance_aum_change_ex_flows, estimates_by_fund_id
 from sggg.diamond_nav_store import load_snapshots_bulk, snapshot_usable, upsert_snapshot
 from sggg.psc_boxed_positions import fetch_boxed_positions_for_funds
-from sggg.close_price_reconcile import fetch_close_price_reconciliation
+from sggg.close_price_reconcile import fetch_close_price_reconciliation, resolve_close_price_fund_id
 from sggg.operations_reports import (
     OPERATIONS_REPORT_TYPES,
     REPORT_ETFS,
@@ -2478,7 +2478,19 @@ def sggg_close_price_reconciliation():
         if not client:
             return jsonify({"error": "Diamond API not configured."}), 503
         data = request.get_json(silent=True) or {}
-        fund_id = (request.args.get("fund_id") or data.get("fund_id") or "").strip()
+        fund_id = (
+            request.args.get("fund_id")
+            or data.get("fund_id")
+            or request.args.get("fund")
+            or data.get("fund")
+            or ""
+        ).strip()
+        fund_id = resolve_close_price_fund_id(fund_id)
+        debug_ticker = (
+            request.args.get("debug_ticker")
+            or data.get("debug_ticker")
+            or ""
+        ).strip()
         raw_date = (
             request.args.get("date")
             or request.args.get("valuation_date")
@@ -2491,19 +2503,25 @@ def sggg_close_price_reconciliation():
             return jsonify({"error": "valuation_date required"}), 400
         valuation_date = normalize_valuation_date(str(raw_date))
         t0 = time.time()
-        lines, meta, err = fetch_close_price_reconciliation(fund_id, valuation_date, client)
+        lines, meta, err = fetch_close_price_reconciliation(
+            fund_id,
+            valuation_date,
+            client,
+            debug_ticker=debug_ticker or None,
+        )
         if err:
             return jsonify({"error": err, "meta": meta}), 502
-        return jsonify(
-            {
-                "fund_id": fund_id,
-                "valuation_date": valuation_date,
-                "lines": lines,
-                "meta": meta,
-                "timing_sec": round(time.time() - t0, 2),
-                "nav_checker_build": "sggg-close-price-v30",
-            }
-        )
+        response = {
+            "fund_id": fund_id,
+            "valuation_date": valuation_date,
+            "lines": lines,
+            "meta": meta,
+            "timing_sec": round(time.time() - t0, 2),
+            "nav_checker_build": "sggg-close-price-v31-debug",
+        }
+        if meta.get("debug"):
+            response["debug"] = meta.pop("debug")
+        return jsonify(response)
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

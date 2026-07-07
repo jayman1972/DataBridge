@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from sggg.compliance_check_estimates import FUND_NAME_TO_ID
 from sggg.nav_sheet_parse import normalize_valuation_date, prior_business_day_iso
 from sggg.psc_boxed_positions import (
     _norm,
@@ -2095,10 +2098,204 @@ def build_close_price_reconciliation(
     return lines, meta
 
 
+_DEBUG_POSITION_FIELDS = (
+    "CompanySymbol",
+    "PricingTicker",
+    "SecurityName",
+    "SecurityType",
+    "LongShort",
+    "QuoteDate",
+    "PortfolioPrice",
+    "Quantity",
+    "QuantityMultiplier",
+    "BaseTotalUnrealizedGainLoss",
+    "BaseUnrealizedGainLossSinceReferenceDate",
+    "BaseUnrealizedGainLossSinceReferenceDateDueToPriceChange",
+    "BaseUnrealizedGainLossSinceReferenceDateDueToFX",
+    "BaseRealizedGainLossSinceReferenceDate",
+    "BaseDividendIncomeSinceReferenceDate",
+    "LocalMarketValue",
+    "BaseMarketValue",
+    "PriceSource",
+    "QuoteType",
+)
+
+_DEBUG_TRADE_FIELDS = (
+    "Ticker",
+    "SecurityName",
+    "ValuationDate",
+    "TradeDate",
+    "SettlementDate",
+    "TradeType",
+    "Quantity",
+    "LocalAmountPerShare",
+    "BaseNetAmount",
+    "IsReversal",
+    "IsBackDated",
+    "IsCancel",
+)
+
+
+def resolve_close_price_fund_id(fund_or_id: str) -> str:
+    """Map fund display name or GUID to Diamond fund parent id."""
+    raw = (fund_or_id or "").strip()
+    if not raw:
+        return ""
+    key = re.sub(r"\s+", " ", raw.upper())
+    if key in FUND_NAME_TO_ID:
+        return FUND_NAME_TO_ID[key]
+    for name, fid in FUND_NAME_TO_ID.items():
+        if key in name or name.startswith(key):
+            return fid
+    return raw
+
+
+def _debug_ticker_matches(value: Any, ticker: str) -> bool:
+    text = _norm(value).upper()
+    if not text:
+        return False
+    ticker_u = ticker.upper()
+    if text == ticker_u:
+        return True
+    if text.startswith(f"{ticker_u} "):
+        return True
+    if f" {ticker_u} " in f" {text} ":
+        return True
+    return False
+
+
+def _record_matches_debug_ticker(record: Dict[str, Any], ticker: str) -> bool:
+    ticker_u = ticker.upper()
+    root = ticker_u.split(".")[0] if "." in ticker_u else ticker_u
+    for field in (
+        "CompanySymbol",
+        "PricingTicker",
+        "SecurityName",
+        "Symbol",
+        "Ticker",
+        "SEDOL",
+        "CUSIP",
+        "ISIN",
+    ):
+        val = _norm(record.get(field)).upper()
+        if not val:
+            continue
+        if val == ticker_u or val == root:
+            return True
+        if field in ("PricingTicker", "Ticker", "CompanySymbol"):
+            token = val.split()[0] if " " in val else val
+            if token == root:
+                return True
+        if _debug_ticker_matches(val, ticker_u):
+            return True
+    return False
+
+
+def _summarize_debug_record(record: Dict[str, Any], fields: Tuple[str, ...]) -> Dict[str, Any]:
+    out = {field: record.get(field) for field in fields if field in record}
+    out["_full_record"] = record
+    return out
+
+
+def flatten_diamond_trade_records(raw: Any) -> List[Dict[str, Any]]:
+    """Extract flat PortfolioTrade dicts from GetPortfolioTrades JSON."""
+    if not isinstance(raw, dict):
+        return []
+    body = (
+        raw.get("GetPortfolioTradesResponse")
+        or raw.get("GetPortfolioTrades")
+        or raw
+    )
+    if not isinstance(body, dict):
+        return []
+    trades = body.get("PortfolioTrades") or body.get("PortfolioTrade") or []
+    if isinstance(trades, dict):
+        inner = trades.get("PortfolioTrade")
+        if isinstance(inner, dict):
+            return [inner]
+        if isinstance(inner, list):
+            return [t for t in inner if isinstance(t, dict)]
+        return [trades]
+    if isinstance(trades, list):
+        return [t for t in trades if isinstance(t, dict)]
+    return []
+
+
+def _portfolio_header_dates(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    body = raw.get("GetPortfolioResponse") or raw
+    if not isinstance(body, dict):
+        return {}
+    return {
+        key: body.get(key)
+        for key in ("ReferenceDate", "ValuationDate", "FundParent", "ManagementCompanyCode")
+        if body.get(key) is not None
+    }
+
+
+def build_close_price_debug_payload(
+    fund_id: str,
+    valuation_date_iso: str,
+    debug_ticker: str,
+    *,
+    diamond_raw: Any,
+    prior_diamond_raw: Any,
+    reference_date_iso: Optional[str],
+    trades_raw: Any = None,
+    trades_error: Optional[str] = None,
+) -> Dict[str, Any]:
+    """TEMP: NAV checker debug bundle for a single ticker (JSON Diamond records, not XML)."""
+    ticker = (debug_ticker or "").strip().upper()
+    valuation_date_norm = normalize_valuation_date(valuation_date_iso)
+    positions_t = [
+        _summarize_debug_record(row, _DEBUG_POSITION_FIELDS)
+        for row in flatten_diamond_portfolio_records(diamond_raw)
+        if _record_matches_debug_ticker(row, ticker)
+    ]
+    positions_prior = [
+        _summarize_debug_record(row, _DEBUG_POSITION_FIELDS)
+        for row in flatten_diamond_portfolio_records(prior_diamond_raw)
+        if _record_matches_debug_ticker(row, ticker)
+    ]
+    trades = [
+        _summarize_debug_record(row, _DEBUG_TRADE_FIELDS)
+        for row in flatten_diamond_trade_records(trades_raw)
+        if _record_matches_debug_ticker(row, ticker)
+    ]
+    payload = {
+        "ticker": ticker,
+        "fund_id": fund_id,
+        "valuation_date_T": valuation_date_norm,
+        "valuation_date_prior": reference_date_iso,
+        "portfolio_header_T": _portfolio_header_dates(diamond_raw),
+        "portfolio_header_prior": _portfolio_header_dates(prior_diamond_raw),
+        "positions_T": positions_t,
+        "positions_prior": positions_prior,
+        "trades_T": trades,
+        "trades_error": trades_error,
+        "note": (
+            "Diamond API returns JSON (PortfolioRecordDetails / PortfolioTrade), not raw XML. "
+            "_full_record on each item has all fields from the API."
+        ),
+    }
+    log_dir = Path(__file__).resolve().parents[2] / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"nav_checker_debug_{ticker}_{valuation_date_norm}.json"
+        log_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        payload["debug_log_path"] = str(log_path)
+    except OSError:
+        payload["debug_log_path"] = None
+    return payload
+
+
 def fetch_close_price_reconciliation(
     fund_id: str,
     valuation_date_iso: str,
     diamond_client: Any,
+    *,
+    debug_ticker: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[str]]:
     """Load Diamond portfolio and PSC, return reconciliation lines."""
     valuation_date_norm = normalize_valuation_date(valuation_date_iso)
@@ -2145,4 +2342,27 @@ def fetch_close_price_reconciliation(
         meta["diamond_reference_warning"] = reference_error
     if prior_error:
         meta["diamond_prior_warning"] = prior_error
+    if debug_ticker:
+        trades_raw = None
+        trades_error = None
+        if reference_date:
+            try:
+                trades_raw = diamond_client.get_portfolio_trades(
+                    fund_parent_id=fund_id,
+                    start_date=reference_date,
+                    end_date=valuation_date_norm,
+                    date_type="ValuationDate",
+                )
+            except Exception as exc:
+                trades_error = str(exc)
+        meta["debug"] = build_close_price_debug_payload(
+            fund_id,
+            valuation_date_norm,
+            debug_ticker,
+            diamond_raw=raw,
+            prior_diamond_raw=prior_raw,
+            reference_date_iso=reference_date,
+            trades_raw=trades_raw,
+            trades_error=trades_error,
+        )
     return lines, meta, None

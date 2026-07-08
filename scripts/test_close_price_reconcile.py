@@ -656,6 +656,50 @@ def test_cg_ca_daily_mtm_pnl() -> None:
     assert abs(pnl - (-53695.38)) < 1.0
 
 
+def test_diamond_rows_for_valuation_date_per_security_quote_lag() -> None:
+    """Jul 3 reference must not drop AMAT when its QuoteDate is Jul 2 but others are Jul 3."""
+    from sggg.close_price_reconcile import (
+        _diamond_rows_for_valuation_date,
+        _index_diamond_positions_by_match_key,
+    )
+
+    records = [
+        {
+            "SecurityName": "Applied Materials Inc.",
+            "SecurityType": "Common Stock",
+            "CompanySymbol": "AMAT",
+            "CUSIP": "038222105",
+            "ISIN": "US0382221051",
+            "PricingTicker": "AMAT US",
+            "QuoteDate": "2026-07-02",
+            "PortfolioPrice": 603.04,
+            "Quantity": 1100.0,
+            "LongShort": "Long",
+        },
+        {
+            "SecurityName": "Centerra Gold Inc.",
+            "SecurityType": "Common Stock",
+            "CompanySymbol": "CG",
+            "CUSIP": "152006102",
+            "ISIN": "CA1520061021",
+            "PricingTicker": "CG CN",
+            "QuoteDate": "2026-07-03",
+            "PortfolioPrice": 24.41,
+            "Quantity": 59100.0,
+            "LongShort": "Long",
+        },
+    ]
+    selected = _diamond_rows_for_valuation_date(records, "2026-07-03")
+    assert len(selected) == 2
+    amat = next(r for r in selected if r["CUSIP"] == "038222105")
+    assert amat["QuoteDate"] == "2026-07-02"
+    assert amat["PortfolioPrice"] == 603.04
+
+    indexed = _index_diamond_positions_by_match_key(records, "2026-07-03")
+    assert "isin:US0382221051" in indexed
+    assert indexed["isin:US0382221051"]["PortfolioPrice"] == 603.04
+
+
 def test_cg_ca_mtm_lookup_keys_resolve_cusip_and_line_ticker() -> None:
     """ISIN canonical key must find Diamond snapshots (CUSIP) and trades (line:CG)."""
     from sggg.close_price_reconcile import (
@@ -779,5 +823,6 @@ if __name__ == "__main__":
     test_aggregate_psc_net_shares()
     test_alphadesk_dividends_require_matching_ex_date()
     test_cg_ca_daily_mtm_pnl()
+    test_diamond_rows_for_valuation_date_per_security_quote_lag()
     test_cg_ca_mtm_lookup_keys_resolve_cusip_and_line_ticker()
     print("ok")

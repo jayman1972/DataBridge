@@ -1678,6 +1678,58 @@ def _normalize_quote_date(val: Any, valuation_date_iso: str) -> bool:
     return compact == val_compact
 
 
+def _quote_date_iso(val: Any) -> Optional[str]:
+    quote = _norm(val)
+    if not quote:
+        return None
+    if len(quote) >= 10:
+        return normalize_valuation_date(quote[:10])
+    compact = quote.replace("-", "")[:8]
+    if len(compact) == 8:
+        return f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
+    return None
+
+
+def _diamond_rows_for_valuation_date(
+    records: List[Dict[str, Any]],
+    valuation_date_iso: str,
+) -> List[Dict[str, Any]]:
+    """
+    Pick the best Diamond row per security for a valuation date.
+
+    Do not drop names whose QuoteDate lags the portfolio (e.g. Jul 2 quote on a
+    Jul 3 reference after a holiday) just because other holdings have Jul 3 quotes.
+    """
+    if not records:
+        return []
+    val = normalize_valuation_date(valuation_date_iso)
+    underlying_index = build_underlying_ticker_index(records)
+    legs: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in records:
+        key = _diamond_match_key(row, underlying_index=underlying_index)
+        if not key:
+            continue
+        legs[key].append(row)
+
+    selected: List[Dict[str, Any]] = []
+    for rows in legs.values():
+        exact = [r for r in rows if _normalize_quote_date(r.get("QuoteDate"), val)]
+        if exact:
+            selected.extend(exact)
+            continue
+        on_or_before: List[tuple[str, Dict[str, Any]]] = []
+        for row in rows:
+            qiso = _quote_date_iso(row.get("QuoteDate"))
+            if qiso and qiso <= val:
+                on_or_before.append((qiso, row))
+        if on_or_before:
+            best = max(q for q, _ in on_or_before)
+            selected.extend(row for q, row in on_or_before if q == best)
+        else:
+            selected.extend(rows)
+    return selected
+
+
 def _diamond_match_key(
     row: Dict[str, Any],
     *,
@@ -1720,8 +1772,7 @@ def aggregate_diamond_by_security(
 ) -> Dict[str, Dict[str, Any]]:
     """Roll Diamond holdings to one row per reconcile_match_key."""
     out: Dict[str, Dict[str, Any]] = {}
-    dated = [r for r in records if _normalize_quote_date(r.get("QuoteDate"), valuation_date_iso)]
-    use_rows = dated if dated else records
+    use_rows = _diamond_rows_for_valuation_date(records, valuation_date_iso)
     underlying_index = build_underlying_ticker_index(records)
     for row in use_rows:
         sec_name = row.get("SecurityName")
@@ -2411,8 +2462,7 @@ def _index_diamond_positions_by_match_key(
     records: List[Dict[str, Any]],
     valuation_date_iso: str,
 ) -> Dict[str, Dict[str, Any]]:
-    dated = [r for r in records if _normalize_quote_date(r.get("QuoteDate"), valuation_date_iso)]
-    use_rows = dated if dated else records
+    use_rows = _diamond_rows_for_valuation_date(records, valuation_date_iso)
     underlying_index = build_underlying_ticker_index(records)
     legs: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for row in use_rows:

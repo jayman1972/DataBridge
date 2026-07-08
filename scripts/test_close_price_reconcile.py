@@ -14,7 +14,9 @@ from sggg.close_price_reconcile import (
     build_trade_index_by_match_key,
     compute_daily_pnl,
     diamond_futures_contract_multiplier,
+    is_bond_like_position,
     is_cash_position,
+    is_futures_like_position,
     merge_orphan_positions_by_close_and_notional,
     merge_positions_by_secondary_ids,
     normalize_bbg_key,
@@ -602,6 +604,82 @@ def test_alphadesk_dividends_require_matching_ex_date() -> None:
     assert bdgi["alphadesk_dividends"] == 1833.00
 
 
+def test_bond_daily_mtm_pnl_par_multiplier() -> None:
+    """Bond MTM must use 0.01 mult when prices are normalized to par %."""
+    pos_t = {
+        "SecurityName": "Vermilion Energy Inc. 7.25% 15FEB2033",
+        "SecurityType": None,
+        "PricingTicker": "VETCN 7.25 02-33 CA",
+        "PortfolioPrice": 0.9745,
+        "Quantity": 200000.0,
+        "LongShort": "Long",
+        "LocalMarketValue": 194900.0,
+        "BaseMarketValue": 194900.0,
+    }
+    pos_prior = {
+        "SecurityName": "Vermilion Energy Inc. 7.25% 15FEB2033",
+        "SecurityType": None,
+        "PricingTicker": "VETCN 7.25 02-33 CA",
+        "PortfolioPrice": 0.97395,
+        "Quantity": 200000.0,
+        "LongShort": "Long",
+        "LocalMarketValue": 194790.0,
+        "BaseMarketValue": 194790.0,
+    }
+    pnl = compute_daily_pnl(
+        position_T=pos_t,
+        position_prior=pos_prior,
+        trades_for_symbol=[],
+        bond_like=True,
+    )
+    assert pnl is not None
+    assert abs(pnl - 110.0) < 1.0
+
+
+def test_corp_bond_bbg_ticker_not_futures() -> None:
+    """Bloomberg corp FIGI tickers (@bvn4) must not parse as futures month codes."""
+    assert parse_futures_contract_key("US923725AE50@bvn4 corp") is None
+    assert parse_futures_contract_key("US31575FAC05@bvn4 corp") is None
+    assert not is_futures_like_position(
+        security_type="Bond",
+        bbg_ticker="US923725AE50@bvn4 corp",
+        security="VETCN 7.25 02-33 CA",
+        cusip="923725AE5",
+    )
+    assert is_bond_like_position(
+        security_type="Bond",
+        description="VETCN 7.25 02-33 CA",
+        bbg_ticker="US923725AE50@bvn4 corp",
+    )
+
+
+def test_cusip_not_matched_as_futures_root() -> None:
+    assert parse_futures_contract_key("836720AG7") is None
+
+
+def test_psc_bond_aggregate_not_futures_like() -> None:
+    psc_rows = [
+        {
+            "company_symbol": "VETCN",
+            "description": "VERMILION ENERGY INC",
+            "bbg_ticker": "US923725AE50@bvn4 corp",
+            "security": "VETCN 7.25 02-33 CA",
+            "isin": "US923725AE50",
+            "cusip": "923725AE5",
+            "sedol": "",
+            "security_type": "Bond",
+            "long_short": "LONG",
+            "quantity": 200000,
+            "close_price": 98.079,
+            "day_profit": 1839.4,
+        },
+    ]
+    psc = aggregate_psc_by_security(psc_rows)
+    bucket = next(iter(psc.values()))
+    assert bucket["is_bond_like"] is True
+    assert bucket["is_futures_like"] is False
+
+
 def test_futures_option_trade_qty_scaled_by_contract_multiplier() -> None:
     """Crude futures option trades report qty in barrels (contracts x 1000)."""
     from decimal import Decimal
@@ -1034,6 +1112,10 @@ if __name__ == "__main__":
     test_futures_match_nqu6_sep26_with_pseudo_cusip()
     test_futures_match_and_price_reconcile()
     test_futures_option_match_clq6c_and_cou6c()
+    test_bond_daily_mtm_pnl_par_multiplier()
+    test_corp_bond_bbg_ticker_not_futures()
+    test_cusip_not_matched_as_futures_root()
+    test_psc_bond_aggregate_not_futures_like()
     test_futures_option_trade_qty_scaled_by_contract_multiplier()
     test_futures_option_close_out_mtm_pnl()
     test_aggregate_psc_net_shares()

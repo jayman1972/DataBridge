@@ -88,13 +88,16 @@ def _parse_bloomberg_futures_parts(text: Any) -> Optional[Tuple[str, int, int]]:
     if not raw:
         return None
     token = _FUTURES_BBG_SUFFIX_RE.sub("", raw.split()[0])
+    # Bloomberg corp/FIGI tickers (e.g. US923725AE50@bvn4) must not match month codes.
+    if "@" in token:
+        return None
     # Non-greedy root: NQM6 -> NQ + M + 6, not NQM + M + 6.
     m = re.match(r"^(.+?)([FGHJKMNQUVXZ])(\d{1,2})$", token)
     if not m:
         return None
     root, month_code, year_digits = m.groups()
     month = _FUTURES_MONTH_CODE.get(month_code.upper())
-    if not month or not root:
+    if not month or not root or len(root) > 6:
         return None
     return root.upper(), _futures_year_from_digits(year_digits), month
 
@@ -311,12 +314,16 @@ def is_futures_like_position(
     cusip: Any = None,
     match_key: Any = None,
 ) -> bool:
+    if _is_bond_security_type(security_type):
+        return False
     if _is_futures_security_type(security_type):
         return True
     mk = _norm(match_key)
     if mk.startswith("fut:"):
         return True
-    for candidate in (bbg_ticker, security, company_symbol, cusip, security_name, description):
+    for candidate in (bbg_ticker, security, company_symbol, security_name, description):
+        if _looks_like_bond_description(candidate):
+            continue
         if parse_futures_contract_key(candidate):
             return True
     return False
@@ -700,6 +707,7 @@ def is_bond_like_position(
     company_symbol: Any = None,
     description: Any = None,
     security_name: Any = None,
+    bbg_ticker: Any = None,
     match_key: Any = None,
 ) -> bool:
     """PSC SECURITY_TYPE Bond (etc.) is authoritative; patterns are fallback for Diamond."""
@@ -708,8 +716,12 @@ def is_bond_like_position(
     mk = _norm(match_key)
     if mk.startswith("bond:"):
         return True
-    for text in (company_symbol, description, security_name):
+    for text in (company_symbol, description, security_name, bbg_ticker):
         if _looks_like_bond_description(text):
+            return True
+    for text in (security_name, description):
+        t = _norm(text).upper()
+        if t and re.search(r"\d+\.?\d*\s*%", t):
             return True
     return False
 
@@ -834,7 +846,7 @@ def notional_quantity_multiplier(
     """
     if _is_option_security_type(security_type) or _looks_like_option_description(description):
         return 100.0
-    if _is_bond_security_type(security_type):
+    if _is_bond_security_type(security_type) or _looks_like_bond_description(description):
         return 0.01
     if _is_futures_security_type(security_type) or parse_futures_contract_key(description):
         cs = _nonzero_amount(contract_size)
@@ -1767,7 +1779,8 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             bond_like = is_bond_like_position(
                 security_type=row.get("security_type"),
                 company_symbol=row.get("company_symbol"),
-                description=row.get("description"),
+                description=row.get("description") or row.get("security"),
+                bbg_ticker=row.get("bbg_ticker"),
                 match_key=key,
             ) and not opt_like and not fut_like and not pref_like and not futopt_like
             bucket = {
@@ -2063,6 +2076,8 @@ def aggregate_diamond_by_security(
                 security_type=sec_type,
                 company_symbol=sec_name,
                 security_name=sec_name,
+                description=pricing,
+                bbg_ticker=pricing,
                 match_key=key,
             )
             or _nonzero_amount(row.get("PriceDiscount")) is not None
@@ -2086,6 +2101,8 @@ def aggregate_diamond_by_security(
             mult = qm if qm is not None else 1000.0
         elif fut_like:
             mult = diamond_futures_contract_multiplier(row)
+        elif bond_like:
+            mult = 0.01
         else:
             mult = notional_quantity_multiplier(sec_type, pricing or sec_name)
         bucket = out.get(key)
@@ -2323,18 +2340,30 @@ def build_close_price_reconciliation(
         )
         if futures_option_like:
             option_like = False
-        futures_like = bool(
-            (psc and psc.get("is_futures_like"))
-            or (dia and dia.get("is_futures_like"))
-            or ((key or "").startswith("fut:") and not futures_option_like)
-        )
-        bond_like = (
+        bond_like = bool(
             not option_like
-            and not futures_like
             and bool(
                 (psc and psc.get("is_bond_like"))
                 or (dia and dia.get("is_bond_like"))
-                or is_bond_like_position(match_key=key)
+                or is_bond_like_position(
+                    match_key=key,
+                    security_type=(psc or dia or {}).get("security_type"),
+                    company_symbol=(psc or {}).get("company_symbol"),
+                    description=(psc or {}).get("description")
+                    or (psc or {}).get("security")
+                    or (dia or {}).get("description"),
+                    security_name=(dia or {}).get("security_name"),
+                    bbg_ticker=(psc or {}).get("bbg_ticker") or (dia or {}).get("bbg_ticker"),
+                )
+            )
+        )
+        futures_like = bool(
+            not bond_like
+            and not futures_option_like
+            and (
+                (psc and psc.get("is_futures_like"))
+                or (dia and dia.get("is_futures_like"))
+                or ((key or "").startswith("fut:"))
             )
         )
         dia_close = align_diamond_bond_close(
@@ -2641,6 +2670,27 @@ def _position_fx_to_base(row: Dict[str, Any]) -> Decimal:
     return Decimal("1")
 
 
+def _mtm_trade_price(
+    trade_price: Decimal,
+    position_T: Dict[str, Any],
+    *,
+    bond_like: bool,
+) -> Decimal:
+    if not bond_like:
+        return trade_price
+    sec_name = position_T.get("SecurityName")
+    sec_type = position_T.get("SecurityType") or position_T.get("AssetType")
+    pricing = position_T.get("PricingTicker")
+    normalized = normalize_diamond_close_price(
+        float(trade_price),
+        security_name=sec_name,
+        security_type=sec_type,
+        bbg_ticker=pricing,
+        is_bond_like=True,
+    )
+    return _d(normalized if normalized is not None else trade_price)
+
+
 def _position_price_multiplier_for_mtm(
     row: Dict[str, Any],
     *,
@@ -2649,6 +2699,8 @@ def _position_price_multiplier_for_mtm(
     futures_like: bool,
     futures_option_like: bool = False,
 ) -> Decimal:
+    if bond_like:
+        return Decimal("0.01")
     if futures_option_like:
         qm = _nonzero_amount(row.get("QuantityMultiplier"))
         if qm is not None:
@@ -2873,7 +2925,8 @@ def compute_daily_pnl(
     mtm_trades = Decimal("0")
     for trade in trades_for_symbol:
         trade_fx = trade.get("fx") or fx_T
-        mtm_trades += (price_T - trade["price"]) * trade["qty"] * mult * trade_fx
+        trade_price = _mtm_trade_price(_d(trade["price"]), position_T, bond_like=bond_like)
+        mtm_trades += (price_T - trade_price) * trade["qty"] * mult * trade_fx
 
     if income_from_t_snapshot_only:
         income_delta = _position_base_income(position_T)

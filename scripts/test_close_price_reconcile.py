@@ -602,6 +602,79 @@ def test_alphadesk_dividends_require_matching_ex_date() -> None:
     assert bdgi["alphadesk_dividends"] == 1833.00
 
 
+def test_futures_option_trade_qty_scaled_by_contract_multiplier() -> None:
+    """Crude futures option trades report qty in barrels (contracts x 1000)."""
+    from decimal import Decimal
+
+    trade = {
+        "SecurityName": "CRUDE OIL FUT OPT Aug26C 77.5",
+        "Ticker": "CLQ6C    77.5 PIT",
+        "CUSIP": "CLQ6C",
+        "TradeType": "Buy",
+        "Quantity": 18000.0,
+        "QuantityMultiplier": 1000.0,
+        "LocalAmountPerShare": 0.33491,
+        "LocalNetAmount": -6028.38,
+        "TradeDate": "2026-07-07T00:00:00",
+        "IsReversal": False,
+        "IsCancel": False,
+    }
+    idx = build_trade_index_by_match_key([trade], "2026-07-07")
+    key = "futopt:CLQ6|2026-08|C|77.5"
+    assert key in idx
+    assert idx[key][0]["qty"] == Decimal("18")
+
+
+def test_futures_option_close_out_mtm_pnl() -> None:
+    """CLQ6C Jul 7 — trade leg must use 18 contracts, not 18000."""
+    pos_t = {
+        "SecurityName": "CRUDE OIL FUT OPT Aug26C 77.5",
+        "PricingTicker": "CLQ6C    77.5 PIT",
+        "PortfolioPrice": 0.3,
+        "Quantity": 45.0,
+        "LongShort": "Long",
+        "LocalMarketValue": 13500.0,
+        "BaseMarketValue": 19163.25,
+        "QuantityMultiplier": 1000.0,
+    }
+    pos_prior = {
+        "SecurityName": "CRUDE OIL FUT OPT Aug26C 77.5",
+        "PricingTicker": "CLQ6C    77.5 PIT",
+        "PortfolioPrice": 0.15,
+        "Quantity": 27.0,
+        "LongShort": "Long",
+        "LocalMarketValue": 4050.0,
+        "BaseMarketValue": 5748.98,
+        "QuantityMultiplier": 1000.0,
+    }
+    trades = [
+        {
+            "SecurityName": "CRUDE OIL FUT OPT Aug26C 77.5",
+            "Ticker": "CLQ6C    77.5 PIT",
+            "CUSIP": "CLQ6C",
+            "TradeType": "Buy",
+            "Quantity": 18000.0,
+            "QuantityMultiplier": 1000.0,
+            "LocalAmountPerShare": 0.33491,
+            "LocalNetAmount": -6028.38,
+            "BaseNetAmount": -8557.28,
+            "TradeDate": "2026-07-07T00:00:00",
+            "IsReversal": False,
+            "IsCancel": False,
+        }
+    ]
+    trade_index = build_trade_index_by_match_key(trades, "2026-07-07")
+    key = "futopt:CLQ6|2026-08|C|77.5"
+    pnl = compute_daily_pnl(
+        position_T=pos_t,
+        position_prior=pos_prior,
+        trades_for_symbol=trade_index[key],
+        futures_option_like=True,
+    )
+    assert pnl is not None
+    assert abs(pnl - 4859.04) < 50.0
+
+
 def test_futures_option_match_clq6c_and_cou6c() -> None:
     expected_aug_call = "futopt:CLQ6|2026-08|C|77.5"
     expected_aug_put70 = "futopt:CLQ6|2026-08|P|70"
@@ -961,6 +1034,8 @@ if __name__ == "__main__":
     test_futures_match_nqu6_sep26_with_pseudo_cusip()
     test_futures_match_and_price_reconcile()
     test_futures_option_match_clq6c_and_cou6c()
+    test_futures_option_trade_qty_scaled_by_contract_multiplier()
+    test_futures_option_close_out_mtm_pnl()
     test_aggregate_psc_net_shares()
     test_alphadesk_dividends_require_matching_ex_date()
     test_cg_ca_daily_mtm_pnl()

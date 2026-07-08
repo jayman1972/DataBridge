@@ -2748,9 +2748,9 @@ def _diamond_trade_signed_contract_qty(trade: Dict[str, Any]) -> Decimal:
     """
     Signed trade quantity in the same units as Diamond position Quantity.
 
-    Option trades report Quantity in share units (contracts × 100); positions
-    use contracts. Scale down before MTM so we do not apply the contract
-    multiplier twice on the trade leg.
+    Equity option trades report Quantity in share units (contracts × 100).
+    Futures option trades use notional units (contracts × QuantityMultiplier,
+    e.g. × 1000 for crude). Positions use contracts in both cases.
     """
     qty = _d(trade.get("Quantity"))
     trade_type = _norm(trade.get("TradeType")).upper()
@@ -2762,6 +2762,20 @@ def _diamond_trade_signed_contract_qty(trade: Dict[str, Any]) -> Decimal:
     sec_name = trade.get("SecurityName")
     sec_type = trade.get("SecurityType") or trade.get("AssetType")
     ticker = trade.get("Ticker")
+    if is_futures_option_like_position(
+        security_type=sec_type,
+        company_symbol=ticker,
+        description=sec_name,
+        bbg_ticker=ticker,
+        security=sec_name,
+        security_name=sec_name,
+        cusip=trade.get("CUSIP"),
+    ):
+        qm = _nonzero_amount(trade.get("QuantityMultiplier"))
+        if qm and qty != 0:
+            qty = qty / Decimal(str(qm))
+        return qty
+
     mult = notional_quantity_multiplier(sec_type, sec_name or ticker)
     if (mult == 100.0 or _is_diamond_option_trade(trade)) and qty != 0:
         qty = qty / Decimal("100")

@@ -656,6 +656,101 @@ def test_cg_ca_daily_mtm_pnl() -> None:
     assert abs(pnl - (-53695.38)) < 1.0
 
 
+def test_cg_ca_mtm_lookup_keys_resolve_cusip_and_line_ticker() -> None:
+    """ISIN canonical key must find Diamond snapshots (CUSIP) and trades (line:CG)."""
+    from sggg.close_price_reconcile import (
+        _collect_mtm_lookup_keys,
+        _lookup_first,
+        _lookup_trades_for_keys,
+        build_trade_index_by_match_key,
+        compute_daily_pnl,
+    )
+
+    canonical = "isin:CA1520061021"
+    psc = {
+        "isin": "CA1520061021",
+        "cusip": "152006102",
+        "company_symbol": "CG.CA",
+        "security": "CG.CA",
+    }
+    dia = {
+        "isin": "",
+        "cusip": "152006102",
+        "pricing_ticker": "CG CN",
+        "company_symbol": "Centerra Gold Inc.",
+        "security_name": "Centerra Gold Inc.",
+    }
+    keys = _collect_mtm_lookup_keys(canonical, psc, dia)
+    assert "cusip:152006102" in keys
+    assert "line:CG" in keys
+
+    pos_t_by_key = {
+        "cusip:152006102": {
+            "PortfolioPrice": 22.98,
+            "Quantity": 59400.0,
+            "LongShort": "Long",
+            "LocalMarketValue": 1365012.0,
+            "BaseMarketValue": 1365012.0,
+            "BaseDividendIncomeSinceReferenceDate": 0.0,
+            "PricingTicker": "CG CN",
+            "SecurityName": "Centerra Gold Inc.",
+        }
+    }
+    pos_prior_by_key = {
+        "cusip:152006102": {
+            "PortfolioPrice": 23.5,
+            "Quantity": 58500.0,
+            "LongShort": "Long",
+            "LocalMarketValue": 1374750.0,
+            "BaseMarketValue": 1374750.0,
+            "BaseDividendIncomeSinceReferenceDate": 3773.0,
+            "PricingTicker": "CG CN",
+            "SecurityName": "Centerra Gold Inc.",
+        }
+    }
+    trades = [
+        {
+            "TradeDate": "2026-07-07T00:00:00",
+            "TradeType": "Buy",
+            "Quantity": 600.0,
+            "LocalAmountPerShare": 23.354,
+            "LocalNetAmount": -14012.4,
+            "BaseNetAmount": -14012.4,
+            "IsReversal": False,
+            "IsCancel": False,
+            "Ticker": "CG",
+            "SecurityName": "Centerra Gold Inc.",
+        },
+        {
+            "TradeDate": "2026-07-07T00:00:00",
+            "TradeType": "Buy",
+            "Quantity": 300.0,
+            "LocalAmountPerShare": 23.35,
+            "LocalNetAmount": -7005.0,
+            "BaseNetAmount": -7005.0,
+            "IsReversal": False,
+            "IsCancel": False,
+            "Ticker": "CG",
+            "SecurityName": "Centerra Gold Inc.",
+        },
+    ]
+    trade_index = build_trade_index_by_match_key(trades, "2026-07-07")
+
+    pos_t = _lookup_first(pos_t_by_key, keys)
+    pos_prior = _lookup_first(pos_prior_by_key, keys)
+    trade_rows = _lookup_trades_for_keys(trade_index, keys)
+    assert pos_t is not None
+    assert pos_prior is not None
+    assert len(trade_rows) == 2
+    pnl = compute_daily_pnl(
+        position_T=pos_t,
+        position_prior=pos_prior,
+        trades_for_symbol=trade_rows,
+    )
+    assert pnl is not None
+    assert abs(pnl - (-30755.4)) < 1.0
+
+
 if __name__ == "__main__":
     test_bbg_key_normalization()
     test_bond_compact_match_key()
@@ -684,4 +779,5 @@ if __name__ == "__main__":
     test_aggregate_psc_net_shares()
     test_alphadesk_dividends_require_matching_ex_date()
     test_cg_ca_daily_mtm_pnl()
+    test_cg_ca_mtm_lookup_keys_resolve_cusip_and_line_ticker()
     print("ok")

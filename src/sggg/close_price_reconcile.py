@@ -873,6 +873,87 @@ def reconcile_match_key(
     return None
 
 
+def _collect_mtm_lookup_keys(
+    reconcile_key: str,
+    psc: Optional[Dict[str, Any]],
+    dia: Optional[Dict[str, Any]],
+) -> List[str]:
+    """
+    Resolve alternate reconcile keys for MTM snapshot/trade lookup.
+
+    After merge_positions_by_secondary_ids the loop uses a canonical key (often ISIN
+    from AlphaDesk) while raw Diamond positions and trades may be indexed under
+    CUSIP or line:ticker keys.
+    """
+    keys: List[str] = []
+
+    def add(candidate: Optional[str]) -> None:
+        if candidate and candidate not in keys:
+            keys.append(candidate)
+
+    add(reconcile_key)
+    for row in (psc, dia):
+        if not row:
+            continue
+        add(
+            reconcile_match_key(
+                company_symbol=row.get("company_symbol"),
+                bbg_ticker=row.get("bbg_ticker") or row.get("pricing_ticker"),
+                sedol=row.get("sedol"),
+                isin=row.get("isin"),
+                cusip=row.get("cusip"),
+                description=row.get("description") or row.get("security_name"),
+                security=row.get("security"),
+                security_name=row.get("security_name"),
+                security_type=row.get("security_type"),
+            )
+        )
+        for raw in (
+            row.get("security"),
+            row.get("company_symbol"),
+            row.get("bbg_ticker"),
+            row.get("pricing_ticker"),
+        ):
+            compact = normalize_line_equity_key(raw)
+            if compact:
+                add(f"line:{compact}")
+    return keys
+
+
+def _lookup_first(
+    index: Dict[str, Any],
+    lookup_keys: List[str],
+) -> Optional[Any]:
+    for candidate in lookup_keys:
+        if candidate in index:
+            return index[candidate]
+    return None
+
+
+def _lookup_trades_for_keys(
+    trade_index: Dict[str, List[Dict[str, Any]]],
+    lookup_keys: List[str],
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen: set = set()
+    for candidate in lookup_keys:
+        for trade in trade_index.get(candidate, []):
+            trade_id = trade.get("TradeID")
+            if not trade_id:
+                trade_id = (
+                    trade.get("TradeDate"),
+                    trade.get("qty") if trade.get("qty") is not None else trade.get("Quantity"),
+                    trade.get("price")
+                    if trade.get("price") is not None
+                    else trade.get("LocalAmountPerShare"),
+                )
+            if trade_id in seen:
+                continue
+            seen.add(trade_id)
+            merged.append(trade)
+    return merged
+
+
 def pick_display_ticker(
     psc: Optional[Dict[str, Any]],
     dia: Optional[Dict[str, Any]],
@@ -1980,9 +2061,10 @@ def build_close_price_reconciliation(
             dia = {**dia, "close_price": dia_close}
         price_diff, dollar_diff, shares = _compute_dollar_difference(psc, dia)
         prior_dia = prior_diamond_by_key.get(key)
-        pos_T = pos_t_by_key.get(key)
-        pos_prior = pos_prior_by_key.get(key)
-        trades_for_symbol = trade_index.get(key, [])
+        mtm_lookup_keys = _collect_mtm_lookup_keys(key, psc, dia)
+        pos_T = _lookup_first(pos_t_by_key, mtm_lookup_keys)
+        pos_prior = _lookup_first(pos_prior_by_key, mtm_lookup_keys)
+        trades_for_symbol = _lookup_trades_for_keys(trade_index, mtm_lookup_keys)
         diamond_pnl: Optional[float] = None
         diamond_total_unrealized = (
             float(dia.get("diamond_total_unrealized") or 0)
@@ -1999,7 +2081,7 @@ def build_close_price_reconciliation(
             if dia and dia.get("diamond_realized_since_ref_present")
             else 0.0
         )
-        if pos_T is not None or pos_prior is not None:
+        if pos_T is not None:
             diamond_pnl = compute_daily_pnl(
                 position_T=pos_T,
                 position_prior=pos_prior,

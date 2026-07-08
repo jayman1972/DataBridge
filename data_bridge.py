@@ -2517,7 +2517,7 @@ def sggg_close_price_reconciliation():
             "lines": lines,
             "meta": meta,
             "timing_sec": round(time.time() - t0, 2),
-            "nav_checker_build": "sggg-close-price-v35-option-trade-qty",
+            "nav_checker_build": "sggg-close-price-v36-futopt-match",
         }
         if meta.get("debug"):
             response["debug"] = meta.pop("debug")

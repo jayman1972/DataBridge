@@ -20,6 +20,7 @@ from sggg.close_price_reconcile import (
     normalize_bbg_key,
     normalize_diamond_close_price,
     normalize_diamond_futures_close,
+    parse_futures_option_contract_key,
     parse_futures_contract_key,
     parse_option_contract_key,
     parse_preferred_bbg_key,
@@ -601,6 +602,75 @@ def test_alphadesk_dividends_require_matching_ex_date() -> None:
     assert bdgi["alphadesk_dividends"] == 1833.00
 
 
+def test_futures_option_match_clq6c_and_cou6c() -> None:
+    expected_aug_call = "futopt:CLQ6|2026-08|C|77.5"
+    expected_aug_put70 = "futopt:CLQ6|2026-08|P|70"
+    expected_aug_put65 = "futopt:CLQ6|2026-08|P|65"
+    expected_sep_call = "futopt:COU6|2026-09|C|82"
+    expected_sep_put = "futopt:COU6|2026-09|P|70"
+
+    assert (
+        parse_futures_option_contract_key("CLQ6C 08/16/26 C77.5")
+        == expected_aug_call
+    )
+    assert (
+        reconcile_match_key(security="CLQ6C 08/16/26 C77.5", company_symbol="CLQ6C 08/16/26 C77.5")
+        == expected_aug_call
+    )
+    assert (
+        parse_futures_option_contract_key("CLQ6C    77.5 PIT")
+        == expected_aug_call
+    )
+    assert (
+        reconcile_match_key(
+            bbg_ticker="CLQ6C    77.5 PIT",
+            security_name="CRUDE OIL FUT OPT Aug26C 77.5",
+            cusip="CLQ6C",
+        )
+        == expected_aug_call
+    )
+    assert (
+        parse_futures_option_contract_key("CRUDE OIL FUT OPT Aug26C 77.5")
+        == expected_aug_call
+    )
+    assert (
+        parse_futures_option_contract_key("CLQ6P 08/16/26 P70")
+        == expected_aug_put70
+    )
+    assert (
+        parse_futures_option_contract_key("CRUDE OIL FUT OPT Aug26P 65")
+        == expected_aug_put65
+    )
+    assert (
+        parse_futures_option_contract_key("COU6C 09/28/26 C82")
+        == expected_sep_call
+    )
+    assert (
+        reconcile_match_key(
+            bbg_ticker="COU6C    82",
+            security_name="CRUDE OIL OPT IPE Sep26C 82",
+            isin="GB00JZMNGY97",
+            cusip="COU6C",
+        )
+        == expected_sep_call
+    )
+    assert (
+        parse_futures_option_contract_key("CRUDE OIL OPT IPE Sep26P 70")
+        == expected_sep_put
+    )
+    assert (
+        _diamond_match_key(
+            {
+                "SecurityName": "CRUDE OIL OPT IPE Sep26C 82",
+                "PricingTicker": "COU6C    82",
+                "CUSIP": "COU6C",
+                "ISIN": "GB00JZMNGY97",
+            }
+        )
+        == expected_sep_call
+    )
+
+
 def test_cg_ca_daily_mtm_pnl() -> None:
     """EHP Alpha Strategies CG.CA Jul 6 2026 — MTM should match AlphaDesk DAY_PROFIT."""
     pos_t = {
@@ -890,6 +960,7 @@ if __name__ == "__main__":
     test_diamond_futures_close_notional_to_index()
     test_futures_match_nqu6_sep26_with_pseudo_cusip()
     test_futures_match_and_price_reconcile()
+    test_futures_option_match_clq6c_and_cou6c()
     test_aggregate_psc_net_shares()
     test_alphadesk_dividends_require_matching_ex_date()
     test_cg_ca_daily_mtm_pnl()

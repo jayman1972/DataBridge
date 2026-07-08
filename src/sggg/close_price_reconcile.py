@@ -151,6 +151,155 @@ def parse_futures_contract_key(
     return None
 
 
+_FUTURES_OPTION_BBG_RE = re.compile(
+    r"^([A-Z0-9]+[FGHJKMNQUVXZ]\d[CP])\s+(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_FUTURES_OPTION_ALPHADESK_RE = re.compile(
+    r"^([A-Z0-9]+[FGHJKMNQUVXZ]\d[CP])\s+"
+    r"(\d{1,2}/\d{1,2}/\d{2,4})\s+([CP])\s*(\d+(?:\.\d+)?)\s*$",
+    re.IGNORECASE,
+)
+_FUTURES_OPTION_DIAMOND_NAME_RE = re.compile(
+    r"(?:CRUDE\s+OIL|WTI)(?:\s+(?:FUT\s+OPT|OPT\s+IPE))?\s+"
+    r"([A-Z]{3})(\d{2})([CP])\s+(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _futopt_key_from_bbg_parts(
+    root: str,
+    month_code: str,
+    year_digit: str,
+    cp: str,
+    strike: str,
+) -> Optional[str]:
+    month = _FUTURES_MONTH_CODE.get(month_code.upper())
+    if not month:
+        return None
+    year = _futures_year_from_digits(year_digit)
+    return (
+        f"futopt:{root.upper()}|{year:04d}-{month:02d}|"
+        f"{cp.upper()}|{_normalize_strike_key(strike)}"
+    )
+
+
+def _split_futures_option_bbg_ticker(token: Any) -> Optional[Tuple[str, str]]:
+    """
+    Bloomberg futures option tickers append C/P after the futures month code.
+
+    CLQ6C / COU6P -> (CLQ6, C), (COU6, P).
+    """
+    raw = _norm(token).upper().split()[0]
+    m = re.match(r"^(.+[FGHJKMNQUVXZ]\d)([CP])$", raw)
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def _futopt_key_from_option_ticker_and_strike(
+    option_ticker: str,
+    strike: str,
+    *,
+    cp: Optional[str] = None,
+) -> Optional[str]:
+    underlying, series_cp = _split_futures_option_bbg_ticker(option_ticker) or (None, None)
+    if not underlying:
+        return None
+    cp_use = (cp or series_cp or "").upper()
+    if cp_use not in ("C", "P"):
+        return None
+    parts = _parse_bloomberg_futures_parts(underlying)
+    if not parts:
+        return None
+    _root, year, month = parts
+    return (
+        f"futopt:{underlying.upper()}|{year:04d}-{month:02d}|{cp_use}|"
+        f"{_normalize_strike_key(strike)}"
+    )
+
+
+def parse_futures_option_contract_key(text: Any) -> Optional[str]:
+    """
+    Normalize futures options across AlphaDesk and Diamond naming.
+
+    AlphaDesk: CLQ6C 08/16/26 C77.5
+    Diamond BBG: CLQ6C 77.5 PIT / PricingTicker COU6C 82
+    Diamond name: CRUDE OIL FUT OPT Aug26C 77.5 / CRUDE OIL OPT IPE Sep26C 82
+
+    Canonical: futopt:CL|2026-08|C|77.5 (underlying futures month + call/put + strike).
+    """
+    t = normalize_instrument_description(text)
+    if not t:
+        return None
+
+    m = _FUTURES_OPTION_ALPHADESK_RE.match(t)
+    if m:
+        option_ticker, _expiry, cp, strike = m.groups()
+        return _futopt_key_from_option_ticker_and_strike(
+            option_ticker,
+            strike,
+            cp=cp,
+        )
+
+    m = _FUTURES_OPTION_BBG_RE.match(t)
+    if m:
+        option_ticker, strike = m.groups()
+        return _futopt_key_from_option_ticker_and_strike(option_ticker, strike)
+
+    m = _FUTURES_OPTION_DIAMOND_NAME_RE.search(t)
+    if m:
+        mon, year2, cp, strike = m.groups()
+        month = _MONTH_TO_NUM.get(mon.upper()[:3])
+        if not month:
+            return None
+        year = _futures_year_from_digits(year2)
+        if "OPT IPE" in t.upper():
+            product_root = "CO"
+        else:
+            product_root = _futures_product_root_from_text(t) or "CL"
+        month_code = next(
+            (code for code, num in _FUTURES_MONTH_CODE.items() if num == month),
+            None,
+        )
+        year_digit = year2[-1] if year2 else str(year % 10)
+        underlying = (
+            f"{product_root}{month_code}{year_digit}" if month_code else product_root
+        )
+        return (
+            f"futopt:{underlying.upper()}|{year:04d}-{month:02d}|"
+            f"{cp.upper()}|{_normalize_strike_key(strike)}"
+        )
+    return None
+
+
+def is_futures_option_like_position(
+    *,
+    security_type: Any = None,
+    company_symbol: Any = None,
+    description: Any = None,
+    bbg_ticker: Any = None,
+    security: Any = None,
+    security_name: Any = None,
+    cusip: Any = None,
+    match_key: Any = None,
+) -> bool:
+    mk = _norm(match_key)
+    if mk.startswith("futopt:"):
+        return True
+    for candidate in (
+        bbg_ticker,
+        security,
+        company_symbol,
+        cusip,
+        security_name,
+        description,
+    ):
+        if parse_futures_option_contract_key(candidate):
+            return True
+    return False
+
+
 def is_futures_like_position(
     *,
     security_type: Any = None,
@@ -237,6 +386,15 @@ def _looks_like_option_description(text: Any) -> bool:
 
 
 def _is_diamond_option_trade(trade: Dict[str, Any]) -> bool:
+    if is_futures_option_like_position(
+        security_type=trade.get("SecurityType") or trade.get("AssetType"),
+        company_symbol=trade.get("Ticker"),
+        description=trade.get("SecurityName"),
+        bbg_ticker=trade.get("Ticker"),
+        security=trade.get("SecurityName"),
+        security_name=trade.get("SecurityName"),
+    ):
+        return False
     sec_name = trade.get("SecurityName")
     sec_type = trade.get("SecurityType") or trade.get("AssetType")
     ticker = trade.get("Ticker")
@@ -298,6 +456,8 @@ _FUTURES_DESC_EXPIRY_RE = re.compile(
 )
 # Diamond SecurityName phrases -> Bloomberg futures root (when only descriptive name is present).
 _FUTURES_PRODUCT_ROOT: Dict[str, str] = {
+    "CRUDE OIL": "CL",
+    "WTI CRUDE": "CL",
     "NASDAQ 100 E-MINI": "NQ",
     "E-MINI NASDAQ": "NQ",
     "E-MINI S&P": "ES",
@@ -590,6 +750,8 @@ def is_option_like_position(
     if _is_option_security_type(security_type):
         return True
     mk = _norm(match_key)
+    if mk.startswith("futopt:"):
+        return False
     if mk.startswith("opt:"):
         return True
     for text in (security, bbg_ticker, description, security_name, company_symbol):
@@ -801,6 +963,24 @@ def reconcile_match_key(
         security_type=security_type,
     ):
         return None
+
+    for candidate in (
+        bbg_ticker,
+        security,
+        company_symbol,
+        security_name,
+        description,
+        cusip,
+    ):
+        futopt = parse_futures_option_contract_key(candidate)
+        if futopt:
+            return futopt
+    bbg = _norm(bbg_ticker)
+    cus = _norm(cusip).upper()
+    if cus and bbg:
+        futopt = parse_futures_option_contract_key(f"{cus} {bbg}")
+        if futopt:
+            return futopt
 
     iso = _norm(isin).upper()
     if iso:
@@ -1241,7 +1421,7 @@ def _merge_bucket_into(target: Dict[str, Any], source: Dict[str, Any]) -> None:
 
 def _canonical_reconcile_key(*keys: str) -> str:
     """Pick one shared key when PSC and Diamond used different primary keys."""
-    order = ("isin:", "cusip:", "sedol:", "opt:", "fut:", "pref:", "bond:", "line:")
+    order = ("futopt:", "isin:", "cusip:", "sedol:", "opt:", "fut:", "pref:", "bond:", "line:")
     for prefix in order:
         for k in keys:
             if k.startswith(prefix):
@@ -1545,6 +1725,18 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             cusip=row.get("cusip"),
             match_key=key,
         )
+        futopt_like = is_futures_option_like_position(
+            security_type=row.get("security_type"),
+            company_symbol=row.get("company_symbol"),
+            description=row.get("description"),
+            bbg_ticker=row.get("bbg_ticker"),
+            security=row.get("security"),
+            cusip=row.get("cusip"),
+            match_key=key,
+        )
+        if futopt_like:
+            fut_like = False
+            opt_like = False
         pref_like = is_preferred_like_position(
             security_type=row.get("security_type"),
             company_symbol=row.get("company_symbol"),
@@ -1554,11 +1746,15 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
             match_key=key,
         )
         contract_size = row.get("contract_size") or row.get("underlying_contract_size")
-        mult = notional_quantity_multiplier(
-            row.get("security_type"),
-            row.get("bbg_ticker") or row.get("description") or row.get("security"),
-            contract_size=contract_size,
-        )
+        if futopt_like:
+            cs = _nonzero_amount(contract_size)
+            mult = cs if cs is not None else 1000.0
+        else:
+            mult = notional_quantity_multiplier(
+                row.get("security_type"),
+                row.get("bbg_ticker") or row.get("description") or row.get("security"),
+                contract_size=contract_size,
+            )
         bucket = out.get(key)
         if not bucket:
             display = portfolio_details_display_ticker(
@@ -1573,7 +1769,7 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                 company_symbol=row.get("company_symbol"),
                 description=row.get("description"),
                 match_key=key,
-            ) and not opt_like and not fut_like and not pref_like
+            ) and not opt_like and not fut_like and not pref_like and not futopt_like
             bucket = {
                 "match_key": key,
                 "ticker": display,
@@ -1600,6 +1796,7 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
                 "is_bond_like": bond_like,
                 "is_option_like": opt_like,
                 "is_futures_like": fut_like,
+                "is_futures_option_like": futopt_like,
                 "is_preferred_like": pref_like,
             }
             out[key] = bucket
@@ -1843,6 +2040,17 @@ def aggregate_diamond_by_security(
             cusip=row.get("CUSIP"),
             match_key=key,
         )
+        futopt_like = is_futures_option_like_position(
+            security_type=sec_type,
+            company_symbol=sec_name,
+            security_name=sec_name,
+            bbg_ticker=pricing,
+            cusip=row.get("CUSIP"),
+            match_key=key,
+        )
+        if futopt_like:
+            fut_like = False
+            opt_like = False
         pref_like = is_preferred_like_position(
             security_type=sec_type,
             company_symbol=sec_name,
@@ -1858,7 +2066,7 @@ def aggregate_diamond_by_security(
                 match_key=key,
             )
             or _nonzero_amount(row.get("PriceDiscount")) is not None
-        ) and not opt_like and not fut_like and not pref_like
+        ) and not opt_like and not fut_like and not pref_like and not futopt_like
         price_disc = row.get("PriceDiscount")
         if fut_like:
             close_f = normalize_diamond_futures_close(row)
@@ -1873,11 +2081,13 @@ def aggregate_diamond_by_security(
                 price_discount=price_disc,
                 pre_discount_price=row.get("PreDiscountPrice"),
             )
-        mult = (
-            diamond_futures_contract_multiplier(row)
-            if fut_like
-            else notional_quantity_multiplier(sec_type, pricing or sec_name)
-        )
+        if futopt_like:
+            qm = _nonzero_amount(row.get("QuantityMultiplier"))
+            mult = qm if qm is not None else 1000.0
+        elif fut_like:
+            mult = diamond_futures_contract_multiplier(row)
+        else:
+            mult = notional_quantity_multiplier(sec_type, pricing or sec_name)
         bucket = out.get(key)
         if not bucket:
             bucket = {
@@ -1911,6 +2121,7 @@ def aggregate_diamond_by_security(
                 "is_bond_like": bond_like,
                 "is_option_like": opt_like,
                 "is_futures_like": fut_like,
+                "is_futures_option_like": futopt_like,
                 "is_preferred_like": pref_like,
             }
             out[key] = bucket
@@ -2105,10 +2316,17 @@ def build_close_price_reconciliation(
             or (dia and dia.get("is_option_like"))
             or (key or "").startswith("opt:")
         )
+        futures_option_like = bool(
+            (psc and psc.get("is_futures_option_like"))
+            or (dia and dia.get("is_futures_option_like"))
+            or (key or "").startswith("futopt:")
+        )
+        if futures_option_like:
+            option_like = False
         futures_like = bool(
             (psc and psc.get("is_futures_like"))
             or (dia and dia.get("is_futures_like"))
-            or (key or "").startswith("fut:")
+            or ((key or "").startswith("fut:") and not futures_option_like)
         )
         bond_like = (
             not option_like
@@ -2157,6 +2375,7 @@ def build_close_price_reconciliation(
                 bond_like=bond_like,
                 option_like=option_like,
                 futures_like=futures_like,
+                futures_option_like=futures_option_like,
             )
             mismatch = audit_trade_quantity_continuity(
                 pos_T,
@@ -2428,7 +2647,13 @@ def _position_price_multiplier_for_mtm(
     bond_like: bool,
     option_like: bool,
     futures_like: bool,
+    futures_option_like: bool = False,
 ) -> Decimal:
+    if futures_option_like:
+        qm = _nonzero_amount(row.get("QuantityMultiplier"))
+        if qm is not None:
+            return _d(qm)
+        return Decimal("1000")
     if futures_like:
         return _d(diamond_futures_contract_multiplier(row))
     sec_type = row.get("SecurityType") or row.get("AssetType")
@@ -2589,6 +2814,7 @@ def compute_daily_pnl(
     bond_like: bool = False,
     option_like: bool = False,
     futures_like: bool = False,
+    futures_option_like: bool = False,
     income_from_t_snapshot_only: bool = True,
 ) -> Optional[float]:
     """
@@ -2625,6 +2851,7 @@ def compute_daily_pnl(
         bond_like=bond_like,
         option_like=option_like,
         futures_like=futures_like,
+        futures_option_like=futures_option_like,
     )
 
     mtm_carry = (price_T - price_prior) * qty_prior * mult * fx_T

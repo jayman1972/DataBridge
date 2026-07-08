@@ -228,10 +228,27 @@ def _looks_like_option_description(text: Any) -> bool:
     if parse_option_contract_key(text):
         return True
     t = normalize_instrument_description(text)
+    if _OPTION_LONG_RE.match(t):
+        return True
     return bool(
         re.search(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", t)
         and re.search(r"\b([PC])\s*\d", t)
     )
+
+
+def _is_diamond_option_trade(trade: Dict[str, Any]) -> bool:
+    sec_name = trade.get("SecurityName")
+    sec_type = trade.get("SecurityType") or trade.get("AssetType")
+    ticker = trade.get("Ticker")
+    if _is_option_security_type(sec_type):
+        return True
+    if _looks_like_option_description(sec_name) or _looks_like_option_description(ticker):
+        return True
+    t = _norm(ticker).upper()
+    if re.match(r"^[A-Z0-9.]+\s+\d+\s+[PC]\d", t):
+        return True
+    name = _norm(sec_name).upper()
+    return name.startswith("PUT ") or name.startswith("CALL ")
 
 
 _OPTION_COMPACT_RE = re.compile(
@@ -2502,6 +2519,30 @@ def _trade_match_key(
     )
 
 
+def _diamond_trade_signed_contract_qty(trade: Dict[str, Any]) -> Decimal:
+    """
+    Signed trade quantity in the same units as Diamond position Quantity.
+
+    Option trades report Quantity in share units (contracts × 100); positions
+    use contracts. Scale down before MTM so we do not apply the contract
+    multiplier twice on the trade leg.
+    """
+    qty = _d(trade.get("Quantity"))
+    trade_type = _norm(trade.get("TradeType")).upper()
+    if "SELL" in trade_type and qty > 0:
+        qty = -qty
+    elif "BUY" in trade_type and qty < 0:
+        qty = abs(qty)
+
+    sec_name = trade.get("SecurityName")
+    sec_type = trade.get("SecurityType") or trade.get("AssetType")
+    ticker = trade.get("Ticker")
+    mult = notional_quantity_multiplier(sec_type, sec_name or ticker)
+    if (mult == 100.0 or _is_diamond_option_trade(trade)) and qty != 0:
+        qty = qty / Decimal("100")
+    return qty
+
+
 def build_trade_index_by_match_key(
     trades: List[Dict[str, Any]],
     valuation_date_iso: str,
@@ -2523,15 +2564,13 @@ def build_trade_index_by_match_key(
         trade_date = _trade_date_iso(trade)
         if trade_date and trade_date != valuation_date:
             continue
+        trade_type = _norm(trade.get("TradeType")).upper()
+        if trade_type.startswith("CA-"):
+            continue
         key = _trade_match_key(trade, underlying_index=underlying_index)
         if not key:
             continue
-        qty = _d(trade.get("Quantity"))
-        trade_type = _norm(trade.get("TradeType")).upper()
-        if trade_type == "SELL" and qty > 0:
-            qty = -qty
-        elif trade_type == "BUY" and qty < 0:
-            qty = abs(qty)
+        qty = _diamond_trade_signed_contract_qty(trade)
         price = _d(trade.get("LocalAmountPerShare"))
         local_net = _d(trade.get("LocalNetAmount"))
         base_net = _d(trade.get("BaseNetAmount"))

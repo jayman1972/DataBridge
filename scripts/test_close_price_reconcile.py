@@ -656,6 +656,76 @@ def test_cg_ca_daily_mtm_pnl() -> None:
     assert abs(pnl - (-53695.38)) < 1.0
 
 
+def test_option_trade_qty_converted_from_share_units() -> None:
+    """Diamond option trades use share units (contracts x 100) in Quantity."""
+    from decimal import Decimal
+
+    trades = [
+        {
+            "SecurityName": "Put State Street SPDR S&P 500 ETF Trust $725 24JUL2026",
+            "Ticker": "SPY 7 P725",
+            "TradeType": "Buy",
+            "Quantity": 20000.0,
+            "LocalAmountPerShare": 2.04,
+            "LocalNetAmount": -40800.0,
+            "BaseNetAmount": -57913.8,
+            "TradeDate": "2026-07-07T00:00:00",
+            "IsReversal": False,
+            "IsCancel": False,
+        }
+    ]
+    idx = build_trade_index_by_match_key(trades, "2026-07-07")
+    assert len(idx) == 1
+    key = next(iter(idx))
+    assert idx[key][0]["qty"] == Decimal("200")
+
+
+def test_option_close_out_mtm_pnl() -> None:
+    """Closing a short option to flat should not 100x the trade leg."""
+    pos_t = {
+        "SecurityName": "Put State Street SPDR S&P 500 ETF Trust $725 24JUL2026",
+        "PricingTicker": "SPY US 07/24/26 P725",
+        "PortfolioPrice": 1.69,
+        "Quantity": 0.0,
+        "LongShort": "Flat",
+        "LocalMarketValue": 0.0,
+        "BaseMarketValue": 0.0,
+    }
+    pos_prior = {
+        "SecurityName": "Put State Street SPDR S&P 500 ETF Trust $725 24JUL2026",
+        "PricingTicker": "SPY US 07/24/26 P725",
+        "PortfolioPrice": 1.69,
+        "Quantity": 200.0,
+        "LongShort": "Short",
+        "LocalMarketValue": -33800.0,
+        "BaseMarketValue": -48019.66,
+    }
+    trades = [
+        {
+            "SecurityName": "Put State Street SPDR S&P 500 ETF Trust $725 24JUL2026",
+            "Ticker": "SPY 7 P725",
+            "TradeType": "Buy",
+            "Quantity": 20000.0,
+            "LocalAmountPerShare": 2.04,
+            "LocalNetAmount": -40800.0,
+            "BaseNetAmount": -57913.8,
+            "TradeDate": "2026-07-07T00:00:00",
+            "IsReversal": False,
+            "IsCancel": False,
+        }
+    ]
+    trade_index = build_trade_index_by_match_key(trades, "2026-07-07")
+    trade_rows = next(iter(trade_index.values()))
+    pnl = compute_daily_pnl(
+        position_T=pos_t,
+        position_prior=pos_prior,
+        trades_for_symbol=trade_rows,
+        option_like=True,
+    )
+    assert pnl is not None
+    assert abs(pnl - (-9940.7)) < 25.0
+
+
 def test_diamond_rows_for_valuation_date_per_security_quote_lag() -> None:
     """Jul 3 reference must not drop AMAT when its QuoteDate is Jul 2 but others are Jul 3."""
     from sggg.close_price_reconcile import (
@@ -823,6 +893,8 @@ if __name__ == "__main__":
     test_aggregate_psc_net_shares()
     test_alphadesk_dividends_require_matching_ex_date()
     test_cg_ca_daily_mtm_pnl()
+    test_option_trade_qty_converted_from_share_units()
+    test_option_close_out_mtm_pnl()
     test_diamond_rows_for_valuation_date_per_security_quote_lag()
     test_cg_ca_mtm_lookup_keys_resolve_cusip_and_line_ticker()
     print("ok")

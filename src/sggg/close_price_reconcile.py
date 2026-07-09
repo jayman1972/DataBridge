@@ -168,6 +168,11 @@ _FUTURES_OPTION_DIAMOND_NAME_RE = re.compile(
     r"([A-Z]{3})(\d{2})([CP])\s+(\d+(?:\.\d+)?)",
     re.IGNORECASE,
 )
+_FUTURES_OPTION_NASDAQ_NAME_RE = re.compile(
+    r"(?:PUT|CALL)\s+NASDAQ\s+100\s+E-MINI\s+"
+    r"([A-Z]{3,4})(\d{2})([CP])\s+(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
 
 
 def _futopt_key_from_bbg_parts(
@@ -218,7 +223,7 @@ def _futopt_key_from_option_ticker_and_strike(
     _root, year, month = parts
     return (
         f"futopt:{underlying.upper()}|{year:04d}-{month:02d}|{cp_use}|"
-        f"{_normalize_strike_key(strike)}"
+        f"{_normalize_futopt_strike(underlying, strike)}"
     )
 
 
@@ -271,7 +276,25 @@ def parse_futures_option_contract_key(text: Any) -> Optional[str]:
         )
         return (
             f"futopt:{underlying.upper()}|{year:04d}-{month:02d}|"
-            f"{cp.upper()}|{_normalize_strike_key(strike)}"
+            f"{cp.upper()}|{_normalize_futopt_strike(underlying, strike)}"
+        )
+
+    m = _FUTURES_OPTION_NASDAQ_NAME_RE.search(t)
+    if m:
+        mon, year2, cp, strike = m.groups()
+        month = _MONTH_TO_NUM.get(mon.upper()[:3])
+        if not month:
+            return None
+        year = _futures_year_from_digits(year2)
+        month_code = next(
+            (code for code, num in _FUTURES_MONTH_CODE.items() if num == month),
+            None,
+        )
+        year_digit = year2[-1] if year2 else str(year % 10)
+        underlying = f"NQ{month_code}{year_digit}" if month_code else "NQ"
+        return (
+            f"futopt:{underlying.upper()}|{year:04d}-{month:02d}|"
+            f"{cp.upper()}|{_normalize_futopt_strike(underlying, strike)}"
         )
     return None
 
@@ -596,6 +619,22 @@ def _normalize_strike_key(strike: str) -> str:
     return f"{f:.6f}".rstrip("0").rstrip(".")
 
 
+def _normalize_futopt_strike(underlying: str, strike: str) -> str:
+    """
+    NQ/ES index options on Bloomberg use strike x10 (26500 = 2650 index level).
+    CL crude strikes (77.5) are unchanged.
+    """
+    ul = _norm(underlying).upper().split()[0]
+    if ul.startswith(("NQ", "ES")):
+        try:
+            f = float(strike)
+            if f >= 10000 and abs(f - round(f)) < 1e-9:
+                return _normalize_strike_key(str(f / 10.0))
+        except ValueError:
+            pass
+    return _normalize_strike_key(strike)
+
+
 def _normalize_expiry_mdy(expiry: str) -> str:
     parts = expiry.split("/")
     if len(parts) != 3:
@@ -825,9 +864,10 @@ def align_diamond_bond_close(
     *,
     is_bond_like: bool = False,
     is_option_like: bool = False,
+    is_futures_option_like: bool = False,
 ) -> Optional[float]:
     """Scale Diamond fractional par quotes when AlphaDesk is already in par points."""
-    if is_option_like or diamond_close is None:
+    if is_option_like or is_futures_option_like or diamond_close is None:
         return diamond_close
     if alphadesk_close is None:
         if is_bond_like and 0 < diamond_close < 20:
@@ -2381,6 +2421,7 @@ def build_close_price_reconciliation(
             float(psc_close) if psc_close is not None else None,
             is_bond_like=bond_like,
             is_option_like=option_like,
+            is_futures_option_like=futures_option_like,
         )
         if dia and dia_close is not None:
             dia = {**dia, "close_price": dia_close}
@@ -2468,8 +2509,8 @@ def build_close_price_reconciliation(
             else None
         )
         pnl_difference = (
-            round(diamond_pnl - alphadesk_pnl, 2)
-            if diamond_pnl is not None and alphadesk_pnl is not None
+            round(float(diamond_pnl or 0) - float(alphadesk_pnl or 0), 2)
+            if psc is not None or dia is not None
             else None
         )
         ticker = pick_display_ticker(psc, dia)
@@ -3097,6 +3138,7 @@ def fetch_close_price_reconciliation(
             fund_id=fund_id,
             valuation_date=valuation_date_norm,
             reference_date=reference_date,
+            exclude_not_priced_positions=False,
         )
     except Exception as exc:
         return [], {"fund_id": fund_id, "valuation_date": valuation_date_norm}, str(exc)
@@ -3109,6 +3151,7 @@ def fetch_close_price_reconciliation(
             prior_raw = diamond_client.get_portfolio(
                 fund_id=fund_id,
                 valuation_date=reference_date,
+                exclude_not_priced_positions=False,
             )
         except Exception as exc:
             prior_error = str(exc)

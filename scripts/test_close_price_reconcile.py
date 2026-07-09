@@ -681,6 +681,31 @@ def test_psc_bond_aggregate_not_futures_like() -> None:
     assert bucket["is_futures_like"] is False
 
 
+def test_nq_futures_option_strike_and_name_matching() -> None:
+    """NQ index options: Bloomberg strike 26500 = AlphaDesk 2650."""
+    expected = "futopt:NQU6|2026-09|P|2650"
+    assert parse_futures_option_contract_key("NQU6P 09/18/26 P2650") == expected
+    assert parse_futures_option_contract_key("NQU6P    26500") == expected
+    assert (
+        parse_futures_option_contract_key("Put NASDAQ 100 E-MINI Sep26P 26500")
+        == expected
+    )
+    assert (
+        reconcile_match_key(
+            bbg_ticker="NQU6P    26500",
+            security_name="Put NASDAQ 100 E-MINI Sep26P 26500 $26500 18SEP2026",
+            cusip="NQU6P",
+        )
+        == expected
+    )
+
+
+def test_align_diamond_close_skips_futopt_par_scaling() -> None:
+    assert (
+        align_diamond_bond_close(4.51, 434.25, is_futures_option_like=True) == 4.51
+    )
+
+
 def test_futopt_not_bond_like() -> None:
     assert not is_bond_like_position(
         description="CLQ6C 08/16/26 C77.5",
@@ -1149,6 +1174,8 @@ if __name__ == "__main__":
     test_cusip_not_matched_as_futures_root()
     test_psc_bond_aggregate_not_futures_like()
     test_futopt_not_bond_like()
+    test_nq_futures_option_strike_and_name_matching()
+    test_align_diamond_close_skips_futopt_par_scaling()
     test_es_futures_trade_qty_scaled_by_contract_multiplier()
     test_futures_option_trade_qty_scaled_by_contract_multiplier()
     test_futures_option_close_out_mtm_pnl()

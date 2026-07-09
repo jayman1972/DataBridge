@@ -9,6 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sggg.close_price_reconcile import (
     _compute_close_price_difference,
     _diamond_match_key,
+    _diamond_row_close_unavailable,
+    _resolve_reconcile_closes,
+    aggregate_diamond_by_security,
     aggregate_psc_by_security,
     align_diamond_bond_close,
     apply_diamond_price_discount,
@@ -334,6 +337,58 @@ def test_one_sided_diamond_only() -> None:
     dia = {"shares": 50.0, "close_price": 99.982, "qty_multiplier": 1.0}
     price_diff, _ = _compute_close_price_difference(None, dia)
     assert price_diff is None
+
+
+def test_diamond_not_priced_row_detected() -> None:
+    row = {"PriceSource": "Not Priced", "PortfolioPrice": 0.0}
+    assert _diamond_row_close_unavailable(row) is True
+    row2 = {"PriceSource": "BBG01GRB9JP1", "PortfolioPrice": 1.43, "QuoteType": "Close"}
+    assert _diamond_row_close_unavailable(row2) is False
+
+
+def test_closed_not_priced_suppresses_both_closes() -> None:
+    psc = {"shares": 0.0, "close_price": 761.75}
+    dia = {"shares": 0.0, "diamond_close_not_priced": True}
+    dia_close, psc_close, status = _resolve_reconcile_closes(
+        psc, dia, dia_close=None, psc_close=761.75
+    )
+    assert status == "closed"
+    assert dia_close is None
+    assert psc_close is None
+
+
+def test_closed_with_diamond_price_keeps_closes() -> None:
+    psc = {"shares": 0.0, "close_price": 0.7}
+    dia = {"shares": 0.0, "diamond_close_not_priced": False, "close_price": 1.43}
+    dia_close, psc_close, status = _resolve_reconcile_closes(
+        psc, dia, dia_close=1.43, psc_close=0.7
+    )
+    assert status is None
+    assert dia_close == 1.43
+    assert psc_close == 0.7
+
+
+def test_aggregate_diamond_not_priced_close_is_none() -> None:
+    records = [
+        {
+            "SecurityName": "CRUDE OIL FUT OPT Aug26C 77",
+            "SecurityType": "FuturesOption",
+            "PricingTicker": "",
+            "CUSIP": "CLQ6",
+            "PortfolioPrice": 0.0,
+            "PreDiscountPrice": 0.0,
+            "Quantity": 0.0,
+            "QuantityMultiplier": 1000.0,
+            "PriceSource": "Not Priced",
+            "QuoteDate": "2026-07-08",
+            "BaseRealizedGainLossSinceReferenceDate": -7304.8,
+            "BaseTotalUnrealizedGainLoss": 0.0,
+        }
+    ]
+    agg = aggregate_diamond_by_security(records, "2026-07-08")
+    row = next(iter(agg.values()))
+    assert row.get("close_price") is None
+    assert row.get("diamond_close_not_priced") is True
 
 
 def test_options_contract_multiplier() -> None:
@@ -1201,6 +1256,10 @@ if __name__ == "__main__":
     test_secondary_id_merge()
     test_one_sided_alphadesk_only()
     test_one_sided_diamond_only()
+    test_diamond_not_priced_row_detected()
+    test_closed_not_priced_suppresses_both_closes()
+    test_closed_with_diamond_price_keeps_closes()
+    test_aggregate_diamond_not_priced_close_is_none()
     test_options_contract_multiplier()
     test_futures_contract_key_nqu6_sep26()
     test_futures_contract_key_nqm6()

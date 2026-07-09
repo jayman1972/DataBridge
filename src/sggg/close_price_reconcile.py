@@ -352,6 +352,48 @@ def is_futures_like_position(
     return False
 
 
+def _diamond_row_close_unavailable(row: Dict[str, Any]) -> bool:
+    """True when Diamond did not supply an EOD close (e.g. same-day flat position)."""
+    src = _norm(row.get("PriceSource")).lower()
+    if src == "not priced":
+        return True
+    if row.get("PortfolioPrice") is None:
+        return True
+    return False
+
+
+def _position_fully_closed(
+    psc: Optional[Dict[str, Any]],
+    dia: Optional[Dict[str, Any]],
+) -> bool:
+    psc_shares = abs(float(psc.get("shares") or 0)) if psc else 0.0
+    dia_shares = abs(float(dia.get("shares") or 0)) if dia else 0.0
+    if psc and dia:
+        return psc_shares <= 0.0001 and dia_shares <= 0.0001
+    if dia:
+        return dia_shares <= 0.0001
+    if psc:
+        return psc_shares <= 0.0001
+    return False
+
+
+def _resolve_reconcile_closes(
+    psc: Optional[Dict[str, Any]],
+    dia: Optional[Dict[str, Any]],
+    *,
+    dia_close: Optional[float],
+    psc_close: Optional[float],
+) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+    """
+    When a fully closed position has no Diamond close, suppress both closes and mark closed.
+    """
+    if not _position_fully_closed(psc, dia):
+        return dia_close, psc_close, None
+    if dia and dia.get("diamond_close_not_priced"):
+        return None, None, "closed"
+    return dia_close, psc_close, None
+
+
 def normalize_diamond_futures_close(row: Dict[str, Any]) -> Optional[float]:
     """
     Diamond futures PortfolioPrice is contract notional (index quote × multiplier).
@@ -2187,6 +2229,9 @@ def aggregate_diamond_by_security(
                 price_discount=price_disc,
                 pre_discount_price=row.get("PreDiscountPrice"),
             )
+        close_unavailable = _diamond_row_close_unavailable(row)
+        if close_unavailable:
+            close_f = None
         if futopt_like:
             qm = _nonzero_amount(row.get("QuantityMultiplier"))
             mult = qm if qm is not None else 1000.0
@@ -2257,8 +2302,11 @@ def aggregate_diamond_by_security(
                 float(bucket.get("diamond_dividends") or 0) + diamond_dividends
             )
             bucket["diamond_dividends_present"] = True
-        if close_f is not None:
+        if close_unavailable:
+            bucket["diamond_close_not_priced"] = True
+        elif close_f is not None:
             bucket["close_price"] = close_f
+            bucket["diamond_close_not_priced"] = False
         if fut_like:
             bucket["qty_multiplier"] = diamond_futures_contract_multiplier(row)
         bucket["bbg_ticker"] = pricing or bucket.get("bbg_ticker")
@@ -2455,7 +2503,24 @@ def build_close_price_reconciliation(
         )
         if dia and dia_close is not None:
             dia = {**dia, "close_price": dia_close}
-        price_diff, shares = _compute_close_price_difference(psc, dia)
+        dia_close, psc_close, close_status = _resolve_reconcile_closes(
+            psc,
+            dia,
+            dia_close=dia_close,
+            psc_close=float(psc_close) if psc_close is not None else None,
+        )
+        if close_status == "closed":
+            price_diff = None
+            shares = 0.0
+            if psc and abs(float(psc.get("shares") or 0)) > 0.0001:
+                shares = float(psc["shares"])
+            elif dia:
+                shares = float(dia.get("shares") or 0)
+        else:
+            price_diff, shares = _compute_close_price_difference(
+                {**psc, "close_price": psc_close} if psc else None,
+                {**dia, "close_price": dia_close} if dia else None,
+            )
         prior_dia = prior_diamond_by_key.get(key)
         mtm_lookup_keys = _collect_mtm_lookup_keys(key, psc, dia)
         pos_T = _lookup_first(pos_t_by_key, mtm_lookup_keys)
@@ -2563,6 +2628,7 @@ def build_close_price_reconciliation(
                 "dividend_difference": dividend_difference,
                 "diamond_close": dia_close,
                 "alphadesk_close": psc_close,
+                "close_status": close_status,
                 "price_difference": price_diff,
                 "shares": round(shares, 4) if abs(shares) > 0.0001 else 0.0,
                 "in_diamond": dia is not None,

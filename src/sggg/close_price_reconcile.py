@@ -711,6 +711,15 @@ def is_bond_like_position(
     match_key: Any = None,
 ) -> bool:
     """PSC SECURITY_TYPE Bond (etc.) is authoritative; patterns are fallback for Diamond."""
+    if is_futures_option_like_position(
+        security_type=security_type,
+        company_symbol=company_symbol,
+        description=description,
+        security_name=security_name,
+        bbg_ticker=bbg_ticker,
+        match_key=match_key,
+    ):
+        return False
     if _is_bond_security_type(security_type):
         return True
     mk = _norm(match_key)
@@ -2342,6 +2351,7 @@ def build_close_price_reconciliation(
             option_like = False
         bond_like = bool(
             not option_like
+            and not futures_option_like
             and bool(
                 (psc and psc.get("is_bond_like"))
                 or (dia and dia.get("is_bond_like"))
@@ -2801,8 +2811,8 @@ def _diamond_trade_signed_contract_qty(trade: Dict[str, Any]) -> Decimal:
     Signed trade quantity in the same units as Diamond position Quantity.
 
     Equity option trades report Quantity in share units (contracts × 100).
-    Futures option trades use notional units (contracts × QuantityMultiplier,
-    e.g. × 1000 for crude). Positions use contracts in both cases.
+    Futures and futures option trades use notional units (contracts × QuantityMultiplier,
+    e.g. × 50 for ES, × 1000 for crude). Positions use contracts in both cases.
     """
     qty = _d(trade.get("Quantity"))
     trade_type = _norm(trade.get("TradeType")).upper()
@@ -2815,6 +2825,14 @@ def _diamond_trade_signed_contract_qty(trade: Dict[str, Any]) -> Decimal:
     sec_type = trade.get("SecurityType") or trade.get("AssetType")
     ticker = trade.get("Ticker")
     if is_futures_option_like_position(
+        security_type=sec_type,
+        company_symbol=ticker,
+        description=sec_name,
+        bbg_ticker=ticker,
+        security=sec_name,
+        security_name=sec_name,
+        cusip=trade.get("CUSIP"),
+    ) or is_futures_like_position(
         security_type=sec_type,
         company_symbol=ticker,
         description=sec_name,

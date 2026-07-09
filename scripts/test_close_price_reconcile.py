@@ -1,6 +1,7 @@
 """Unit tests for close price reconciliation keys."""
 
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -680,6 +681,37 @@ def test_psc_bond_aggregate_not_futures_like() -> None:
     assert bucket["is_futures_like"] is False
 
 
+def test_futopt_not_bond_like() -> None:
+    assert not is_bond_like_position(
+        description="CLQ6C 08/16/26 C77.5",
+        bbg_ticker="CLQ6C 08/16/26 C77.5",
+        match_key="futopt:CLQ6|2026-08|C|77.5",
+    )
+
+
+def test_es_futures_trade_qty_scaled_by_contract_multiplier() -> None:
+    """ES futures trades report Quantity in index-point units (contracts × 50)."""
+    trade = {
+        "SecurityName": "S&P500 EMINI FUT  Sep26",
+        "Ticker": "ESU6",
+        "CUSIP": "ESU6",
+        "SecurityType": "Futures",
+        "TradeType": "Buy",
+        "Quantity": 1250.0,
+        "QuantityMultiplier": 50.0,
+        "LocalAmountPerShare": 7495.12,
+        "LocalNetAmount": -468445.0,
+        "BaseNetAmount": -663465.0,
+        "TradeDate": "2026-07-08T00:00:00",
+        "IsReversal": False,
+        "IsCancel": False,
+    }
+    idx = build_trade_index_by_match_key([trade], "2026-07-08")
+    key = "fut:ES|2026-09"
+    assert key in idx
+    assert idx[key][0]["qty"] == Decimal("25")
+
+
 def test_futures_option_trade_qty_scaled_by_contract_multiplier() -> None:
     """Crude futures option trades report qty in barrels (contracts x 1000)."""
     from decimal import Decimal
@@ -1116,6 +1148,8 @@ if __name__ == "__main__":
     test_corp_bond_bbg_ticker_not_futures()
     test_cusip_not_matched_as_futures_root()
     test_psc_bond_aggregate_not_futures_like()
+    test_futopt_not_bond_like()
+    test_es_futures_trade_qty_scaled_by_contract_multiplier()
     test_futures_option_trade_qty_scaled_by_contract_multiplier()
     test_futures_option_close_out_mtm_pnl()
     test_aggregate_psc_net_shares()

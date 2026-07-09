@@ -2274,41 +2274,29 @@ def aggregate_diamond_by_security(
     return out
 
 
-def _compute_dollar_difference(
+def _compute_close_price_difference(
     psc: Optional[Dict[str, Any]],
     dia: Optional[Dict[str, Any]],
-) -> Tuple[Optional[float], Optional[float], float]:
+) -> Tuple[Optional[float], float]:
     """
-    Returns (price_difference, dollar_difference, shares_for_display).
+    Returns (price_difference, shares_for_display).
 
-    Both sides: net_shares × mult × (diamond_close - alphadesk_close).
-    One side only: full position value (signed qty × mult × that side's close).
+    Both sides: diamond_close - alphadesk_close.
+    One side only: price_difference is None.
     """
     psc_close = psc.get("close_price") if psc else None
     dia_close = dia.get("close_price") if dia else None
     shares = 0.0
-    mult = 1.0
     if psc and abs(float(psc.get("shares") or 0)) > 0.0001:
         shares = float(psc["shares"])
-        mult = float(psc.get("qty_multiplier") or 1.0)
     elif dia:
         shares = float(dia.get("shares") or 0)
-        mult = float(dia.get("qty_multiplier") or 1.0)
 
     if psc_close is not None and dia_close is not None:
         price_diff = round(dia_close - psc_close, 6)
-        dollar_diff = round(shares * mult * price_diff, 2)
-        return price_diff, dollar_diff, shares
+        return price_diff, shares
 
-    if psc_close is not None and dia_close is None and psc:
-        dollar_diff = round(float(psc["shares"]) * float(psc.get("qty_multiplier") or 1.0) * psc_close, 2)
-        return None, dollar_diff, float(psc["shares"])
-
-    if dia_close is not None and psc_close is None and dia:
-        dollar_diff = round(float(dia["shares"]) * float(dia.get("qty_multiplier") or 1.0) * dia_close, 2)
-        return None, dollar_diff, float(dia["shares"])
-
-    return None, None, shares
+    return None, shares
 
 
 def build_close_price_reconciliation(
@@ -2467,7 +2455,7 @@ def build_close_price_reconciliation(
         )
         if dia and dia_close is not None:
             dia = {**dia, "close_price": dia_close}
-        price_diff, dollar_diff, shares = _compute_dollar_difference(psc, dia)
+        price_diff, shares = _compute_close_price_difference(psc, dia)
         prior_dia = prior_diamond_by_key.get(key)
         mtm_lookup_keys = _collect_mtm_lookup_keys(key, psc, dia)
         pos_T = _lookup_first(pos_t_by_key, mtm_lookup_keys)
@@ -2577,7 +2565,6 @@ def build_close_price_reconciliation(
                 "alphadesk_close": psc_close,
                 "price_difference": price_diff,
                 "shares": round(shares, 4) if abs(shares) > 0.0001 else 0.0,
-                "dollar_difference": dollar_diff,
                 "in_diamond": dia is not None,
                 "in_alphadesk": psc is not None,
                 "one_sided": (psc is None) != (dia is None),
@@ -2586,7 +2573,7 @@ def build_close_price_reconciliation(
 
     lines.sort(
         key=lambda r: (
-            -abs(float(r["dollar_difference"] or 0)),
+            -abs(float(r["price_difference"] or 0)),
             (r.get("ticker") or "").upper(),
         ),
     )
@@ -2601,10 +2588,6 @@ def build_close_price_reconciliation(
         if r.get("price_difference") is not None and abs(float(r["price_difference"])) > 0.0001
     )
     meta["one_sided_lines"] = sum(1 for r in lines if r.get("one_sided"))
-    meta["total_dollar_difference"] = round(
-        sum(float(r["dollar_difference"] or 0) for r in lines if r.get("dollar_difference") is not None),
-        2,
-    )
     meta["lines_with_pnl_diff"] = sum(
         1
         for r in lines

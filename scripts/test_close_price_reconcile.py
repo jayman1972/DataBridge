@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sggg.close_price_reconcile import (
-    _compute_dollar_difference,
+    _compute_close_price_difference,
     _diamond_match_key,
     aggregate_psc_by_security,
     align_diamond_bond_close,
@@ -316,26 +316,24 @@ def test_secondary_id_merge() -> None:
     assert set(psc_out.keys()) == set(dia_out.keys())
 
 
-def test_bond_dollar_diff_par_scaling() -> None:
-    """475k face × (71.882 - 97.573) / 100 ≈ -122k, not -12.2M."""
+def test_bond_price_diff_par_scaling() -> None:
+    """Bond closes compared in par points, not scaled by face."""
     psc = {"shares": 475000.0, "close_price": 97.573, "qty_multiplier": 0.01}
     dia = {"shares": 475000.0, "close_price": 71.882, "qty_multiplier": 0.01}
-    _, dollar_diff, _ = _compute_dollar_difference(psc, dia)
-    assert dollar_diff == round(475000 * 0.01 * (71.882 - 97.573), 2)
+    price_diff, _ = _compute_close_price_difference(psc, dia)
+    assert price_diff == round(71.882 - 97.573, 6)
 
 
 def test_one_sided_alphadesk_only() -> None:
     psc = {"shares": 1000.0, "close_price": 99.982, "qty_multiplier": 1.0}
-    price_diff, dollar_diff, _ = _compute_dollar_difference(psc, None)
+    price_diff, _ = _compute_close_price_difference(psc, None)
     assert price_diff is None
-    assert dollar_diff == round(1000 * 99.982, 2)
 
 
 def test_one_sided_diamond_only() -> None:
     dia = {"shares": 50.0, "close_price": 99.982, "qty_multiplier": 1.0}
-    price_diff, dollar_diff, _ = _compute_dollar_difference(None, dia)
+    price_diff, _ = _compute_close_price_difference(None, dia)
     assert price_diff is None
-    assert dollar_diff == round(50 * 99.982, 2)
 
 
 def test_options_contract_multiplier() -> None:
@@ -360,8 +358,8 @@ def test_options_contract_multiplier() -> None:
     assert "C150" in row["ticker"]
     psc = row
     dia = {"shares": 10.0, "close_price": 5.30, "qty_multiplier": 100.0}
-    _, dollar_diff, _ = _compute_dollar_difference(psc, dia)
-    assert dollar_diff == round(10 * 100 * (5.30 - 5.25), 2)
+    price_diff, _ = _compute_close_price_difference(psc, dia)
+    assert price_diff == round(5.30 - 5.25, 6)
 
 
 def test_futures_contract_key_nqu6_sep26() -> None:
@@ -513,7 +511,7 @@ def test_futures_match_and_price_reconcile() -> None:
     assert dia_key == "fut:NQ|2026-06"
     assert next(iter(psc.keys())) == dia_key
     psc_bucket = next(iter(psc.values()))
-    _, dollar_diff, _ = _compute_dollar_difference(
+    price_diff, _ = _compute_close_price_difference(
         psc_bucket,
         {
             "shares": 28.0,
@@ -521,7 +519,7 @@ def test_futures_match_and_price_reconcile() -> None:
             "qty_multiplier": 20.0,
         },
     )
-    assert dollar_diff == 0.0
+    assert price_diff == 0.0
 
 
 def test_aggregate_psc_net_shares() -> None:
@@ -1190,7 +1188,7 @@ if __name__ == "__main__":
     test_bond_diamond_price_scaled()
     test_option_price_not_scaled()
     test_align_diamond_bond_close_when_matched_to_par()
-    test_bond_dollar_diff_par_scaling()
+    test_bond_price_diff_par_scaling()
     test_cadusd_cash_excluded()
     test_portfolio_details_display_ticker()
     test_match_key_equity_line_ticker()

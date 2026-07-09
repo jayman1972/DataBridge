@@ -2517,7 +2517,7 @@ def sggg_close_price_reconciliation():
             "lines": lines,
             "meta": meta,
             "timing_sec": round(time.time() - t0, 2),
-            "nav_checker_build": "sggg-close-price-v42-iwm-option-match",
+            "nav_checker_build": "sggg-close-price-v43-price-diff",
         }
         if meta.get("debug"):
             response["debug"] = meta.pop("debug")

@@ -13,6 +13,7 @@ from sggg.close_price_reconcile import (
     align_diamond_bond_close,
     apply_diamond_price_discount,
     build_trade_index_by_match_key,
+    build_underlying_ticker_index,
     compute_daily_pnl,
     diamond_futures_contract_multiplier,
     is_bond_like_position,
@@ -706,6 +707,46 @@ def test_align_diamond_close_skips_futopt_par_scaling() -> None:
     )
 
 
+def test_iwm_put_diamond_name_matches_alphadesk() -> None:
+    """Diamond long option names must match AlphaDesk compact tickers (same-day round trip)."""
+    expected = "opt:IWM|2026-07-10|P|288"
+    name = "Put iShares Russell 2000 ETF $288 10JUL2026"
+    row = {
+        "SecurityName": name,
+        "UnderlyingBBGID": "BBG000CGC9C4",
+        "UnderlyingSecurity": "iShares Russell 2000 ETF",
+        "PricingTicker": "",
+    }
+    records = [
+        {
+            "SecurityName": "iShares Russell 2000 ETF",
+            "CompositeBBGID": "BBG000CGC9C4",
+            "ISIN": "US4642876555",
+            "PricingTicker": "",
+        },
+        row,
+    ]
+    index = build_underlying_ticker_index(records)
+    assert index.get("BBG000CGC9C4") == "IWM"
+    assert _diamond_match_key(row, underlying_index=index) == expected
+    assert parse_option_contract_key("IWM 07/10/26 P288 US") == expected
+    trade = {
+        "Ticker": "IWM 7 P288",
+        "SecurityName": name,
+        "TradeType": "Buy",
+        "Quantity": 25000.0,
+        "QuantityMultiplier": 100.0,
+        "LocalAmountPerShare": 0.925,
+        "LocalNetAmount": -23125.0,
+        "BaseNetAmount": -32754.25,
+        "TradeDate": "2026-07-08T00:00:00",
+        "IsReversal": False,
+        "IsCancel": False,
+    }
+    trade_index = build_trade_index_by_match_key([trade], "2026-07-08", underlying_index=index)
+    assert expected in trade_index
+
+
 def test_futopt_not_bond_like() -> None:
     assert not is_bond_like_position(
         description="CLQ6C 08/16/26 C77.5",
@@ -1174,6 +1215,7 @@ if __name__ == "__main__":
     test_cusip_not_matched_as_futures_root()
     test_psc_bond_aggregate_not_futures_like()
     test_futopt_not_bond_like()
+    test_iwm_put_diamond_name_matches_alphadesk()
     test_nq_futures_option_strike_and_name_matching()
     test_align_diamond_close_skips_futopt_par_scaling()
     test_es_futures_trade_qty_scaled_by_contract_multiplier()

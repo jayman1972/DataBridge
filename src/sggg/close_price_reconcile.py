@@ -495,6 +495,18 @@ _FUTURES_PRODUCT_ROOT: Dict[str, str] = {
     "E-MINI RUSSELL": "RTY",
     "RUSSELL 2000 E-MINI": "RTY",
 }
+# Diamond option rows often name the ETF, not the root ticker (e.g. iShares Russell 2000 -> IWM).
+_ETF_NAME_TO_OPTION_ROOT: Tuple[Tuple[str, str], ...] = (
+    ("ISHARES RUSSELL 2000", "IWM"),
+    ("RUSSELL 2000 ETF", "IWM"),
+    ("SPDR S&P 500", "SPY"),
+    ("S&P 500 ETF", "SPY"),
+    ("INVESCO QQQ", "QQQ"),
+    ("NASDAQ 100 ETF", "QQQ"),
+    ("ROUNDHILL MEMORY", "DRAM"),
+    ("VANECK GOLD MINERS", "GDX"),
+    ("GOLD MINERS ETF", "GDX"),
+)
 _PREFERRED_BBG_DOTTED_RE = re.compile(
     r"^([A-Z0-9][A-Z0-9.-]*)\.PR\.([A-Z0-9]+)\.CA$",
     re.IGNORECASE,
@@ -696,17 +708,43 @@ def parse_option_contract_key(
     )
 
 
+def _option_root_from_etf_name(text: Any) -> str:
+    """Map Diamond ETF descriptions (e.g. iShares Russell 2000 ETF) to option root tickers."""
+    t = normalize_instrument_description(text)
+    if not t:
+        return ""
+    for phrase, root in _ETF_NAME_TO_OPTION_ROOT:
+        if phrase in t:
+            return root
+    return ""
+
+
+def _option_root_from_bloomberg_ticker(ticker: Any) -> str:
+    """Extract equity root from Bloomberg option tickers like IWM 7 P288."""
+    raw = _norm(ticker).upper()
+    if not raw:
+        return ""
+    head = raw.split()[0]
+    if head and len(head) <= 6 and head.replace(".", "").isalnum():
+        return head.split(".")[0]
+    return ""
+
+
 def build_underlying_ticker_index(records: List[Dict[str, Any]]) -> Dict[str, str]:
     """Map Diamond UnderlyingBBGID / CompositeBBGID to equity root (e.g. HYG) from PricingTicker."""
     index: Dict[str, str] = {}
     for row in records:
+        root = ""
         pt = _norm(row.get("PricingTicker"))
-        if not pt:
-            continue
-        root = normalize_bbg_key(pt).split()[0] if normalize_bbg_key(pt) else ""
+        if pt:
+            root = normalize_bbg_key(pt).split()[0] if normalize_bbg_key(pt) else ""
+        if not root or len(root) > 12:
+            root = _option_root_from_etf_name(row.get("SecurityName"))
+        if not root:
+            root = _option_root_from_etf_name(row.get("UnderlyingSecurity"))
         if not root or len(root) > 12:
             continue
-        for field in ("CompositeBBGID", "UnderlyingBBGID"):
+        for field in ("CompositeBBGID", "UnderlyingBBGID", "PrimaryBBGID"):
             bbg = _norm(row.get(field))
             if bbg:
                 index[bbg] = root
@@ -1051,6 +1089,8 @@ def reconcile_match_key(
     opt_root = (
         _norm(option_underlying_root).upper()
         or _norm(underlying_company_symbol).upper()
+        or _option_root_from_etf_name(security_name)
+        or _option_root_from_etf_name(description)
         or _norm(company_symbol).upper()
     )
     if opt_root and (" " in opt_root or len(opt_root) > 12):
@@ -2021,11 +2061,13 @@ def _diamond_match_key(
         return None
     opt_root = ""
     if underlying_index:
-        for field in ("UnderlyingBBGID", "CompositeBBGID"):
+        for field in ("UnderlyingBBGID", "CompositeBBGID", "PrimaryBBGID"):
             bbg = _norm(row.get(field))
             if bbg and bbg in underlying_index:
                 opt_root = underlying_index[bbg]
                 break
+    if not opt_root:
+        opt_root = _option_root_from_etf_name(row.get("UnderlyingSecurity")) or ""
     cs = _norm(row.get("CompanySymbol"))
     if not opt_root and cs and len(cs) <= 12 and " " not in cs:
         opt_root = cs.upper()
@@ -2833,6 +2875,8 @@ def _trade_match_key(
     if underlying_index and bbg and bbg in underlying_index:
         opt_root = underlying_index[bbg]
     ticker = _norm(trade.get("Ticker"))
+    if not opt_root and ticker:
+        opt_root = _option_root_from_bloomberg_ticker(ticker)
     if not opt_root and ticker and len(ticker) <= 12 and " " not in ticker:
         opt_root = ticker.upper()
     return reconcile_match_key(

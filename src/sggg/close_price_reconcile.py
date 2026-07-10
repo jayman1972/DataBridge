@@ -2795,6 +2795,12 @@ def _trade_date_iso(trade: Dict[str, Any]) -> str:
     return raw[:10] if len(raw) >= 10 else raw
 
 
+def _trade_valuation_date_iso(trade: Dict[str, Any]) -> str:
+    """NAV booking date for a trade; may lag TradeDate on derivatives."""
+    raw = _norm(trade.get("ValuationDate") or trade.get("TradeDate"))
+    return raw[:10] if len(raw) >= 10 else raw
+
+
 def _position_base_income(row: Optional[Dict[str, Any]]) -> Decimal:
     if not row:
         return Decimal("0")
@@ -2993,7 +2999,11 @@ def build_trade_index_by_match_key(
     underlying_index: Optional[Dict[str, str]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """
-    Group same-day trades on valuation_date by reconcile match key.
+    Group trades booked on valuation_date by reconcile match key.
+
+    Uses ValuationDate (Diamond NAV booking date), not TradeDate, so evening
+    futures/futopt trades with TradeDate on the prior calendar day still MTM
+    on the correct NAV date.
 
     Each entry: qty (signed +buy / -sell), local trade price, fx to base.
     """
@@ -3004,8 +3014,8 @@ def build_trade_index_by_match_key(
             continue
         if str(trade.get("IsCancel") or "").lower() == "true":
             continue
-        trade_date = _trade_date_iso(trade)
-        if trade_date and trade_date != valuation_date:
+        booked_date = _trade_valuation_date_iso(trade)
+        if booked_date and booked_date != valuation_date:
             continue
         trade_type = _norm(trade.get("TradeType")).upper()
         if trade_type.startswith("CA-"):

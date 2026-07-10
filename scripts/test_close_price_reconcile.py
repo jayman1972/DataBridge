@@ -822,6 +822,7 @@ def test_es_futures_trade_qty_scaled_by_contract_multiplier() -> None:
         "LocalNetAmount": -468445.0,
         "BaseNetAmount": -663465.0,
         "TradeDate": "2026-07-08T00:00:00",
+        "ValuationDate": "2026-07-08T00:00:00",
         "IsReversal": False,
         "IsCancel": False,
     }
@@ -829,6 +830,29 @@ def test_es_futures_trade_qty_scaled_by_contract_multiplier() -> None:
     key = "fut:ES|2026-09"
     assert key in idx
     assert idx[key][0]["qty"] == Decimal("25")
+
+
+def test_trade_index_uses_valuation_date_when_trade_date_lags() -> None:
+    """Evening futures can book on T with TradeDate still on T-1."""
+    trade = {
+        "SecurityName": "S&P500 EMINI FUT  Sep26",
+        "Ticker": "ESU6",
+        "CUSIP": "ESU6",
+        "SecurityType": "Futures",
+        "TradeType": "Sell",
+        "Quantity": -1250.0,
+        "QuantityMultiplier": 50.0,
+        "LocalAmountPerShare": 7510.0,
+        "LocalNetAmount": 468750.0,
+        "BaseNetAmount": 663750.0,
+        "TradeDate": "2026-07-08T00:00:00",
+        "ValuationDate": "2026-07-09T00:00:00",
+        "IsReversal": False,
+        "IsCancel": False,
+    }
+    key = "fut:ES|2026-09"
+    assert key in build_trade_index_by_match_key([trade], "2026-07-09")
+    assert key not in build_trade_index_by_match_key([trade], "2026-07-08")
 
 
 def test_futures_option_trade_qty_scaled_by_contract_multiplier() -> None:
@@ -1276,6 +1300,7 @@ if __name__ == "__main__":
     test_nq_futures_option_strike_and_name_matching()
     test_align_diamond_close_skips_futopt_par_scaling()
     test_es_futures_trade_qty_scaled_by_contract_multiplier()
+    test_trade_index_uses_valuation_date_when_trade_date_lags()
     test_futures_option_trade_qty_scaled_by_contract_multiplier()
     test_futures_option_close_out_mtm_pnl()
     test_aggregate_psc_net_shares()

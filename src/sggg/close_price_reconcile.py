@@ -2370,6 +2370,7 @@ def build_close_price_reconciliation(
         "matched_securities": 0,
     }
     psc_by_key: Dict[str, Dict[str, Any]] = {}
+    psc_prior_by_key: Dict[str, Dict[str, Any]] = {}
     candidates = psc_portfolio_candidates_for_fund(fund_id)
     if not candidates:
         meta["psc_error"] = f"No PSC portfolio mapping for fund {fund_id}"
@@ -2395,6 +2396,15 @@ def build_close_price_reconciliation(
                             f"(tried: {', '.join(candidates)})"
                         )
                     psc_by_key = aggregate_psc_by_security(psc_rows)
+                    if reference_date_iso:
+                        ref_compact = normalize_valuation_date(reference_date_iso).replace("-", "")
+                        val_compact_norm = normalize_valuation_date(valuation_date_iso).replace("-", "")
+                        if ref_compact != val_compact_norm:
+                            psc_prior_rows, _ = fetch_psc_positions_for_fund(
+                                cursor, fund_id, ref_compact
+                            )
+                            psc_prior_by_key = aggregate_psc_by_security(psc_prior_rows)
+                            meta["psc_prior_positions"] = len(psc_prior_rows)
                 finally:
                     conn.close()
             except Exception as exc:
@@ -2438,6 +2448,12 @@ def build_close_price_reconciliation(
     psc_by_key, diamond_by_key, id_merges = merge_positions_by_secondary_ids(
         psc_by_key, diamond_by_key
     )
+    if psc_prior_by_key:
+        psc_prior_by_key, _, prior_merges = merge_positions_by_secondary_ids(
+            psc_prior_by_key, {}
+        )
+        if prior_merges:
+            meta["psc_prior_secondary_id_merges"] = prior_merges
     meta["secondary_id_merges"] = id_merges
     psc_by_key, diamond_by_key, fund_merges = merge_fund_unit_holdings_by_navpu(
         psc_by_key, diamond_by_key
@@ -2526,6 +2542,7 @@ def build_close_price_reconciliation(
         pos_T = _lookup_first(pos_t_by_key, mtm_lookup_keys)
         pos_prior = _lookup_first(pos_prior_by_key, mtm_lookup_keys)
         trades_for_symbol = _lookup_trades_for_keys(trade_index, mtm_lookup_keys)
+        psc_prior = _lookup_first(psc_prior_by_key, mtm_lookup_keys)
         diamond_pnl: Optional[float] = None
         diamond_total_unrealized = (
             float(dia.get("diamond_total_unrealized") or 0)
@@ -2551,6 +2568,8 @@ def build_close_price_reconciliation(
                 option_like=option_like,
                 futures_like=futures_like,
                 futures_option_like=futures_option_like,
+                valuation_date_iso=valuation_date_iso,
+                psc_prior=psc_prior,
             )
             mismatch = audit_trade_quantity_continuity(
                 pos_T,
@@ -2558,6 +2577,8 @@ def build_close_price_reconciliation(
                 trades_for_symbol,
                 match_key=key,
                 ticker=pick_display_ticker(psc, dia) or key,
+                valuation_date_iso=valuation_date_iso,
+                psc_prior=psc_prior,
             )
             if mismatch:
                 trade_qty_mismatches.append(mismatch)
@@ -3030,8 +3051,39 @@ def build_trade_index_by_match_key(
         fx = Decimal("1")
         if local_net != 0:
             fx = abs(base_net / local_net)
-        idx[key].append({"qty": qty, "price": price, "fx": fx})
+        idx[key].append(
+            {
+                "qty": qty,
+                "price": price,
+                "fx": fx,
+                "trade_date": _trade_date_iso(trade),
+                "valuation_date": _trade_valuation_date_iso(trade),
+            }
+        )
     return idx
+
+
+def _mtm_trades_for_daily_pnl(
+    trades_for_symbol: List[Dict[str, Any]],
+    valuation_date_iso: Optional[str],
+    *,
+    use_psc_prior_carry: bool,
+) -> List[Dict[str, Any]]:
+    """
+    When carrying PSC prior qty because Diamond's prior snapshot is flat, drop
+    trades booked on T but executed before T — they duplicate the overnight position.
+    """
+    if not use_psc_prior_carry or not valuation_date_iso:
+        return trades_for_symbol
+    val = normalize_valuation_date(valuation_date_iso)
+    filtered: List[Dict[str, Any]] = []
+    for trade in trades_for_symbol:
+        booked = trade.get("valuation_date") or val
+        executed = trade.get("trade_date") or booked
+        if booked == val and executed and executed < val:
+            continue
+        filtered.append(trade)
+    return filtered
 
 
 def compute_daily_pnl(
@@ -3044,6 +3096,8 @@ def compute_daily_pnl(
     futures_like: bool = False,
     futures_option_like: bool = False,
     income_from_t_snapshot_only: bool = True,
+    valuation_date_iso: Optional[str] = None,
+    psc_prior: Optional[Dict[str, Any]] = None,
 ) -> Optional[float]:
     """
     True daily MTM in base ccy from two Diamond snapshots plus same-day trades.
@@ -3051,6 +3105,10 @@ def compute_daily_pnl(
     pnl = (Price_T - Price_prior) * Qty_prior * mult * fx_T
         + sum((Price_T - TradePrice) * TradeQty * mult * fx_T)
         + income booked on T (dividend/coupon accrual on the T snapshot)
+
+    When Diamond's prior snapshot is flat but AlphaDesk had an open position on the
+    reference date, use PSC prior qty/close for the carry leg and exclude trades
+    booked on T with TradeDate before T (evening-session lag).
     """
     if position_T is None:
         return None
@@ -3061,19 +3119,41 @@ def compute_daily_pnl(
         option_like=option_like,
         futures_like=futures_like,
     )
-    if position_prior is not None:
+    diamond_qty_prior = (
+        _d(_diamond_signed_qty(position_prior)) if position_prior is not None else Decimal("0")
+    )
+    psc_prior_shares = (
+        _d(psc_prior.get("shares"))
+        if psc_prior and psc_prior.get("close_price") is not None
+        else Decimal("0")
+    )
+    use_psc_prior_carry = (
+        psc_prior is not None
+        and abs(float(psc_prior_shares)) > 0.0001
+        and abs(float(diamond_qty_prior)) <= 0.0001
+    )
+
+    if use_psc_prior_carry:
+        qty_prior = psc_prior_shares
+        price_prior = _d(psc_prior["close_price"])
+    elif position_prior is not None:
         price_prior = _position_close_for_mtm(
             position_prior,
             bond_like=bond_like,
             option_like=option_like,
             futures_like=futures_like,
         )
-        qty_prior = _d(_diamond_signed_qty(position_prior))
+        qty_prior = diamond_qty_prior
     else:
         price_prior = price_T
         qty_prior = Decimal("0")
 
     fx_T = _position_fx_to_base(position_T)
+    if use_psc_prior_carry and psc_prior.get("fx_settle_to_base"):
+        psc_fx = _optional_float(psc_prior.get("fx_settle_to_base"))
+        if psc_fx is not None and psc_fx > 0:
+            fx_T = _d(psc_fx)
+
     mult = _position_price_multiplier_for_mtm(
         position_T,
         bond_like=bond_like,
@@ -3084,8 +3164,13 @@ def compute_daily_pnl(
 
     mtm_carry = (price_T - price_prior) * qty_prior * mult * fx_T
 
+    trades_mtm = _mtm_trades_for_daily_pnl(
+        trades_for_symbol,
+        valuation_date_iso,
+        use_psc_prior_carry=use_psc_prior_carry,
+    )
     mtm_trades = Decimal("0")
-    for trade in trades_for_symbol:
+    for trade in trades_mtm:
         trade_fx = trade.get("fx") or fx_T
         trade_price = _mtm_trade_price(_d(trade["price"]), position_T, bond_like=bond_like)
         mtm_trades += (price_T - trade_price) * trade["qty"] * mult * trade_fx
@@ -3105,13 +3190,31 @@ def audit_trade_quantity_continuity(
     *,
     match_key: str,
     ticker: str,
+    valuation_date_iso: Optional[str] = None,
+    psc_prior: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Log when qty_T != qty_prior + sum(trade qty) — catches timezone / booking issues."""
     if not trades_for_symbol:
         return None
     qty_T = _d(_diamond_signed_qty(position_T)) if position_T else Decimal("0")
-    qty_prior = _d(_diamond_signed_qty(position_prior)) if position_prior else Decimal("0")
-    trade_sum = sum(trade["qty"] for trade in trades_for_symbol)
+    diamond_qty_prior = _d(_diamond_signed_qty(position_prior)) if position_prior else Decimal("0")
+    psc_prior_shares = (
+        _d(psc_prior.get("shares"))
+        if psc_prior and psc_prior.get("close_price") is not None
+        else Decimal("0")
+    )
+    use_psc_prior_carry = (
+        psc_prior is not None
+        and abs(float(psc_prior_shares)) > 0.0001
+        and abs(float(diamond_qty_prior)) <= 0.0001
+    )
+    qty_prior = psc_prior_shares if use_psc_prior_carry else diamond_qty_prior
+    trades_mtm = _mtm_trades_for_daily_pnl(
+        trades_for_symbol,
+        valuation_date_iso,
+        use_psc_prior_carry=use_psc_prior_carry,
+    )
+    trade_sum = sum(trade["qty"] for trade in trades_mtm)
     expected = qty_prior + trade_sum
     if abs(qty_T - expected) <= Decimal("0.01"):
         return None
@@ -3123,6 +3226,7 @@ def audit_trade_quantity_continuity(
         "qty_T": float(qty_T),
         "expected_qty_T": float(expected),
         "difference": float(qty_T - expected),
+        "psc_prior_carry": use_psc_prior_carry,
     }
 
 

@@ -855,6 +855,68 @@ def test_trade_index_uses_valuation_date_when_trade_date_lags() -> None:
     assert key not in build_trade_index_by_match_key([trade], "2026-07-08")
 
 
+def test_es_futures_psc_prior_carry_excludes_lagged_opening_trade() -> None:
+    """Jul 9 ES: carry from PSC prior close; skip lagged -25 open booked on T."""
+    pos_t = {
+        "SecurityName": "S&P500 EMINI FUT  Sep26",
+        "PricingTicker": "ESU6",
+        "PortfolioPrice": 379437.5,
+        "PreDiscountPrice": 7588.75,
+        "Quantity": -25.0,
+        "LongShort": "Short",
+        "QuantityMultiplier": 50.0,
+        "LocalMarketValue": -189718.75,
+        "BaseMarketValue": -268875.0,
+    }
+    pos_prior = {
+        "SecurityName": "S&P500 EMINI FUT  Sep26",
+        "PricingTicker": "ESU6",
+        "PreDiscountPrice": 7401.75,
+        "Quantity": 0.0,
+        "QuantityMultiplier": 50.0,
+    }
+    psc_prior = {
+        "shares": -25.0,
+        "close_price": 7528.75,
+        "fx_settle_to_base": 1.4167,
+    }
+    trades = [
+        {
+            "qty": Decimal("-25"),
+            "price": Decimal("7510"),
+            "fx": Decimal("1.4167"),
+            "trade_date": "2026-07-08",
+            "valuation_date": "2026-07-09",
+        },
+        {
+            "qty": Decimal("40"),
+            "price": Decimal("7558.7938"),
+            "fx": Decimal("1.4167"),
+            "trade_date": "2026-07-09",
+            "valuation_date": "2026-07-09",
+        },
+        {
+            "qty": Decimal("-40"),
+            "price": Decimal("7565"),
+            "fx": Decimal("1.4167"),
+            "trade_date": "2026-07-09",
+            "valuation_date": "2026-07-09",
+        },
+    ]
+    pnl = compute_daily_pnl(
+        position_T=pos_t,
+        position_prior=pos_prior,
+        trades_for_symbol=trades,
+        futures_like=True,
+        bond_like=False,
+        option_like=False,
+        valuation_date_iso="2026-07-09",
+        psc_prior=psc_prior,
+    )
+    assert pnl is not None
+    assert abs(pnl - (-89381.87)) < 1500.0
+
+
 def test_futures_option_trade_qty_scaled_by_contract_multiplier() -> None:
     """Crude futures option trades report qty in barrels (contracts x 1000)."""
     from decimal import Decimal
@@ -1301,6 +1363,7 @@ if __name__ == "__main__":
     test_align_diamond_close_skips_futopt_par_scaling()
     test_es_futures_trade_qty_scaled_by_contract_multiplier()
     test_trade_index_uses_valuation_date_when_trade_date_lags()
+    test_es_futures_psc_prior_carry_excludes_lagged_opening_trade()
     test_futures_option_trade_qty_scaled_by_contract_multiplier()
     test_futures_option_close_out_mtm_pnl()
     test_aggregate_psc_net_shares()

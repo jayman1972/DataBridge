@@ -733,6 +733,40 @@ def _get_canadian_ticker_variants(ticker: str) -> list:
     return variants
 
 
+@app.route("/instrument-search", methods=["POST"])
+def instrument_search():
+    """Bloomberg instrument discovery for identity review.
+
+    Search results are candidates only. The caller must validate the selected
+    Bloomberg security with reference fields and historical prices before
+    linking it to a security-master row.
+    """
+    try:
+        data = request.get_json() or {}
+        query = str(data.get("query") or "").strip()
+        if not query:
+            return jsonify({"matches": [], "errors": ["query is required"]}), 400
+        max_results = max(1, min(int(data.get("max_results") or 20), 50))
+        yellow_key = str(data.get("yellow_key") or "Equity").strip() or "Equity"
+        if not bloomberg_client or not hasattr(bloomberg_client, "search_instruments"):
+            return jsonify({"matches": [], "errors": ["Bloomberg instrument search is unavailable"]}), 503
+        matches = bloomberg_client.search_instruments(
+            query=query,
+            max_results=max_results,
+            yellow_key=yellow_key,
+        )
+        _bbg_logger.info(
+            "instrument search query=%r yellow_key=%s matches=%d",
+            query,
+            yellow_key,
+            len(matches),
+        )
+        return jsonify({"matches": matches, "errors": []}), 200
+    except Exception as exc:
+        _bbg_logger.error("instrument search failed query=%r err=%s", locals().get("query"), exc, exc_info=True)
+        return jsonify({"matches": [], "errors": [str(exc)]}), 500
+
+
 @app.route("/historical-debug", methods=["POST"])
 def historical_debug():
     """
@@ -4443,7 +4477,7 @@ if __name__ == "__main__":
         print(f"Supabase URL: {SUPABASE_URL}")
         print(f"Listening on http://127.0.0.1:{SERVICE_PORT}")
         print()
-        print("Endpoints: /health, /bloomberg-update, /bloomberg/quotes, /quotes, /historical, /historical-debug, /reference, /bds,")
+        print("Endpoints: /health, /bloomberg-update, /bloomberg/quotes, /quotes, /instrument-search, /historical, /historical-debug, /reference, /bds,")
         print("  /economic-calendar, /clarifi/process, /clarifi/list, /ehp/process, /sggg/portfolio,")
         print("  /sggg/options-tax-reconciliation,")
         print("  /emsx/options-closeout-check,")
@@ -4478,4 +4512,3 @@ if __name__ == "__main__":
         print(f"Error starting service: {e}")
         traceback.print_exc()
         sys.exit(1)
-

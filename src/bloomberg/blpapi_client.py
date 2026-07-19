@@ -146,6 +146,65 @@ class BLPAPIClient(BloombergClientBase):
             return None
         
         return session
+
+    def search_instruments(
+        self,
+        query: str,
+        max_results: int = 20,
+        yellow_key: Optional[str] = "Equity",
+    ) -> List[Dict[str, Any]]:
+        """Search Bloomberg instruments, including inactive listings when entitled.
+
+        Bloomberg's instrument lookup service returns canonical Bloomberg
+        securities and descriptions. Reference-data validation remains a
+        separate step so a search result is never treated as proof of identity.
+        """
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return []
+
+        session_options = blpapi.SessionOptions()
+        session_options.setServerHost(self.host)
+        session_options.setServerPort(self.port)
+        session_options.setAutoRestartOnDisconnection(True)
+        session = blpapi.Session(session_options)
+        if not session.start():
+            raise Exception("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
+
+        instruments_service = "//blp/instruments"
+        try:
+            if not session.openService(instruments_service):
+                raise Exception("Bloomberg instrument lookup service is unavailable")
+            service = session.getService(instruments_service)
+            lookup_request = service.createRequest("instrumentListRequest")
+            lookup_request.set("query", normalized_query)
+            lookup_request.set("maxResults", max(1, min(int(max_results or 20), 50)))
+            if yellow_key:
+                yellow_key_value = str(yellow_key).strip().upper()
+                if yellow_key_value in {"EQUITY", "EQTY", "YK_FILTER_EQTY"}:
+                    lookup_request.set("yellowKeyFilter", "YK_FILTER_EQTY")
+
+            session.sendRequest(lookup_request)
+            results: List[Dict[str, Any]] = []
+            while True:
+                event = session.nextEvent(500)
+                if event.eventType() in (blpapi.Event.RESPONSE, blpapi.Event.PARTIAL_RESPONSE):
+                    for message in event:
+                        if not message.hasElement("results"):
+                            continue
+                        rows = message.getElement("results")
+                        for index in range(rows.numValues()):
+                            row = rows.getValueAsElement(index)
+                            security = row.getElementAsString("security") if row.hasElement("security") else ""
+                            description = row.getElementAsString("description") if row.hasElement("description") else ""
+                            security = security.strip()
+                            if security:
+                                results.append({"security": security, "description": description.strip() or None})
+                if event.eventType() == blpapi.Event.RESPONSE:
+                    break
+            return results
+        finally:
+            session.stop()
     
     def get_historical_data(
         self,

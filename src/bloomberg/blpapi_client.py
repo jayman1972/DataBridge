@@ -6,6 +6,7 @@ This is the existing implementation wrapped in the new interface.
 import os
 import math
 import numbers
+import re
 from datetime import date, datetime, time as dt_time
 from typing import List, Dict, Any, Optional
 try:
@@ -197,7 +198,12 @@ class BLPAPIClient(BloombergClientBase):
                             row = rows.getValueAsElement(index)
                             security = row.getElementAsString("security") if row.hasElement("security") else ""
                             description = row.getElementAsString("description") if row.hasElement("description") else ""
-                            security = security.strip()
+                            security = re.sub(
+                                r"\s*<\s*(equity|index|comdty|curncy)\s*>$",
+                                lambda match: f" {match.group(1).title()}",
+                                security.strip(),
+                                flags=re.IGNORECASE,
+                            )
                             if security:
                                 results.append({"security": security, "description": description.strip() or None})
                 if event.eventType() == blpapi.Event.RESPONSE:

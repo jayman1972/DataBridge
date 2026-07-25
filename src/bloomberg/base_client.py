@@ -19,6 +19,7 @@ class BloombergClientBase(ABC):
         end_date: Optional[str] = None,
         periodicity: Optional[str] = None,
         overrides: Optional[Dict[str, str]] = None,
+        adjustment_profile: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Fetch historical data for a ticker.
@@ -28,6 +29,8 @@ class BloombergClientBase(ABC):
             fields: List of field names (e.g., ["PX_LAST", "PX_VOLUME"])
             start_date: Start date in YYYY-MM-DD format
             end_date: End date in YYYY-MM-DD format
+            adjustment_profile: raw, capital, or full. When set, the request
+                must not inherit workstation DPDF adjustment settings.
             
         Returns:
             List of records, each containing 'date' and field values.

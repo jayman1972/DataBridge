@@ -51,6 +51,7 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 
 from bloomberg import get_bloomberg_client, BloombergClientType
+from bloomberg.adjustments import validate_historical_adjustment_contract
 from sggg.diamond_client import (
     DiamondNavUnavailableError,
     fetch_nav_sheet,
@@ -779,12 +780,16 @@ def historical_debug():
         fields = data.get("fields") or []
         start_date = data.get("start_date")
         end_date = data.get("end_date")
+        adjustment_profile, adjustment_error = validate_historical_adjustment_contract(data)
+        if adjustment_error:
+            return jsonify({"error": adjustment_error}), 400
 
         request_info = {
             "symbols": symbols,
             "fields": fields,
             "start_date": start_date,
             "end_date": end_date,
+            "adjustment_profile": adjustment_profile,
             "normalized": [_normalize_bloomberg_ticker(s) for s in symbols],
             "variants": {s: _get_canadian_ticker_variants(_normalize_bloomberg_ticker(s)) for s in symbols},
         }
@@ -800,7 +805,8 @@ def historical_debug():
                     ticker=normalized,
                     fields=fields,
                     start_date=start_date,
-                    end_date=end_date
+                    end_date=end_date,
+                    adjustment_profile=adjustment_profile,
                 )
                 results[ticker] = {
                     "record_count": len(records),
@@ -822,24 +828,28 @@ def historical_debug():
 
 @app.route("/historical", methods=["POST"])
 def historical():
-    """Bloomberg historical data - format: { symbols, fields, start_date?, end_date?, overrides? }."""
+    """Bloomberg historical data with explicit optional RAW/CAPITAL/FULL adjustments."""
     try:
         data = request.get_json() or {}
         symbols = data.get("symbols") or []
         fields = data.get("fields") or []
         start_date = data.get("start_date")
         end_date = data.get("end_date")
+        adjustment_profile, adjustment_error = validate_historical_adjustment_contract(data)
+        if adjustment_error:
+            return jsonify({"error": adjustment_error}), 400
         if not symbols or not fields:
             return jsonify({"error": "symbols and fields are required"}), 400
 
         # Full request log (stdout + stderr logger for market-tab refresh debugging)
-        print(f"[DataBridge historical] REQUEST (full): symbols={symbols} fields={fields} start_date={start_date!r} end_date={end_date!r}", flush=True)
+        print(f"[DataBridge historical] REQUEST (full): symbols={symbols} fields={fields} start_date={start_date!r} end_date={end_date!r} adjustment_profile={adjustment_profile!r}", flush=True)
         _bbg_logger.info(
-            "historical REQUEST symbols=%d fields=%s start_date=%s end_date=%s sample_symbols=%s",
+            "historical REQUEST symbols=%d fields=%s start_date=%s end_date=%s adjustment_profile=%s sample_symbols=%s",
             len(symbols),
             fields,
             start_date,
             end_date,
+            adjustment_profile,
             symbols[:8] if len(symbols) > 8 else symbols,
         )
 
@@ -855,16 +865,17 @@ def historical():
             records = []
             last_error = None
             print(
-                f"[DataBridge historical] REQUEST ticker={ticker!r} variants={variants} fields={fields} start_date={start_date!r} end_date={end_date!r}",
+                f"[DataBridge historical] REQUEST ticker={ticker!r} variants={variants} fields={fields} start_date={start_date!r} end_date={end_date!r} adjustment_profile={adjustment_profile!r}",
                 flush=True,
             )
             _bbg_logger.info(
-                "historical ticker=%r variants=%s fields=%s start=%s end=%s",
+                "historical ticker=%r variants=%s fields=%s start=%s end=%s adjustment_profile=%s",
                 ticker,
                 variants,
                 fields,
                 start_date,
                 end_date,
+                adjustment_profile,
             )
             for ticker_to_try in variants:
                 try:
@@ -874,6 +885,7 @@ def historical():
                         start_date=start_date,
                         end_date=end_date,
                         overrides=overrides,
+                        adjustment_profile=adjustment_profile,
                     )
                     if records:
                         ser = _log_serialize(records)

@@ -17,6 +17,10 @@ except ImportError:
     blpapi = None
 
 from .base_client import BloombergClientBase
+from .adjustments import (
+    historical_adjustment_settings,
+    normalize_historical_adjustment_profile,
+)
 
 
 def _blp_datetime_class() -> Optional[type]:
@@ -220,17 +224,25 @@ class BLPAPIClient(BloombergClientBase):
         end_date: Optional[str] = None,
         periodicity: Optional[str] = None,
         overrides: Optional[Dict[str, str]] = None,
+        adjustment_profile: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch historical data using blpapi.
 
         HistoricalDataRequest returns securityData as a single HistoricalDataTable
         (not an array). Use it directly; iterate over fieldData with numValues()/getValue(i).
         periodicity: DAILY (default). overrides: e.g. {"RELEASE_STAGE_OVERRIDE": "P"} for prelim-only (PMI).
+        adjustment_profile: RAW disables cash and capital adjustments; CAPITAL
+        applies capital changes only; FULL applies normal/abnormal cash
+        distributions and capital changes. Explicit profiles never inherit
+        workstation DPDF settings.
         """
         periodicity = (periodicity or "DAILY").upper()
+        normalized_adjustment_profile = normalize_historical_adjustment_profile(
+            adjustment_profile
+        )
         _debug = os.environ.get("DATA_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
         if _debug:
-            print(f"[BLPAPI HistoricalDataRequest] ticker={ticker!r} fields={fields} start_date={start_date!r} end_date={end_date!r} periodicity={periodicity} overrides={overrides}")
+            print(f"[BLPAPI HistoricalDataRequest] ticker={ticker!r} fields={fields} start_date={start_date!r} end_date={end_date!r} periodicity={periodicity} overrides={overrides} adjustment_profile={normalized_adjustment_profile!r}")
 
         session = self._create_session()
         if not session:
@@ -254,6 +266,12 @@ class BLPAPIClient(BloombergClientBase):
 
             blp_hist_request.set("periodicitySelection", periodicity)
 
+            if normalized_adjustment_profile:
+                for setting_name, setting_value in historical_adjustment_settings(
+                    normalized_adjustment_profile
+                ).items():
+                    blp_hist_request.set(setting_name, setting_value)
+
             if overrides:
                 overrides_el = blp_hist_request.getElement("overrides")
                 for field_id, value in overrides.items():
@@ -262,7 +280,7 @@ class BLPAPIClient(BloombergClientBase):
                     ov.setElement("value", str(value))
 
             if _debug:
-                print(f"[BLPAPI] Request: securities=[{ticker}] fields={fields} periodicity={periodicity} startDate={start_date_bbg if start_date else None} endDate={end_date_bbg if end_date else None}")
+                print(f"[BLPAPI] Request: securities=[{ticker}] fields={fields} periodicity={periodicity} startDate={start_date_bbg if start_date else None} endDate={end_date_bbg if end_date else None} adjustment_profile={normalized_adjustment_profile!r}")
 
             session.sendRequest(blp_hist_request)
 

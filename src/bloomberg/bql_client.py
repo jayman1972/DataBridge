@@ -97,6 +97,7 @@ class BQLClient(BloombergClientBase):
         end_date: Optional[str] = None,
         periodicity: Optional[str] = None,
         overrides: Optional[Dict[str, str]] = None,
+        adjustment_profile: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Fetch historical data using BQL.

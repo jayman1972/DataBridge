@@ -52,6 +52,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src
 
 from bloomberg import get_bloomberg_client, BloombergClientType
 from bloomberg.adjustments import validate_historical_adjustment_contract
+from bloomberg.merger_monitor import refresh_open_merger_actions
 from sggg.diamond_client import (
     DiamondNavUnavailableError,
     fetch_nav_sheet,
@@ -153,7 +154,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
-DATA_BRIDGE_BUILD = "2026-04-03-polymarket-alert-webhook"
+DATA_BRIDGE_BUILD = "2026-07-26-merger-action-monitor"
 
 _ecal_logger = logging.getLogger("data_bridge.economic_calendar")
 if not _ecal_logger.handlers:
@@ -989,6 +990,47 @@ def reference():
         _bbg_logger.error("reference failed: %s", e, exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/bloomberg/mergers/refresh", methods=["POST"])
+def refresh_bloomberg_merger_actions():
+    """Refresh open public-target M&A actions through Bloomberg BLPAPI."""
+    try:
+        data = request.get_json() or {}
+        as_of_raw = str(data.get("asOf") or "").strip()
+        if as_of_raw:
+            try:
+                as_of_date = datetime.strptime(as_of_raw, "%Y-%m-%d").date()
+            except ValueError:
+                return jsonify({"error": "asOf must use YYYY-MM-DD"}), 400
+        else:
+            as_of_date = datetime.now().date()
+
+        try:
+            batch_size = int(data.get("batchSize", 50))
+            terminal_recheck_days = int(data.get("terminalRecheckDays", 5))
+        except (TypeError, ValueError):
+            return jsonify({
+                "error": "batchSize and terminalRecheckDays must be integers"
+            }), 400
+
+        result = refresh_open_merger_actions(
+            supabase,
+            bloomberg_client,
+            as_of_date,
+            batch_size=max(1, min(batch_size, 100)),
+            terminal_recheck_days=max(0, min(terminal_recheck_days, 30)),
+            dry_run=bool(data.get("dryRun", False)),
+        )
+        status_code = 200 if result.get("success") else 502
+        return jsonify(result), status_code
+    except Exception as exc:
+        _bbg_logger.error(
+            "Bloomberg merger Action refresh failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return jsonify({"success": False, "error": str(exc)}), 500
 
 
 @app.route("/bds", methods=["POST"])
@@ -4489,7 +4531,7 @@ if __name__ == "__main__":
         print(f"Supabase URL: {SUPABASE_URL}")
         print(f"Listening on http://127.0.0.1:{SERVICE_PORT}")
         print()
-        print("Endpoints: /health, /bloomberg-update, /bloomberg/quotes, /quotes, /instrument-search, /historical, /historical-debug, /reference, /bds,")
+        print("Endpoints: /health, /bloomberg-update, /bloomberg/mergers/refresh, /bloomberg/quotes, /quotes, /instrument-search, /historical, /historical-debug, /reference, /bds,")
         print("  /economic-calendar, /clarifi/process, /clarifi/list, /ehp/process, /sggg/portfolio,")
         print("  /sggg/options-tax-reconciliation,")
         print("  /emsx/options-closeout-check,")

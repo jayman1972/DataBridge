@@ -11,6 +11,7 @@ echo   - /health - Health check
 echo   - /quotes - Bloomberg live quotes (wealth-scope Refresh Market Prices)
 echo   - /historical - Bloomberg historical data (wealth-scope Update Historical Prices)
 echo   - /bloomberg-update - Bloomberg data fetch (market-dashboard)
+echo   - /bloomberg/mergers/refresh - Open merger Action lifecycle refresh
 echo   - /economic-calendar - Economic calendar (market-dashboard)
 echo   - /sggg/portfolio - SGGG/PSC portfolio (requires OpenVPN + DSN=PSC_VIEWER)
 echo   - IBKR Client Portal API (if Gateway dir set; Data Bridge calls localhost:5001)

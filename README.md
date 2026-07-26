@@ -50,6 +50,7 @@ PORT=5000
 | `POST /historical` | market-dashboard update |
 | `POST /reference` | market-dashboard update |
 | `POST /bloomberg-update` | market-dashboard scheduled-update |
+| `POST /bloomberg/mergers/refresh` | market-dashboard merger lifecycle update |
 | `POST /economic-calendar` | market-dashboard refresh-economic-calendar |
 | `GET/POST /sggg/portfolio` | market-dashboard refresh-portfolio |
 | `POST /clarifi/process` | market-dashboard update |

@@ -735,6 +735,26 @@ def _get_canadian_ticker_variants(ticker: str) -> list:
     return variants
 
 
+_HISTORICAL_PERIODICITIES = {
+    "DAILY",
+    "WEEKLY",
+    "MONTHLY",
+    "QUARTERLY",
+    "SEMI_ANNUALLY",
+    "YEARLY",
+}
+
+
+def _historical_periodicity(data: dict) -> tuple:
+    periodicity = str(data.get("periodicity") or "DAILY").strip().upper()
+    if periodicity not in _HISTORICAL_PERIODICITIES:
+        return None, (
+            "periodicity must be one of "
+            + ", ".join(sorted(_HISTORICAL_PERIODICITIES))
+        )
+    return periodicity, None
+
+
 @app.route("/instrument-search", methods=["POST"])
 def instrument_search():
     """Bloomberg instrument discovery for identity review.
@@ -781,6 +801,9 @@ def historical_debug():
         fields = data.get("fields") or []
         start_date = data.get("start_date")
         end_date = data.get("end_date")
+        periodicity, periodicity_error = _historical_periodicity(data)
+        if periodicity_error:
+            return jsonify({"error": periodicity_error}), 400
         adjustment_profile, adjustment_error = validate_historical_adjustment_contract(data)
         if adjustment_error:
             return jsonify({"error": adjustment_error}), 400
@@ -790,6 +813,7 @@ def historical_debug():
             "fields": fields,
             "start_date": start_date,
             "end_date": end_date,
+            "periodicity": periodicity,
             "adjustment_profile": adjustment_profile,
             "normalized": [_normalize_bloomberg_ticker(s) for s in symbols],
             "variants": {s: _get_canadian_ticker_variants(_normalize_bloomberg_ticker(s)) for s in symbols},
@@ -807,6 +831,7 @@ def historical_debug():
                     fields=fields,
                     start_date=start_date,
                     end_date=end_date,
+                    periodicity=periodicity,
                     adjustment_profile=adjustment_profile,
                 )
                 results[ticker] = {
@@ -836,6 +861,9 @@ def historical():
         fields = data.get("fields") or []
         start_date = data.get("start_date")
         end_date = data.get("end_date")
+        periodicity, periodicity_error = _historical_periodicity(data)
+        if periodicity_error:
+            return jsonify({"error": periodicity_error}), 400
         adjustment_profile, adjustment_error = validate_historical_adjustment_contract(data)
         if adjustment_error:
             return jsonify({"error": adjustment_error}), 400
@@ -843,13 +871,14 @@ def historical():
             return jsonify({"error": "symbols and fields are required"}), 400
 
         # Full request log (stdout + stderr logger for market-tab refresh debugging)
-        print(f"[DataBridge historical] REQUEST (full): symbols={symbols} fields={fields} start_date={start_date!r} end_date={end_date!r} adjustment_profile={adjustment_profile!r}", flush=True)
+        print(f"[DataBridge historical] REQUEST (full): symbols={symbols} fields={fields} start_date={start_date!r} end_date={end_date!r} periodicity={periodicity!r} adjustment_profile={adjustment_profile!r}", flush=True)
         _bbg_logger.info(
-            "historical REQUEST symbols=%d fields=%s start_date=%s end_date=%s adjustment_profile=%s sample_symbols=%s",
+            "historical REQUEST symbols=%d fields=%s start_date=%s end_date=%s periodicity=%s adjustment_profile=%s sample_symbols=%s",
             len(symbols),
             fields,
             start_date,
             end_date,
+            periodicity,
             adjustment_profile,
             symbols[:8] if len(symbols) > 8 else symbols,
         )
@@ -866,16 +895,17 @@ def historical():
             records = []
             last_error = None
             print(
-                f"[DataBridge historical] REQUEST ticker={ticker!r} variants={variants} fields={fields} start_date={start_date!r} end_date={end_date!r} adjustment_profile={adjustment_profile!r}",
+                f"[DataBridge historical] REQUEST ticker={ticker!r} variants={variants} fields={fields} start_date={start_date!r} end_date={end_date!r} periodicity={periodicity!r} adjustment_profile={adjustment_profile!r}",
                 flush=True,
             )
             _bbg_logger.info(
-                "historical ticker=%r variants=%s fields=%s start=%s end=%s adjustment_profile=%s",
+                "historical ticker=%r variants=%s fields=%s start=%s end=%s periodicity=%s adjustment_profile=%s",
                 ticker,
                 variants,
                 fields,
                 start_date,
                 end_date,
+                periodicity,
                 adjustment_profile,
             )
             for ticker_to_try in variants:
@@ -885,6 +915,7 @@ def historical():
                         fields=fields,
                         start_date=start_date,
                         end_date=end_date,
+                        periodicity=periodicity,
                         overrides=overrides,
                         adjustment_profile=adjustment_profile,
                     )

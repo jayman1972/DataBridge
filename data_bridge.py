@@ -88,6 +88,11 @@ from sggg.operations_reports import (
     parse_etf_securities_text,
     run_operations_report,
 )
+from sggg.options_closeout import (
+    evaluate_expiring_itm_positions,
+    format_option_contract,
+    parse_option_contract,
+)
 
 from supabase import create_client, Client
 
@@ -154,7 +159,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
-DATA_BRIDGE_BUILD = "2026-07-26-merger-action-monitor"
+DATA_BRIDGE_BUILD = "2026-08-06-options-expiry-risk"
 
 _ecal_logger = logging.getLogger("data_bridge.economic_calendar")
 if not _ecal_logger.handlers:
@@ -520,6 +525,65 @@ def _is_us_market_hours() -> bool:
         return dt_time(9, 30) <= now <= dt_time(16, 0)
     except Exception:
         return False
+
+
+def _eastern_today_iso() -> str:
+    """Current New York calendar date, used for same-day exercise checks."""
+    try:
+        if HAS_ZONEINFO:
+            return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        if HAS_PYTZ:
+            return datetime.now(pytz.timezone("America/New_York")).date().isoformat()
+    except Exception:
+        pass
+    return datetime.now().date().isoformat()
+
+
+def _option_underlying_quotes(open_positions: List[dict]) -> Dict[str, dict]:
+    """Fetch one live Bloomberg quote per option root for same-day ITM checks."""
+    roots = sorted({
+        contract["underlying"]
+        for position in open_positions
+        if (contract := parse_option_contract(position.get("security"))) is not None
+    })
+    if not roots:
+        return {}
+
+    # Standard OCC options are predominantly US-listed. Include the Canadian
+    # market form because PSC also carries Montreal-listed equity/ETF options.
+    candidates_by_root = {
+        root: [f"{root} US Equity", f"{root} CN Equity"]
+        for root in roots
+    }
+    tickers = [ticker for root in roots for ticker in candidates_by_root[root]]
+    reference_data = bloomberg_client.get_reference_data(
+        tickers=tickers,
+        fields=["PX_LAST", "PX_MID", "PX_OFFICIAL_CLOSE"],
+    )
+    in_market_hours = _is_us_market_hours()
+    quotes: Dict[str, dict] = {}
+    for root in roots:
+        for ticker in candidates_by_root[root]:
+            row = reference_data.get(ticker) or {}
+            if not isinstance(row, dict) or row.get("error"):
+                continue
+            if in_market_hours:
+                value = row.get("PX_MID")
+                if value is None:
+                    value = row.get("PX_LAST")
+            else:
+                value = row.get("PX_OFFICIAL_CLOSE")
+                if value is None:
+                    value = row.get("PX_LAST")
+            try:
+                price = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(price) or price <= 0:
+                continue
+            quotes[root] = {"price": price, "ticker": ticker}
+            break
+    return quotes
 
 
 @app.route("/bloomberg/quotes", methods=["POST"])
@@ -2014,6 +2078,17 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
             continue
         grouped.setdefault(sec, []).append(t)
 
+    # A held option need not have a fill today. Include non-zero start-of-day
+    # positions so same-day exercise risk covers the complete current book.
+    for raw_sec, raw_net in (starting_net_by_security or {}).items():
+        sec = _canonical_option_key(raw_sec) or _normalize_option_desc_key(raw_sec) or _s(raw_sec)
+        try:
+            start_net = float(raw_net or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if sec and abs(start_net) > 1e-9:
+            grouped.setdefault(sec, [])
+
     normalized_trades: List[dict] = []
     groups_out: List[dict] = []
     open_positions = []
@@ -2123,7 +2198,11 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
         groups_out.append({
             "group_id": current_gid,
             "security": sec,
-            "security_display": _s(ts_sorted[0].get("SECURITY_DISPLAY")) or sec if ts_sorted else sec,
+            "security_display": (
+                _s(ts_sorted[0].get("SECURITY_DISPLAY")) or sec
+                if ts_sorted
+                else format_option_contract(sec)
+            ),
             "executed_time": last_time,
             "net_end": net,
             "is_open": abs(net) > 1e-9,
@@ -2183,7 +2262,7 @@ def emsx_options_closeout_check():
                 # Use the latest snapshot strictly prior to the report date.
                 # This naturally handles weekends/holidays without needing a trading-day calendar.
                 report_compact = _ymd_to_compact(date_iso)
-                cache_key = f"{report_compact}||{','.join(portfolios)}"
+                cache_key = f"v2|{report_compact}||{','.join(portfolios)}"
                 if cache_key in _PSC_START_POS_CACHE:
                     starting_net_by_security = dict(_PSC_START_POS_CACHE.get(cache_key) or {})
                     starting_positions_date = (_PSC_START_POS_CACHE_META.get(cache_key) or {}).get("starting_positions_date")
@@ -2207,10 +2286,6 @@ def emsx_options_closeout_check():
                                 # Using LONG_SHORT to re-sign can double-flip and break aggregation across funds.
                                 signed = qty
                                 starting_net_by_security[sec] = starting_net_by_security.get(sec, 0.0) + signed
-                                if canon and canon != sec:
-                                    starting_net_by_security[canon] = starting_net_by_security.get(canon, 0.0) + signed
-                                if desc_key and desc_key != sec:
-                                    starting_net_by_security[desc_key] = starting_net_by_security.get(desc_key, 0.0) + signed
 
                         placeholders = ",".join(["?"] * len(portfolios))
                         sec_type_filter = "SECURITY_TYPE IN ('EquityOption','Equity Option')"
@@ -2264,6 +2339,39 @@ def emsx_options_closeout_check():
         try:
             trades = _emsx_history_get_fills(date_iso=date_iso, uuids=uuids, team=team)
             analysis = _options_closeout_analyze(_log_serialize(trades), starting_net_by_security=starting_net_by_security)
+            exercise_risks: List[dict] = []
+            exercise_risk_status = "not_evaluated_report_date_is_not_today"
+            if date_iso == _eastern_today_iso():
+                exercise_risk_status = "complete"
+                try:
+                    open_positions = analysis.get("open_positions") or []
+                    expiring_roots = sorted({
+                        contract["underlying"]
+                        for position in open_positions
+                        if (contract := parse_option_contract(position.get("security"))) is not None
+                        and contract["expiration_date"] == date_iso
+                    })
+                    underlying_quotes = _option_underlying_quotes(open_positions)
+                    exercise_risks = evaluate_expiring_itm_positions(
+                        open_positions,
+                        date_iso,
+                        underlying_quotes,
+                    )
+                    missing_roots = [root for root in expiring_roots if root not in underlying_quotes]
+                    if missing_roots:
+                        exercise_risk_status = f"missing_quotes: {', '.join(missing_roots)}"
+                except Exception as quote_error:
+                    # The core trade/action report remains useful when Bloomberg
+                    # quotes are temporarily unavailable, but surface the gap.
+                    exercise_risk_status = f"quote_error: {quote_error}"
+
+            risks_by_security = {risk["security"]: risk for risk in exercise_risks}
+            for group in analysis.get("groups") or []:
+                risk = risks_by_security.get(group.get("security"))
+                if risk:
+                    group["flags_count"] = int(group.get("flags_count") or 0) + 1
+                    group["auto_exercise_risk"] = risk
+
             return _json_response({
                 "source": "emsx_history",
                 "build": DATA_BRIDGE_BUILD,
@@ -2272,6 +2380,8 @@ def emsx_options_closeout_check():
                 "scope": {"team": team, "uuids": uuids},
                 "starting_positions_date": starting_positions_date,
                 "starting_positions_count": len(starting_net_by_security),
+                "exercise_risk_status": exercise_risk_status,
+                "exercise_risks": exercise_risks,
                 **analysis,
             }, 200)
         except Exception as e:

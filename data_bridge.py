@@ -93,6 +93,7 @@ from sggg.options_closeout import (
     format_option_contract,
     parse_option_contract,
 )
+from sggg.options_closeout_alert import collect_flagged_groups, should_run_closeout_alert
 
 from supabase import create_client, Client
 
@@ -159,7 +160,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
-DATA_BRIDGE_BUILD = "2026-08-06-options-expiry-risk"
+DATA_BRIDGE_BUILD = "2026-08-06-options-closeout-alerts"
 
 _ecal_logger = logging.getLogger("data_bridge.economic_calendar")
 if not _ecal_logger.handlers:
@@ -2217,6 +2218,109 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
         "suspicious_actions": suspicious_actions,
         "by_security": by_security,
     }
+
+
+_OPTIONS_CLOSEOUT_ALERT_LAST_COMPLETED_DATE: Optional[str] = None
+_OPTIONS_CLOSEOUT_ALERT_NEXT_RETRY_AT = 0.0
+_OPTIONS_CLOSEOUT_ALERT_LOCK = threading.Lock()
+
+
+def _eastern_now() -> datetime:
+    if HAS_ZONEINFO:
+        return datetime.now(ZoneInfo("America/New_York"))
+    if HAS_PYTZ:
+        return datetime.now(pytz.timezone("America/New_York"))
+    return datetime.now()
+
+
+def _run_scheduled_options_closeout_alert(report_date: str) -> dict:
+    """Run the all-funds report and notify only when at least one group is flagged."""
+    report_response = requests.post(
+        f"http://127.0.0.1:{SERVICE_PORT}/emsx/options-closeout-check",
+        json={
+            "date": report_date,
+            "team": os.environ.get("OPTIONS_CLOSEOUT_ALERT_EMSX_TEAM", "PM").strip() or "PM",
+            "use_psc_start_positions": True,
+        },
+        timeout=180,
+    )
+    if not report_response.ok:
+        raise RuntimeError(
+            f"closeout report HTTP {report_response.status_code}: {report_response.text[:1000]}"
+        )
+    report = report_response.json()
+    flagged_groups = collect_flagged_groups(report)
+    if not flagged_groups:
+        print(f"[options-closeout-alert] {report_date}: no flagged option groups; no notification sent")
+        return {"success": True, "notified": False, "flagged_groups": 0}
+
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise RuntimeError("SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY are required for closeout notifications")
+    alert_response = requests.post(
+        f"{SUPABASE_URL.rstrip('/')}/functions/v1/options-closeout-alert",
+        headers={
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": SUPABASE_KEY,
+            "Content-Type": "application/json",
+        },
+        json={
+            "report_date": report_date,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "flagged_groups": flagged_groups,
+            "report_url": "https://market-macro-studio.lovable.app/sggg/options-closeout-check",
+        },
+        timeout=60,
+    )
+    if not alert_response.ok:
+        raise RuntimeError(
+            f"notification HTTP {alert_response.status_code}: {alert_response.text[:1000]}"
+        )
+    result = alert_response.json()
+    print(
+        f"[options-closeout-alert] {report_date}: {len(flagged_groups)} flagged; "
+        f"email={result.get('email', {}).get('status')} sms={result.get('sms', {}).get('status')}"
+    )
+    return {"success": True, "notified": True, "flagged_groups": len(flagged_groups), **result}
+
+
+def _options_closeout_alert_scheduler_loop() -> None:
+    """Weekday 3:45 p.m. ET scheduler with bounded in-window retries."""
+    global _OPTIONS_CLOSEOUT_ALERT_LAST_COMPLETED_DATE, _OPTIONS_CLOSEOUT_ALERT_NEXT_RETRY_AT
+    enabled = os.environ.get("OPTIONS_CLOSEOUT_ALERT_ENABLED", "true").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if not enabled:
+        print("[options-closeout-alert] automatic 3:45 p.m. ET check is disabled")
+        return
+
+    # Let Flask bind before the scheduler makes its local report request.
+    time.sleep(5)
+    print("[options-closeout-alert] automatic check enabled for weekdays at 3:45 p.m. Eastern")
+    while True:
+        try:
+            now_et = _eastern_now()
+            if (
+                should_run_closeout_alert(now_et, _OPTIONS_CLOSEOUT_ALERT_LAST_COMPLETED_DATE, enabled=True)
+                and time.monotonic() >= _OPTIONS_CLOSEOUT_ALERT_NEXT_RETRY_AT
+                and _OPTIONS_CLOSEOUT_ALERT_LOCK.acquire(blocking=False)
+            ):
+                try:
+                    report_date = now_et.date().isoformat()
+                    _run_scheduled_options_closeout_alert(report_date)
+                    _OPTIONS_CLOSEOUT_ALERT_LAST_COMPLETED_DATE = report_date
+                    _OPTIONS_CLOSEOUT_ALERT_NEXT_RETRY_AT = 0.0
+                except Exception as alert_error:
+                    _OPTIONS_CLOSEOUT_ALERT_NEXT_RETRY_AT = time.monotonic() + 120
+                    print(
+                        f"[options-closeout-alert] attempt failed: {alert_error}; "
+                        "retrying in 2 minutes while the market is open",
+                        file=sys.stderr,
+                    )
+                finally:
+                    _OPTIONS_CLOSEOUT_ALERT_LOCK.release()
+        except Exception as loop_error:
+            print(f"[options-closeout-alert] scheduler error: {loop_error}", file=sys.stderr)
+        time.sleep(15)
 
 
 @app.route("/emsx/options-closeout-check", methods=["POST", "OPTIONS"])
@@ -4700,6 +4804,14 @@ if __name__ == "__main__":
     # Keep IBKR Gateway session alive (tickle every 60s)
     _tickle_thread = threading.Thread(target=_ibkr_tickle_loop, daemon=True)
     _tickle_thread.start()
+
+    # Run the all-funds Options Closeout alert at 3:45 p.m. Eastern on weekdays.
+    _closeout_alert_thread = threading.Thread(
+        target=_options_closeout_alert_scheduler_loop,
+        name="options-closeout-alert",
+        daemon=True,
+    )
+    _closeout_alert_thread.start()
 
     try:
         app.run(host="127.0.0.1", port=SERVICE_PORT, debug=False, use_reloader=False)

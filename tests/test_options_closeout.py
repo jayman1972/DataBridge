@@ -4,6 +4,7 @@ from sggg.options_closeout import (
     evaluate_expiring_itm_positions,
     format_option_contract,
     parse_option_contract,
+    select_live_underlying_quote,
 )
 
 
@@ -52,6 +53,49 @@ class OptionCloseoutExpiryRiskTest(unittest.TestCase):
             "2026-08-05",
             {},
         )
+        self.assertEqual(risks, [])
+
+    def test_prefers_same_day_last_price_over_prior_close(self):
+        quote = select_live_underlying_quote(
+            {
+                "PX_LAST": 50.60,
+                "PX_BID": 50.53,
+                "PX_ASK": 50.55,
+                "PX_MID": 50.54,
+                "PX_OFFICIAL_CLOSE": 51.44,
+                "LAST_UPDATE_DT": "2026-08-07",
+            },
+            expected_date="2026-08-07",
+        )
+
+        self.assertEqual(quote["price"], 50.60)
+        self.assertEqual(quote["price_field"], "PX_LAST")
+
+    def test_does_not_fall_back_to_prior_close_for_same_day_risk(self):
+        quote = select_live_underlying_quote(
+            {
+                "PX_OFFICIAL_CLOSE": 51.44,
+                "LAST_UPDATE_DT": "2026-08-06",
+            },
+            expected_date="2026-08-07",
+        )
+
+        self.assertIsNone(quote)
+
+    def test_live_price_prevents_false_dram_call_flag(self):
+        risks = evaluate_expiring_itm_positions(
+            [{"security": "DRAM260807C00051000", "net_contracts": 1469}],
+            "2026-08-07",
+            {
+                "DRAM": {
+                    "price": 50.60,
+                    "price_field": "PX_LAST",
+                    "as_of_date": "2026-08-07",
+                    "ticker": "DRAM US Equity",
+                }
+            },
+        )
+
         self.assertEqual(risks, [])
 
 

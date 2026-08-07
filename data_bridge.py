@@ -92,6 +92,7 @@ from sggg.options_closeout import (
     evaluate_expiring_itm_positions,
     format_option_contract,
     parse_option_contract,
+    select_live_underlying_quote,
 )
 from sggg.options_closeout_alert import collect_flagged_groups, should_run_closeout_alert
 
@@ -160,7 +161,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
-DATA_BRIDGE_BUILD = "2026-08-06-options-closeout-alerts"
+DATA_BRIDGE_BUILD = "2026-08-07-live-option-underlyings"
 
 _ecal_logger = logging.getLogger("data_bridge.economic_calendar")
 if not _ecal_logger.handlers:
@@ -559,30 +560,17 @@ def _option_underlying_quotes(open_positions: List[dict]) -> Dict[str, dict]:
     tickers = [ticker for root in roots for ticker in candidates_by_root[root]]
     reference_data = bloomberg_client.get_reference_data(
         tickers=tickers,
-        fields=["PX_LAST", "PX_MID", "PX_OFFICIAL_CLOSE"],
+        fields=["PX_LAST", "PX_BID", "PX_ASK", "PX_MID", "LAST_UPDATE_DT"],
     )
-    in_market_hours = _is_us_market_hours()
+    expected_date = _eastern_today_iso()
     quotes: Dict[str, dict] = {}
     for root in roots:
         for ticker in candidates_by_root[root]:
             row = reference_data.get(ticker) or {}
-            if not isinstance(row, dict) or row.get("error"):
+            selected = select_live_underlying_quote(row, expected_date=expected_date)
+            if not selected:
                 continue
-            if in_market_hours:
-                value = row.get("PX_MID")
-                if value is None:
-                    value = row.get("PX_LAST")
-            else:
-                value = row.get("PX_OFFICIAL_CLOSE")
-                if value is None:
-                    value = row.get("PX_LAST")
-            try:
-                price = float(value)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(price) or price <= 0:
-                continue
-            quotes[root] = {"price": price, "ticker": ticker}
+            quotes[root] = {**selected, "ticker": ticker}
             break
     return quotes
 

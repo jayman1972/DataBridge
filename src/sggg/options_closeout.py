@@ -45,6 +45,46 @@ def format_option_contract(value: Any) -> str:
     )
 
 
+def select_live_underlying_quote(
+    quote: Dict[str, Any],
+    expected_date: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Select a same-day live underlying quote without using prior close.
+
+    Bloomberg's ``PX_OFFICIAL_CLOSE`` can remain yesterday's close until the
+    current close is published. Same-day exercise checks must therefore use
+    ``PX_LAST`` first, then a live bid/ask midpoint or ``PX_MID``. When
+    Bloomberg supplies ``LAST_UPDATE_DT``, reject a quote from another date.
+    """
+    if not isinstance(quote, dict) or quote.get("error"):
+        return None
+
+    as_of_raw = quote.get("LAST_UPDATE_DT")
+    as_of_match = re.search(r"\d{4}-\d{2}-\d{2}", str(as_of_raw or ""))
+    as_of_date = as_of_match.group(0) if as_of_match else None
+    if expected_date and as_of_date and as_of_date != expected_date:
+        return None
+
+    candidates = [("PX_LAST", quote.get("PX_LAST"))]
+    try:
+        bid = float(quote.get("PX_BID"))
+        ask = float(quote.get("PX_ASK"))
+        if bid > 0 and ask > 0:
+            candidates.append(("PX_BID/PX_ASK", (bid + ask) / 2.0))
+    except (TypeError, ValueError):
+        pass
+    candidates.append(("PX_MID", quote.get("PX_MID")))
+
+    for field, value in candidates:
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if price > 0:
+            return {"price": price, "price_field": field, "as_of_date": as_of_date}
+    return None
+
+
 def evaluate_expiring_itm_positions(
     open_positions: Iterable[Dict[str, Any]],
     report_date: str,
@@ -90,7 +130,7 @@ def evaluate_expiring_itm_positions(
         reason = (
             f"{side} {abs(net_contracts):g} {contract_word}; expires today in the money "
             f"and is subject to automatic exercise/assignment "
-            f"({contract['underlying']} {underlying_price:g} vs {strike:g} {option_word} strike)"
+            f"({contract['underlying']} live {underlying_price:g} vs {strike:g} {option_word} strike)"
         )
         risks.append(
             {
@@ -100,6 +140,8 @@ def evaluate_expiring_itm_positions(
                 "underlying": contract["underlying"],
                 "underlying_bloomberg_ticker": quote.get("ticker"),
                 "underlying_price": underlying_price,
+                "underlying_price_field": quote.get("price_field"),
+                "underlying_price_as_of": quote.get("as_of_date"),
                 "expiration_date": contract["expiration_date"],
                 "option_type": contract["option_type"],
                 "strike": strike,

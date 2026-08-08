@@ -1,5 +1,7 @@
 # IBKR Client Portal Gateway (local install)
 
+> **Archived as of August 8, 2026.** DataBridge no longer starts, polls, or uses IBKR by default. The implementation and local configuration are retained for possible future use. To reactivate it intentionally, set `DATA_BRIDGE_ENABLE_IBKR=1` before starting DataBridge.
+
 The Data Bridge can proxy to Interactive Brokers’ **Client Portal API** via the official Java gateway. The gateway itself is **not** committed to this repo; install it on each machine from IBKR’s download.
 
 ## Download
@@ -39,7 +41,7 @@ The Data Bridge listens on **5000** by default. The gateway must use a **differe
 
 ## Starting with the unified launcher
 
-From `DataBridge`, run `start-data-bridge-ngrok.bat`. If `IBKR_GATEWAY_DIR` (or default `DataBridge\IBRK`) contains `bin\run.bat`, the script starts the gateway, waits briefly, then opens the login URL.
+Set `DATA_BRIDGE_ENABLE_IBKR=1`, then run `start-data-bridge-ngrok.bat` from `DataBridge`. If `IBKR_GATEWAY_DIR` (or default `DataBridge\IBRK`) contains `bin\run.bat`, the script starts the gateway, waits briefly, then opens the login URL. Without the explicit flag, the launcher leaves IBKR dormant.
 
 ## Data Bridge proxy routes
 

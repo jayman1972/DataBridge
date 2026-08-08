@@ -14,7 +14,7 @@ echo   - /bloomberg-update - Bloomberg data fetch (market-dashboard)
 echo   - /bloomberg/mergers/refresh - Open merger Action lifecycle refresh
 echo   - /economic-calendar - Economic calendar (market-dashboard)
 echo   - /sggg/portfolio - SGGG/PSC portfolio (requires OpenVPN + DSN=PSC_VIEWER)
-echo   - IBKR Client Portal API (if Gateway dir set; Data Bridge calls localhost:5001)
+echo   - IBKR Client Portal API is archived and disabled by default
 echo.
 
 REM Change to the script directory (projects\DataBridge)
@@ -114,16 +114,21 @@ echo SGGG requirements: OpenVPN connected, ODBC DSN=PSC_VIEWER, pyodbc installed
 echo ========================================
 echo.
 
-REM Optional: Start IBKR Client Portal Gateway (must use port 5001 in root\conf.yaml; Data Bridge uses 5000)
-if not defined IBKR_GATEWAY_DIR set "IBKR_GATEWAY_DIR=%~dp0IBRK"
-if exist "%IBKR_GATEWAY_DIR%\bin\run.bat" (
-    echo Starting IBKR Client Portal Gateway from %IBKR_GATEWAY_DIR%...
-    start "IBKR Client Portal Gateway" cmd /k "cd /d ""%IBKR_GATEWAY_DIR%"" && bin\run.bat root\conf.yaml"
-    timeout /t 3 /nobreak >nul
-    echo Opening IBKR Gateway login in browser...
-    start "" "https://localhost:5001"
+REM IBKR is archived. Preserve the old startup path behind an explicit opt-in flag.
+if /I "%DATA_BRIDGE_ENABLE_IBKR%"=="1" (
+    if not defined IBKR_GATEWAY_DIR set "IBKR_GATEWAY_DIR=%~dp0IBRK"
+    if exist "%IBKR_GATEWAY_DIR%\bin\run.bat" (
+        echo Starting explicitly enabled IBKR Client Portal Gateway from %IBKR_GATEWAY_DIR%...
+        start "IBKR Client Portal Gateway" cmd /k "cd /d ""%IBKR_GATEWAY_DIR%"" && bin\run.bat root\conf.yaml"
+        timeout /t 3 /nobreak >nul
+        echo Opening IBKR Gateway login in browser...
+        start "" "https://localhost:5001"
+    ) else (
+        echo IBKR was enabled but Gateway was not found at %IBKR_GATEWAY_DIR%.
+    )
 ) else (
-    echo IBKR Gateway not found at %IBKR_GATEWAY_DIR% - skipping. Set IBKR_GATEWAY_DIR or use DataBridge\IBRK.
+    echo IBKR integration archived - Gateway will not be started or polled.
+    echo Set DATA_BRIDGE_ENABLE_IBKR=1 before launching to reactivate it.
 )
 
 echo.

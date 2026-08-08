@@ -38,6 +38,8 @@ Optional:
 ```
 CLARIFI_DIR=C:\Users\YourName\OneDrive\Desktop\EHP_Files\DailyExports from Clarifi\
 PORT=5000
+# Archived; only set this to reactivate IBKR intentionally:
+# DATA_BRIDGE_ENABLE_IBKR=1
 ```
 
 ## Endpoints
@@ -59,11 +61,11 @@ PORT=5000
 ## Documentation
 
 - [SGGG API Fields](docs/SGGG_API_FIELDS.md) – Valid fields for the PSC/SGGG position API (for `/sggg/portfolio` and related queries)
-- [IBKR Client Portal Gateway](docs/IBKR_GATEWAY.md) – Download link, local install, example `conf.yaml`, proxy routes, session cookie
+- [Archived IBKR Client Portal Gateway](docs/IBKR_GATEWAY.md) – retained setup and reactivation instructions
 
-## IBKR Client Portal Gateway (optional)
+## IBKR Client Portal Gateway (archived)
 
-The gateway JARs are **not** in git. Install from IBKR’s zip, use **`docs/ibkr-gateway-conf.example.yaml`** as `root/conf.yaml` (port **5001**), then run `start-data-bridge-ngrok.bat`. See **[docs/IBKR_GATEWAY.md](docs/IBKR_GATEWAY.md)** for the download URL, layout, `/ibkr/*` routes, and `IBKR_SESSION_COOKIE` when you see 401s.
+IBKR is disabled by default and the unified launcher no longer starts or polls its gateway. The proxy implementation, ignored local gateway directory, and configuration examples remain available for future use. To reactivate it deliberately, set `DATA_BRIDGE_ENABLE_IBKR=1` before launching the bridge. See **[docs/IBKR_GATEWAY.md](docs/IBKR_GATEWAY.md)** for the retained setup.
 
 ## Requirements
 
@@ -71,7 +73,7 @@ The gateway JARs are **not** in git. Install from IBKR’s zip, use **`docs/ibkr
 - Bloomberg Terminal (running & logged in) for Bloomberg endpoints
 - OpenVPN + ODBC DSN=PSC_VIEWER for SGGG portfolio
 - ngrok (in folder or PATH) for tunneling
-- Java (for IBKR Gateway, if using)
+- Java (only if the archived IBKR integration is reactivated)
 
 ## After Testing
 

@@ -28,9 +28,6 @@ from werkzeug.exceptions import HTTPException
 import requests
 import secrets
 
-# Suppress SSL warning for IBKR Gateway self-signed cert (localhost:5001)
-requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
-
 # Try to import zoneinfo for timezone handling (Python 3.9+)
 try:
     from zoneinfo import ZoneInfo
@@ -141,7 +138,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
         except Exception as e:
             print(f"Error reading config file {config_file}: {e}")
 
-# Load SGGG Diamond API config (optional) from same config file
+# Load optional local integrations from the same config file.
 for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "market-dashboard"))]:
     _cfg = os.path.join(_config_dir, "bloomberg-service.env")
     if os.path.exists(_cfg):
@@ -152,7 +149,15 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
                     if '=' in line and not line.startswith('#'):
                         k, v = line.split('=', 1)
                         k, v = k.strip(), v.strip()
-                        if k in ("SGGG_DIAMOND_USERNAME", "SGGG_DIAMOND_PASSWORD", "SGGG_DIAMOND_FUND_ID", "SGGG_DIAMOND_FUND_IDS") and v:
+                        if k in (
+                            "SGGG_DIAMOND_USERNAME",
+                            "SGGG_DIAMOND_PASSWORD",
+                            "SGGG_DIAMOND_FUND_ID",
+                            "SGGG_DIAMOND_FUND_IDS",
+                            "DATA_BRIDGE_ENABLE_IBKR",
+                            "IBKR_GATEWAY_URL",
+                            "IBKR_SESSION_COOKIE",
+                        ) and v:
                             os.environ[k] = v
         except Exception as e:
             print(f"Error reading SGGG config from {_cfg}: {e}")
@@ -161,7 +166,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
-DATA_BRIDGE_BUILD = "2026-08-07-live-option-underlyings"
+DATA_BRIDGE_BUILD = "2026-08-08-ibkr-archived"
 
 _ecal_logger = logging.getLogger("data_bridge.economic_calendar")
 if not _ecal_logger.handlers:
@@ -192,21 +197,34 @@ def _bbg_verbose_full() -> bool:
     return os.environ.get("DATA_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
 
 
-# IBKR Client Portal Gateway (tickle keeps session alive; must use port 5001 vs Data Bridge 5000)
+# IBKR Client Portal Gateway is archived and disabled by default. Its implementation is
+# intentionally retained behind an explicit opt-in so it can be reactivated later.
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+IBKR_ENABLED = _env_flag("DATA_BRIDGE_ENABLE_IBKR", False)
 IBKR_GATEWAY_URL = os.getenv("IBKR_GATEWAY_URL", "https://localhost:5001").rstrip("/")
-_ibkr_session = requests.Session()
-_ibkr_session.verify = False
-_ibkr_session.headers.update({"User-Agent": "Console"})  # Gateway may require this to accept server-side requests
-# Optional: send browser session cookie so Gateway accepts requests (log in at https://localhost:5001, copy Cookie from DevTools)
-_ibkr_cookie_str = os.getenv("IBKR_SESSION_COOKIE", "").strip()
-if _ibkr_cookie_str:
-    from urllib.parse import urlparse
-    _ibkr_netloc = urlparse(IBKR_GATEWAY_URL).netloc.split(":")[0]  # e.g. localhost
-    for part in _ibkr_cookie_str.split(";"):
-        part = part.strip()
-        if "=" in part:
-            _name, _val = part.split("=", 1)
-            _ibkr_session.cookies.set(_name.strip(), _val.strip().strip('"'), domain=_ibkr_netloc, path="/")
+_ibkr_session: Optional[requests.Session] = None
+if IBKR_ENABLED:
+    # Gateway uses a self-signed localhost certificate.
+    requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
+    _ibkr_session = requests.Session()
+    _ibkr_session.verify = False
+    _ibkr_session.headers.update({"User-Agent": "Console"})  # Gateway may require this to accept server-side requests
+    # Optional: send browser session cookie so Gateway accepts requests (log in at https://localhost:5001, copy Cookie from DevTools)
+    _ibkr_cookie_str = os.getenv("IBKR_SESSION_COOKIE", "").strip()
+    if _ibkr_cookie_str:
+        from urllib.parse import urlparse
+        _ibkr_netloc = urlparse(IBKR_GATEWAY_URL).netloc.split(":")[0]  # e.g. localhost
+        for part in _ibkr_cookie_str.split(";"):
+            part = part.strip()
+            if "=" in part:
+                _name, _val = part.split("=", 1)
+                _ibkr_session.cookies.set(_name.strip(), _val.strip().strip('"'), domain=_ibkr_netloc, path="/")
 _ibkr_rate_lock = threading.Lock()
 _ibkr_last_request_time = 0.0
 _ibkr_history_semaphore = threading.Semaphore(5)  # max 5 concurrent history requests
@@ -511,6 +529,12 @@ def health():
         "build": DATA_BRIDGE_BUILD,
         "port": SERVICE_PORT,
         "bloomberg": client_info,
+        "integrations": {
+            "ibkr": {
+                "status": "enabled" if IBKR_ENABLED else "archived",
+                "reactivate_with": "DATA_BRIDGE_ENABLE_IBKR=1" if not IBKR_ENABLED else None,
+            }
+        },
     }), status_code
 
 
@@ -4494,6 +4518,8 @@ def _ibkr_request(
     timeout: int = 15,
 ) -> tuple[Optional[requests.Response], Optional[Dict[str, Any]]]:
     """Call IBKR Gateway with 10 req/s rate limit. Returns (response, None) or (None, error_dict)."""
+    if not IBKR_ENABLED or _ibkr_session is None:
+        return (None, _ibkr_archived_payload())
     global _ibkr_last_request_time
     with _ibkr_rate_lock:
         now = time.monotonic()
@@ -4514,6 +4540,19 @@ def _ibkr_request(
         return (None, {"error": "IBKR request failed", "detail": str(e)})
 
 
+def _ibkr_archived_payload() -> Dict[str, Any]:
+    return {
+        "error": "IBKR integration is archived",
+        "status": "archived",
+        "detail": "The implementation and configuration are retained, but live gateway access is disabled by default.",
+        "reactivate_with": "DATA_BRIDGE_ENABLE_IBKR=1",
+    }
+
+
+def _ibkr_archived_response():
+    return jsonify(_ibkr_archived_payload()), 410
+
+
 def _ibkr_response_json(r: requests.Response) -> Any:
     """Parse Gateway response as JSON; on failure return status and raw body for debugging."""
     try:
@@ -4525,6 +4564,8 @@ def _ibkr_response_json(r: requests.Response) -> Any:
 @app.route("/ibkr/auth-status", methods=["GET"])
 def ibkr_auth_status():
     """Proxy to IBKR Gateway auth status (POST /iserver/auth/status)."""
+    if not IBKR_ENABLED:
+        return _ibkr_archived_response()
     r, err = _ibkr_request("POST", "/v1/api/iserver/auth/status", json_body={}, timeout=10)
     if err:
         return jsonify(err), 502
@@ -4535,6 +4576,8 @@ def ibkr_auth_status():
 @app.route("/ibkr/snapshot", methods=["GET"])
 def ibkr_snapshot():
     """Proxy to IBKR Gateway market data snapshot. Query: conids (required), fields (required)."""
+    if not IBKR_ENABLED:
+        return _ibkr_archived_response()
     conids = request.args.get("conids")
     fields = request.args.get("fields")
     if not conids or not fields:
@@ -4550,6 +4593,8 @@ def ibkr_snapshot():
 @app.route("/ibkr/history", methods=["GET"])
 def ibkr_history():
     """Proxy to IBKR Gateway historical market data. Query: conid, period, bar (required); exchange, startTime, outsideRth, source (optional). Max 5 concurrent."""
+    if not IBKR_ENABLED:
+        return _ibkr_archived_response()
     conid = request.args.get("conid")
     period = request.args.get("period")
     bar = request.args.get("bar")
@@ -4574,6 +4619,8 @@ def ibkr_history():
 @app.route("/ibkr/search", methods=["GET"])
 def ibkr_search():
     """Proxy to IBKR Gateway symbol search. Query: symbol (required); name, secType (optional)."""
+    if not IBKR_ENABLED:
+        return _ibkr_archived_response()
     symbol = request.args.get("symbol")
     if not symbol:
         return jsonify({"error": "symbol is required"}), 400
@@ -4667,6 +4714,8 @@ def polymarket_alert():
 
 def _ibkr_tickle_loop() -> None:
     """Background thread: POST /tickle to IBKR Gateway every 60s to keep session alive."""
+    if not IBKR_ENABLED:
+        return
     while True:
         time.sleep(60)
         try:
@@ -4768,8 +4817,13 @@ if __name__ == "__main__":
         print("  /economic-calendar, /clarifi/process, /clarifi/list, /ehp/process, /sggg/portfolio,")
         print("  /sggg/options-tax-reconciliation,")
         print("  /emsx/options-closeout-check,")
-        print("  /ibkr/auth-status, /ibkr/snapshot, /ibkr/history, /ibkr/search, /polymarket/alert")
-        print("SGGG requires: OpenVPN + DSN=PSC_VIEWER + pyodbc. IBKR requires Gateway on port 5001 + browser login.")
+        print("  /polymarket/alert")
+        if IBKR_ENABLED:
+            print("  IBKR enabled: /ibkr/auth-status, /ibkr/snapshot, /ibkr/history, /ibkr/search")
+            print("  IBKR requires Gateway on port 5001 + browser login.")
+        else:
+            print("  IBKR integration: archived (set DATA_BRIDGE_ENABLE_IBKR=1 to reactivate).")
+        print("SGGG requires: OpenVPN + DSN=PSC_VIEWER + pyodbc.")
         print()
         print("Service is running. Press Ctrl+C to stop.")
         print(
@@ -4789,9 +4843,10 @@ if __name__ == "__main__":
     except:
         pass
 
-    # Keep IBKR Gateway session alive (tickle every 60s)
-    _tickle_thread = threading.Thread(target=_ibkr_tickle_loop, daemon=True)
-    _tickle_thread.start()
+    # Keep IBKR Gateway session alive only when the archived integration is explicitly reactivated.
+    if IBKR_ENABLED:
+        _tickle_thread = threading.Thread(target=_ibkr_tickle_loop, name="ibkr-tickle", daemon=True)
+        _tickle_thread.start()
 
     # Run the all-funds Options Closeout alert at 3:45 p.m. Eastern on weekdays.
     _closeout_alert_thread = threading.Thread(

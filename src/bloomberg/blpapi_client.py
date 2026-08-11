@@ -225,6 +225,7 @@ class BLPAPIClient(BloombergClientBase):
         periodicity: Optional[str] = None,
         overrides: Optional[Dict[str, str]] = None,
         adjustment_profile: Optional[str] = None,
+        currency: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch historical data using blpapi.
 
@@ -242,7 +243,7 @@ class BLPAPIClient(BloombergClientBase):
         )
         _debug = os.environ.get("DATA_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
         if _debug:
-            print(f"[BLPAPI HistoricalDataRequest] ticker={ticker!r} fields={fields} start_date={start_date!r} end_date={end_date!r} periodicity={periodicity} overrides={overrides} adjustment_profile={normalized_adjustment_profile!r}")
+            print(f"[BLPAPI HistoricalDataRequest] ticker={ticker!r} fields={fields} start_date={start_date!r} end_date={end_date!r} periodicity={periodicity} overrides={overrides} adjustment_profile={normalized_adjustment_profile!r} currency={currency!r}")
 
         session = self._create_session()
         if not session:
@@ -266,6 +267,9 @@ class BLPAPIClient(BloombergClientBase):
 
             blp_hist_request.set("periodicitySelection", periodicity)
 
+            if currency:
+                blp_hist_request.set("currency", str(currency).strip().upper())
+
             if normalized_adjustment_profile:
                 for setting_name, setting_value in historical_adjustment_settings(
                     normalized_adjustment_profile
@@ -280,7 +284,7 @@ class BLPAPIClient(BloombergClientBase):
                     ov.setElement("value", str(value))
 
             if _debug:
-                print(f"[BLPAPI] Request: securities=[{ticker}] fields={fields} periodicity={periodicity} startDate={start_date_bbg if start_date else None} endDate={end_date_bbg if end_date else None} adjustment_profile={normalized_adjustment_profile!r}")
+                print(f"[BLPAPI] Request: securities=[{ticker}] fields={fields} periodicity={periodicity} startDate={start_date_bbg if start_date else None} endDate={end_date_bbg if end_date else None} adjustment_profile={normalized_adjustment_profile!r} currency={currency!r}")
 
             session.sendRequest(blp_hist_request)
 

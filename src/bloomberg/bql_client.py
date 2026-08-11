@@ -98,6 +98,7 @@ class BQLClient(BloombergClientBase):
         periodicity: Optional[str] = None,
         overrides: Optional[Dict[str, str]] = None,
         adjustment_profile: Optional[str] = None,
+        currency: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Fetch historical data using BQL.
@@ -133,6 +134,10 @@ class BQLClient(BloombergClientBase):
                         end_date if end_date else '0d'         # Default to today
                     )
                     data_item = data_item.with_updated_parameters(dates=date_range)
+                if currency:
+                    data_item = data_item.with_updated_parameters(
+                        currency=str(currency).strip().upper()
+                    )
                 
                 data_items_dict[field] = data_item
             except Exception as e:

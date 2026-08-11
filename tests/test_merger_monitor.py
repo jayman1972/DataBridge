@@ -3,6 +3,7 @@ from datetime import date
 
 from bloomberg.merger_monitor import (
     build_ingest_row,
+    derive_stock_consideration_fraction,
     payment_uses_stock,
     refresh_open_merger_actions,
     should_monitor_deal,
@@ -70,7 +71,77 @@ class _Bloomberg:
         }
 
 
+class _BloombergWithHistory:
+    def __init__(self):
+        self.history_calls = []
+
+    def get_reference_data(self, securities, _fields):
+        return {
+            security: {
+                "CA_MA_DEAL_STATUS": "Pending",
+                "CA_MA_PAYMENT_TYP": "Cash and Stock",
+                "CA_MA_CASH_TERMS": "10/sh.",
+                "CA_MA_STOCK_TERMS": "0.5 Aqr sh./Tgt sh.",
+                "CA_MA_ACQUIRER_TICKER": "BUY US Equity",
+                "CA_MA_TARGET_TICKER": "TGT US Equity",
+                "CA_MA_ANNOUNCED_DATE": "2026-07-20",
+            }
+            for security in securities
+        }
+
+    def get_historical_data(self, **kwargs):
+        self.history_calls.append(kwargs)
+        if kwargs["fields"] == ["PX_LAST"]:
+            return [{"date": "2026-07-20", "PX_LAST": 40.0}]
+        if kwargs["fields"] == ["CUR_MKT_CAP"]:
+            self.assert_currency(kwargs.get("currency"))
+            return [{"date": "2026-07-20", "CUR_MKT_CAP": 5000.0}]
+        raise AssertionError(kwargs)
+
+    @staticmethod
+    def assert_currency(currency):
+        if currency != "USD":
+            raise AssertionError(currency)
+
+
 class BloombergMergerMonitorTests(unittest.TestCase):
+    def test_stock_fraction_derivation_preserves_unknowns(self) -> None:
+        self.assertEqual(
+            derive_stock_consideration_fraction("Cash", None, "11.25/sh."),
+            0.0,
+        )
+        self.assertEqual(
+            derive_stock_consideration_fraction("Stock", None, None),
+            1.0,
+        )
+        self.assertIsNone(
+            derive_stock_consideration_fraction(
+                "Cash or Stock",
+                "0.5 Aqr sh./Tgt sh.",
+                "10/sh.",
+                40.0,
+            )
+        )
+
+    def test_stock_fraction_derives_from_total_and_fixed_ratio_terms(self) -> None:
+        self.assertAlmostEqual(
+            derive_stock_consideration_fraction(
+                "Cash and Stock",
+                "USD 140 Mln",
+                "510 Mln",
+            ),
+            140 / 650,
+        )
+        self.assertAlmostEqual(
+            derive_stock_consideration_fraction(
+                "Cash and Stock",
+                "0.5 Aqr sh./Tgt sh.",
+                "10/sh.",
+                40.0,
+            ),
+            2 / 3,
+        )
+
     def test_payment_classification_is_tri_state(self) -> None:
         self.assertIs(payment_uses_stock("Cash", None), False)
         self.assertIs(payment_uses_stock("Cash and Stock", None), True)
@@ -214,6 +285,38 @@ class BloombergMergerMonitorTests(unittest.TestCase):
         self.assertIs(written[0]["eligible_for_model_builder"], True)
         self.assertIs(written[1]["eligible_for_model_builder"], False)
         self.assertIs(written[0]["uses_stock_consideration"], False)
+
+    def test_refresh_enriches_stock_funding_with_announcement_history(self) -> None:
+        supabase = _Supabase([{
+            "action_id": "200",
+            "announced_date": "2026-07-20",
+            "status": "Pending",
+            "target_is_private": False,
+            "deal_value_usd": 2_000_000_000,
+        }])
+        bloomberg = _BloombergWithHistory()
+        result = refresh_open_merger_actions(
+            supabase,
+            bloomberg,
+            date(2026, 7, 26),
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["stock_issuance_ratio_known"], 1)
+        written = supabase.rpc_params[0]["p_rows"][0]
+        self.assertAlmostEqual(written["stock_consideration_fraction"], 2 / 3)
+        self.assertEqual(
+            written["acquirer_market_cap_at_announcement_usd"],
+            5_000_000_000,
+        )
+        self.assertAlmostEqual(
+            written["stock_issuance_to_acquirer_market_cap"],
+            (2_000_000_000 * (2 / 3)) / 5_000_000_000,
+        )
+        self.assertEqual(
+            written["stock_consideration_calculation_method"],
+            "stock_fraction_x_deal_value",
+        )
 
 
 if __name__ == "__main__":

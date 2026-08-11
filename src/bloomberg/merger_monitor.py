@@ -110,6 +110,85 @@ def parse_cash_consideration_per_share(value: Any) -> Optional[float]:
     return _leading_number(text)
 
 
+def _normalized_payment_type(value: Any) -> str:
+    return re.sub(
+        r"\s+",
+        "_",
+        str(value or "").strip().upper().replace("-", "_"),
+    )
+
+
+def _consideration_amount(value: Any) -> Optional[tuple[float, str, Optional[str]]]:
+    """Return a comparable consideration amount, basis, and currency.
+
+    Bloomberg Action terms can be fixed per-share amounts (``11.25/sh.``) or
+    total legs (``USD 140 Mln``). Exchange ratios are deliberately excluded.
+    """
+    if _is_missing(value):
+        return None
+    text = str(value).strip()
+    upper = text.upper().replace(",", "")
+    if "AQR" in upper:
+        return None
+    number = _leading_number(upper)
+    if number is None or number < 0:
+        return None
+    currency_match = re.search(r"\b(USD|CAD|EUR|GBP|AUD|JPY)\b", upper)
+    currency = currency_match.group(1) if currency_match else None
+    if re.search(r"\b(BLN|BILLION)\b", upper):
+        return number * 1_000_000_000, "total", currency
+    if re.search(r"\b(MLN|MM|MILLION)\b", upper):
+        return number * 1_000_000, "total", currency
+    if "/" in upper or "PER SHARE" in upper or "TGT SH" in upper:
+        return number, "per_share", currency
+    return None
+
+
+def derive_stock_consideration_fraction(
+    payment_type: Any,
+    stock_terms: Any,
+    cash_terms: Any,
+    acquirer_price_at_announcement: Optional[float] = None,
+) -> Optional[float]:
+    """Derive the 0..1 stock-funded share without treating unknown as cash."""
+    payment = _normalized_payment_type(payment_type)
+    if "_OR_" in payment or "ELECT" in payment:
+        return None
+    if payment in {"CASH", "CASH_ONLY", "ALL_CASH"}:
+        return 0.0
+    if payment in {"STOCK", "STOCK_ONLY", "ALL_STOCK", "SHARES"}:
+        return 1.0
+
+    stock_amount = _consideration_amount(stock_terms)
+    cash_amount = _consideration_amount(cash_terms)
+    if stock_amount and cash_amount:
+        stock_value, stock_basis, stock_currency = stock_amount
+        cash_value, cash_basis, cash_currency = cash_amount
+        currencies_match = (
+            not stock_currency
+            or not cash_currency
+            or stock_currency == cash_currency
+        )
+        if stock_basis == cash_basis and currencies_match:
+            total = stock_value + cash_value
+            if total > 0:
+                return max(0.0, min(1.0, stock_value / total))
+
+    exchange_ratio = parse_stock_exchange_ratio(stock_terms)
+    cash_per_share = parse_cash_consideration_per_share(cash_terms)
+    if (
+        exchange_ratio is not None
+        and cash_per_share is not None
+        and acquirer_price_at_announcement is not None
+        and acquirer_price_at_announcement > 0
+    ):
+        stock_value_per_share = exchange_ratio * acquirer_price_at_announcement
+        total_per_share = stock_value_per_share + cash_per_share
+        if total_per_share > 0:
+            return max(0.0, min(1.0, stock_value_per_share / total_per_share))
+    return None
+
+
 def payment_uses_stock(payment_type: Any, stock_terms: Any) -> Optional[bool]:
     if parse_stock_exchange_ratio(stock_terms) is not None:
         return True
@@ -119,6 +198,148 @@ def payment_uses_stock(payment_type: Any, stock_terms: Any) -> Optional[bool]:
     if payment in {"CASH", "CASH_ONLY", "ALL_CASH"}:
         return False
     return None
+
+
+def _number(value: Any) -> Optional[float]:
+    if _is_missing(value):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _latest_historical_value(
+    bloomberg_client: Any,
+    symbol: str,
+    announced_date: str,
+    field: str,
+    *,
+    currency: Optional[str] = None,
+) -> Optional[float]:
+    end_date = date.fromisoformat(announced_date)
+    start_date = end_date - timedelta(days=10)
+    records = bloomberg_client.get_historical_data(
+        ticker=symbol,
+        fields=[field],
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        periodicity="DAILY",
+        adjustment_profile="RAW",
+        currency=currency,
+    )
+    eligible = [
+        record
+        for record in records
+        if _date_iso(record.get("date"))
+        and _date_iso(record.get("date")) <= announced_date
+        and _number(record.get(field)) is not None
+    ]
+    if not eligible:
+        return None
+    eligible.sort(key=lambda record: _date_iso(record.get("date")) or "")
+    return _number(eligible[-1].get(field))
+
+
+def _historical_equity_symbol(value: Any) -> Optional[str]:
+    symbol = _text(value)
+    if not symbol:
+        return None
+    if re.search(r"\s+EQUITY$", symbol, re.IGNORECASE):
+        return re.sub(r"\s+EQUITY$", " Equity", symbol, flags=re.IGNORECASE)
+    if re.search(r"\s+[A-Z]{1,4}$", symbol, re.IGNORECASE):
+        return f"{symbol} Equity"
+    return symbol
+
+
+def enrich_stock_funding_metrics(
+    row: Dict[str, Any],
+    bloomberg_client: Any,
+    history_cache: Dict[tuple[str, str, str, Optional[str]], Optional[float]],
+    warnings: List[str],
+) -> None:
+    """Add announcement-date funding metrics needed by ModelBuilder."""
+    fraction = _number(row.get("stock_consideration_fraction"))
+    if fraction is None:
+        fraction = derive_stock_consideration_fraction(
+            row.get("payment_type"),
+            row.get("stock_terms"),
+            row.get("cash_terms"),
+        )
+    uses_stock = row.get("uses_stock_consideration") is True
+    source_symbol = _text(row.get("acquirer_bloomberg_symbol"))
+    symbol = _historical_equity_symbol(source_symbol)
+    announced_date = _date_iso(row.get("announced_date"))
+    valid_symbol = row.get("acquirer_ticker_is_valid") is True
+
+    def history(field: str, currency: Optional[str] = None) -> Optional[float]:
+        if not symbol or not announced_date:
+            return None
+        key = (symbol, announced_date, field, currency)
+        if key not in history_cache:
+            try:
+                history_cache[key] = _latest_historical_value(
+                    bloomberg_client,
+                    symbol,
+                    announced_date,
+                    field,
+                    currency=currency,
+                )
+            except Exception as exc:  # enrichment gaps must not break lifecycle updates
+                history_cache[key] = None
+                warnings.append(
+                    f"{row.get('action_id')} {source_symbol or symbol} {field}: {exc}"
+                )
+        return history_cache[key]
+
+    payment = _normalized_payment_type(row.get("payment_type"))
+    terms_are_elective = "_OR_" in payment or "ELECT" in payment
+    if fraction is None and uses_stock and valid_symbol and not terms_are_elective:
+        local_price = history("PX_LAST")
+        fraction = derive_stock_consideration_fraction(
+            row.get("payment_type"),
+            row.get("stock_terms"),
+            row.get("cash_terms"),
+            local_price,
+        )
+    if fraction is not None:
+        row["stock_consideration_fraction"] = fraction
+
+    existing_stock_value = _number(row.get("stock_consideration_value_usd"))
+    market_cap = _number(row.get("acquirer_market_cap_at_announcement_usd"))
+    needs_market_cap = uses_stock and (
+        fraction is not None or existing_stock_value is not None
+    )
+    if market_cap is None and needs_market_cap and valid_symbol:
+        market_cap_millions = history("CUR_MKT_CAP", "USD")
+        if market_cap_millions is not None:
+            market_cap = market_cap_millions * 1_000_000
+            row["acquirer_market_cap_at_announcement_usd"] = market_cap
+
+    deal_value = _number(row.get("deal_value_usd"))
+    if (
+        row.get("deal_value_to_acquirer_market_cap") is None
+        and deal_value is not None
+        and market_cap is not None
+        and market_cap > 0
+    ):
+        row["deal_value_to_acquirer_market_cap"] = deal_value / market_cap
+
+    stock_value = existing_stock_value
+    if stock_value is None and fraction is not None and deal_value is not None:
+        stock_value = fraction * deal_value
+        row["stock_consideration_value_usd"] = stock_value
+        row["stock_consideration_calculation_method"] = (
+            "stock_fraction_x_deal_value"
+        )
+    if (
+        row.get("stock_issuance_to_acquirer_market_cap") is None
+        and stock_value is not None
+        and market_cap is not None
+        and market_cap > 0
+    ):
+        row["stock_issuance_to_acquirer_market_cap"] = stock_value / market_cap
 
 
 def split_equity_symbols(value: Any) -> List[str]:
@@ -304,7 +525,11 @@ def refresh_open_merger_actions(
         and should_monitor_deal(row, as_of_date, terminal_recheck_days)
     ]
     errors: List[str] = []
+    warnings: List[str] = []
     ingest_rows: List[Dict[str, Any]] = []
+    history_cache: Dict[
+        tuple[str, str, str, Optional[str]], Optional[float]
+    ] = {}
     for batch in _chunks(candidates, max(1, min(int(batch_size), 100))):
         action_security_by_id = {
             str(row["action_id"]).strip(): f"{str(row['action_id']).strip()} Action"
@@ -325,6 +550,12 @@ def refresh_open_merger_actions(
             if not row.get("announced_date"):
                 errors.append(f"{security}: missing announced date")
                 continue
+            enrich_stock_funding_metrics(
+                row,
+                bloomberg_client,
+                history_cache,
+                warnings,
+            )
             ingest_rows.append(row)
 
     rpc_results: List[Any] = []
@@ -358,6 +589,7 @@ def refresh_open_merger_actions(
         "stock_consideration_unknown": len(ingest_rows) - stock_true - stock_false,
         "stock_issuance_ratio_known": stock_issuance_ratio_known,
         "errors": errors,
+        "warnings": warnings,
         "rpc_results": rpc_results,
         "preview": ingest_rows[:10] if dry_run else [],
     }

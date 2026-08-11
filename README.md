@@ -58,6 +58,14 @@ PORT=5000
 | `POST /clarifi/process` | market-dashboard update |
 | `POST /ehp/process` | market-dashboard update |
 
+The merger lifecycle endpoint refreshes Bloomberg Action fields for open and
+recently terminal public-target deals. For stock-funded transactions it also
+loads the last raw acquirer price on or before announcement when fixed exchange
+terms require it, loads announcement-date `CUR_MKT_CAP` in USD, converts the
+reported USD-millions value to absolute dollars, and derives the stock-funding
+share and stock-issuance-to-market-cap ratio. Elective or incomplete terms stay
+unknown.
+
 ## Documentation
 
 - [SGGG API Fields](docs/SGGG_API_FIELDS.md) – Valid fields for the PSC/SGGG position API (for `/sggg/portfolio` and related queries)

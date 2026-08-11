@@ -94,14 +94,21 @@ class _BloombergWithHistory:
         if kwargs["fields"] == ["PX_LAST"]:
             return [{"date": "2026-07-20", "PX_LAST": 40.0}]
         if kwargs["fields"] == ["CUR_MKT_CAP"]:
-            self.assert_currency(kwargs.get("currency"))
-            return [{"date": "2026-07-20", "CUR_MKT_CAP": 5000.0}]
+            currency = kwargs.get("currency")
+            if currency == "CAD":
+                return [{"date": "2026-07-20", "CUR_MKT_CAP": 6750.0}]
+            if currency == "USD":
+                return [{"date": "2026-07-20", "CUR_MKT_CAP": 5000.0}]
+            raise AssertionError(currency)
         raise AssertionError(kwargs)
 
-    @staticmethod
-    def assert_currency(currency):
-        if currency != "USD":
-            raise AssertionError(currency)
+
+class _BloombergCanadianWithHistory(_BloombergWithHistory):
+    def get_reference_data(self, securities, fields):
+        rows = super().get_reference_data(securities, fields)
+        for values in rows.values():
+            values["CA_MA_ACQUIRER_TICKER"] = "BUY CN Equity"
+        return rows
 
 
 class BloombergMergerMonitorTests(unittest.TestCase):
@@ -138,8 +145,18 @@ class BloombergMergerMonitorTests(unittest.TestCase):
                 "0.5 Aqr sh./Tgt sh.",
                 "10/sh.",
                 40.0,
+                "USD",
             ),
             2 / 3,
+        )
+        self.assertIsNone(
+            derive_stock_consideration_fraction(
+                "Cash and Stock",
+                "0.5 Aqr sh./Tgt sh.",
+                "USD 10/sh.",
+                40.0,
+                "CAD",
+            )
         )
 
     def test_payment_classification_is_tri_state(self) -> None:
@@ -176,9 +193,13 @@ class BloombergMergerMonitorTests(unittest.TestCase):
                 "announced_date": "2026-01-05",
                 "target_is_private": False,
                 "deal_value_usd": 2_000_000_000,
+                "deal_value_native": 2_000_000_000,
+                "currency": "USD",
                 "acquirer_market_cap_at_announcement_usd": 5_000_000_000,
+                "acquirer_market_cap_at_announcement_native": 5_000_000_000,
                 "stock_consideration_fraction": 0.6,
                 "stock_consideration_value_usd": 1_200_000_000,
+                "stock_consideration_value_native": 1_200_000_000,
                 "stock_issuance_to_acquirer_market_cap": 0.24,
                 "stock_consideration_calculation_method":
                     "stock_fraction_x_deal_value",
@@ -293,6 +314,7 @@ class BloombergMergerMonitorTests(unittest.TestCase):
             "status": "Pending",
             "target_is_private": False,
             "deal_value_usd": 2_000_000_000,
+            "currency": "USD",
         }])
         bloomberg = _BloombergWithHistory()
         result = refresh_open_merger_actions(
@@ -309,6 +331,10 @@ class BloombergMergerMonitorTests(unittest.TestCase):
             written["acquirer_market_cap_at_announcement_usd"],
             5_000_000_000,
         )
+        self.assertEqual(
+            written["acquirer_market_cap_at_announcement_native"],
+            5_000_000_000,
+        )
         self.assertAlmostEqual(
             written["stock_issuance_to_acquirer_market_cap"],
             (2_000_000_000 * (2 / 3)) / 5_000_000_000,
@@ -316,6 +342,89 @@ class BloombergMergerMonitorTests(unittest.TestCase):
         self.assertEqual(
             written["stock_consideration_calculation_method"],
             "stock_fraction_x_deal_value",
+        )
+
+    def test_refresh_preserves_cad_and_derives_matching_usd_values(self) -> None:
+        supabase = _Supabase([{
+            "action_id": "201",
+            "announced_date": "2026-07-20",
+            "status": "Pending",
+            "target_is_private": False,
+            "currency": "CAD",
+            "deal_value_native": 2_700_000_000,
+            # These values mirror the old USD-only schema and must be repaired.
+            "acquirer_market_cap_at_announcement_native": 5_000_000_000,
+            "stock_consideration_fraction": 2 / 3,
+            "stock_consideration_value_native": 4_000_000_000 / 3,
+            "stock_consideration_calculation_method":
+                "stock_fraction_x_deal_value",
+        }])
+        bloomberg = _BloombergWithHistory()
+        result = refresh_open_merger_actions(
+            supabase,
+            bloomberg,
+            date(2026, 7, 26),
+        )
+
+        self.assertTrue(result["success"])
+        written = supabase.rpc_params[0]["p_rows"][0]
+        self.assertEqual(written["currency"], "CAD")
+        self.assertEqual(written["deal_value_native"], 2_700_000_000)
+        self.assertAlmostEqual(written["deal_value_usd"], 2_000_000_000)
+        self.assertEqual(
+            written["acquirer_market_cap_at_announcement_native"],
+            6_750_000_000,
+        )
+        self.assertEqual(
+            written["acquirer_market_cap_at_announcement_usd"],
+            5_000_000_000,
+        )
+        self.assertAlmostEqual(
+            written["stock_consideration_value_native"],
+            1_800_000_000,
+        )
+        self.assertAlmostEqual(
+            written["stock_consideration_value_usd"],
+            4_000_000_000 / 3,
+        )
+        self.assertAlmostEqual(
+            written["stock_issuance_to_acquirer_market_cap"],
+            (2_700_000_000 * (2 / 3)) / 6_750_000_000,
+        )
+        history_currencies = {
+            call.get("currency")
+            for call in bloomberg.history_calls
+            if call["fields"] == ["CUR_MKT_CAP"]
+        }
+        self.assertEqual(history_currencies, {"CAD", "USD"})
+
+    def test_refresh_repairs_legacy_usd_mirror_for_canadian_acquirer(self) -> None:
+        supabase = _Supabase([{
+            "action_id": "202",
+            "announced_date": "2026-07-20",
+            "status": "Pending",
+            "target_is_private": False,
+            "currency": "USD",
+            "deal_value_native": 2_000_000_000,
+            "deal_value_usd": 2_000_000_000,
+            "acquirer_market_cap_at_announcement_native": 5_000_000_000,
+            "acquirer_market_cap_at_announcement_usd": 5_000_000_000,
+        }])
+        bloomberg = _BloombergCanadianWithHistory()
+        result = refresh_open_merger_actions(
+            supabase,
+            bloomberg,
+            date(2026, 7, 26),
+        )
+
+        self.assertTrue(result["success"])
+        written = supabase.rpc_params[0]["p_rows"][0]
+        self.assertEqual(written["currency"], "CAD")
+        self.assertAlmostEqual(written["deal_value_native"], 2_700_000_000)
+        self.assertAlmostEqual(written["deal_value_usd"], 2_000_000_000)
+        self.assertEqual(
+            written["acquirer_market_cap_at_announcement_native"],
+            6_750_000_000,
         )
 
 

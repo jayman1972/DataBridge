@@ -149,6 +149,7 @@ def derive_stock_consideration_fraction(
     stock_terms: Any,
     cash_terms: Any,
     acquirer_price_at_announcement: Optional[float] = None,
+    acquirer_price_currency: Optional[str] = None,
 ) -> Optional[float]:
     """Derive the 0..1 stock-funded share without treating unknown as cash."""
     payment = _normalized_payment_type(payment_type)
@@ -176,11 +177,20 @@ def derive_stock_consideration_fraction(
 
     exchange_ratio = parse_stock_exchange_ratio(stock_terms)
     cash_per_share = parse_cash_consideration_per_share(cash_terms)
+    cash_amount = _consideration_amount(cash_terms)
+    cash_currency = cash_amount[2] if cash_amount else None
+    price_currency = _text(acquirer_price_currency)
+    currencies_match = (
+        not cash_currency
+        or not price_currency
+        or cash_currency == price_currency.upper()
+    )
     if (
         exchange_ratio is not None
         and cash_per_share is not None
         and acquirer_price_at_announcement is not None
         and acquirer_price_at_announcement > 0
+        and currencies_match
     ):
         stock_value_per_share = exchange_ratio * acquirer_price_at_announcement
         total_per_share = stock_value_per_share + cash_per_share
@@ -253,13 +263,51 @@ def _historical_equity_symbol(value: Any) -> Optional[str]:
     return symbol
 
 
+def _native_currency_for_acquirer(value: Any, stored_currency: Any) -> str:
+    """Prefer the acquirer's Canadian market currency over legacy USD mirrors."""
+    currency = (_text(stored_currency) or "USD").upper()
+    symbol = _text(value)
+    if not symbol:
+        return currency
+    tokens = re.sub(r"\s+EQUITY$", "", symbol, flags=re.IGNORECASE).split()
+    if tokens and tokens[-1].upper() in {"CN", "CT"}:
+        return "CAD"
+    return currency
+
+
 def enrich_stock_funding_metrics(
     row: Dict[str, Any],
     bloomberg_client: Any,
     history_cache: Dict[tuple[str, str, str, Optional[str]], Optional[float]],
     warnings: List[str],
 ) -> None:
-    """Add announcement-date funding metrics needed by ModelBuilder."""
+    """Add native-currency and USD announcement-date funding metrics."""
+    source_symbol = _text(row.get("acquirer_bloomberg_symbol"))
+    stored_currency = (_text(row.get("currency")) or "USD").upper()
+    native_currency = _native_currency_for_acquirer(
+        source_symbol,
+        stored_currency,
+    )
+    repairs_legacy_usd_mirror = (
+        stored_currency == "USD" and native_currency != "USD"
+    )
+    row["currency"] = native_currency
+    deal_value_native = _number(row.get("deal_value_native"))
+    deal_value_usd = _number(row.get("deal_value_usd"))
+    if repairs_legacy_usd_mirror:
+        if deal_value_usd is None:
+            deal_value_usd = deal_value_native
+        deal_value_native = None
+    if native_currency == "USD":
+        if deal_value_native is None:
+            deal_value_native = deal_value_usd
+        if deal_value_usd is None:
+            deal_value_usd = deal_value_native
+        if deal_value_native is not None:
+            row["deal_value_native"] = deal_value_native
+        if deal_value_usd is not None:
+            row["deal_value_usd"] = deal_value_usd
+
     fraction = _number(row.get("stock_consideration_fraction"))
     if fraction is None:
         fraction = derive_stock_consideration_fraction(
@@ -268,7 +316,6 @@ def enrich_stock_funding_metrics(
             row.get("cash_terms"),
         )
     uses_stock = row.get("uses_stock_consideration") is True
-    source_symbol = _text(row.get("acquirer_bloomberg_symbol"))
     symbol = _historical_equity_symbol(source_symbol)
     announced_date = _date_iso(row.get("announced_date"))
     valid_symbol = row.get("acquirer_ticker_is_valid") is True
@@ -296,50 +343,142 @@ def enrich_stock_funding_metrics(
     payment = _normalized_payment_type(row.get("payment_type"))
     terms_are_elective = "_OR_" in payment or "ELECT" in payment
     if fraction is None and uses_stock and valid_symbol and not terms_are_elective:
-        local_price = history("PX_LAST")
+        local_price = history("PX_LAST", native_currency)
         fraction = derive_stock_consideration_fraction(
             row.get("payment_type"),
             row.get("stock_terms"),
             row.get("cash_terms"),
             local_price,
+            native_currency,
         )
     if fraction is not None:
         row["stock_consideration_fraction"] = fraction
 
-    existing_stock_value = _number(row.get("stock_consideration_value_usd"))
-    market_cap = _number(row.get("acquirer_market_cap_at_announcement_usd"))
-    needs_market_cap = uses_stock and (
-        fraction is not None or existing_stock_value is not None
+    calculation_method = _text(
+        row.get("stock_consideration_calculation_method")
     )
-    if market_cap is None and needs_market_cap and valid_symbol:
+    vendor_reported_stock_value = calculation_method == "vendor_reported"
+    existing_stock_value_native = _number(
+        row.get("stock_consideration_value_native")
+    )
+    existing_stock_value_usd = _number(row.get("stock_consideration_value_usd"))
+    if repairs_legacy_usd_mirror:
+        existing_stock_value_native = None
+    market_cap_native = _number(
+        row.get("acquirer_market_cap_at_announcement_native")
+    )
+    market_cap_usd = _number(row.get("acquirer_market_cap_at_announcement_usd"))
+    if repairs_legacy_usd_mirror:
+        market_cap_native = None
+    needs_market_cap = uses_stock and (
+        fraction is not None
+        or existing_stock_value_native is not None
+        or existing_stock_value_usd is not None
+    )
+    needs_market_cap = needs_market_cap or (
+        native_currency != "USD"
+        and (deal_value_native is not None or deal_value_usd is not None)
+    )
+    if needs_market_cap and valid_symbol:
+        market_cap_millions = history("CUR_MKT_CAP", native_currency)
+        if market_cap_millions is not None:
+            market_cap_native = market_cap_millions * 1_000_000
+            row["acquirer_market_cap_at_announcement_native"] = market_cap_native
+    if native_currency == "USD" and market_cap_usd is None:
+        market_cap_usd = market_cap_native
+    if (
+        needs_market_cap
+        and valid_symbol
+        and native_currency != "USD"
+    ):
         market_cap_millions = history("CUR_MKT_CAP", "USD")
         if market_cap_millions is not None:
-            market_cap = market_cap_millions * 1_000_000
-            row["acquirer_market_cap_at_announcement_usd"] = market_cap
+            market_cap_usd = market_cap_millions * 1_000_000
+    if market_cap_usd is not None:
+        row["acquirer_market_cap_at_announcement_usd"] = market_cap_usd
+    if native_currency == "USD" and market_cap_native is None:
+        market_cap_native = market_cap_usd
+        if market_cap_native is not None:
+            row["acquirer_market_cap_at_announcement_native"] = market_cap_native
 
-    deal_value = _number(row.get("deal_value_usd"))
+    if (
+        deal_value_usd is None
+        and deal_value_native is not None
+        and market_cap_native is not None
+        and market_cap_native > 0
+        and market_cap_usd is not None
+    ):
+        deal_value_usd = deal_value_native * market_cap_usd / market_cap_native
+        row["deal_value_usd"] = deal_value_usd
+    if (
+        deal_value_native is None
+        and deal_value_usd is not None
+        and market_cap_usd is not None
+        and market_cap_usd > 0
+        and market_cap_native is not None
+    ):
+        deal_value_native = deal_value_usd * market_cap_native / market_cap_usd
+        row["deal_value_native"] = deal_value_native
+
     if (
         row.get("deal_value_to_acquirer_market_cap") is None
-        and deal_value is not None
-        and market_cap is not None
-        and market_cap > 0
     ):
-        row["deal_value_to_acquirer_market_cap"] = deal_value / market_cap
+        if (
+            deal_value_native is not None
+            and market_cap_native is not None
+            and market_cap_native > 0
+        ):
+            row["deal_value_to_acquirer_market_cap"] = (
+                deal_value_native / market_cap_native
+            )
+        elif (
+            deal_value_usd is not None
+            and market_cap_usd is not None
+            and market_cap_usd > 0
+        ):
+            row["deal_value_to_acquirer_market_cap"] = deal_value_usd / market_cap_usd
 
-    stock_value = existing_stock_value
-    if stock_value is None and fraction is not None and deal_value is not None:
-        stock_value = fraction * deal_value
-        row["stock_consideration_value_usd"] = stock_value
+    stock_value_native = existing_stock_value_native
+    if (
+        not vendor_reported_stock_value
+        and fraction is not None
+        and deal_value_native is not None
+    ):
+        stock_value_native = fraction * deal_value_native
+        row["stock_consideration_value_native"] = stock_value_native
+        row["stock_consideration_calculation_method"] = (
+            "stock_fraction_x_deal_value"
+        )
+    stock_value_usd = existing_stock_value_usd
+    if (
+        not vendor_reported_stock_value
+        and fraction is not None
+        and deal_value_usd is not None
+    ):
+        stock_value_usd = fraction * deal_value_usd
+        row["stock_consideration_value_usd"] = stock_value_usd
         row["stock_consideration_calculation_method"] = (
             "stock_fraction_x_deal_value"
         )
     if (
         row.get("stock_issuance_to_acquirer_market_cap") is None
-        and stock_value is not None
-        and market_cap is not None
-        and market_cap > 0
     ):
-        row["stock_issuance_to_acquirer_market_cap"] = stock_value / market_cap
+        if (
+            stock_value_native is not None
+            and market_cap_native is not None
+            and market_cap_native > 0
+        ):
+            row["stock_issuance_to_acquirer_market_cap"] = (
+                stock_value_native / market_cap_native
+            )
+        elif (
+            stock_value_usd is not None
+            and market_cap_usd is not None
+            and market_cap_usd > 0
+        ):
+            row["stock_issuance_to_acquirer_market_cap"] = (
+                stock_value_usd / market_cap_usd
+            )
 
 
 def split_equity_symbols(value: Any) -> List[str]:
@@ -431,7 +570,12 @@ def build_ingest_row(
         # The Action reference fields above do not expose a reliable stock
         # funding percentage or announcement-date market cap. Preserve values
         # populated by the BQL/backfill workflow on every lifecycle refresh.
+        "currency": existing.get("currency"),
+        "deal_value_native": existing.get("deal_value_native"),
         "deal_value_usd": existing.get("deal_value_usd"),
+        "acquirer_market_cap_at_announcement_native": existing.get(
+            "acquirer_market_cap_at_announcement_native"
+        ),
         "acquirer_market_cap_at_announcement_usd": existing.get(
             "acquirer_market_cap_at_announcement_usd"
         ),
@@ -440,6 +584,9 @@ def build_ingest_row(
         ),
         "stock_consideration_fraction": existing.get(
             "stock_consideration_fraction"
+        ),
+        "stock_consideration_value_native": existing.get(
+            "stock_consideration_value_native"
         ),
         "stock_consideration_value_usd": existing.get(
             "stock_consideration_value_usd"
@@ -474,8 +621,11 @@ def load_merger_deals(supabase: Any) -> List[Dict[str, Any]]:
     selected = (
         "action_id,announced_date,status,actual_completion_date,withdrawal_date,"
         "acquirer_bloomberg_symbol,target_bloomberg_symbol,target_is_private,"
-        "deal_value_usd,acquirer_market_cap_at_announcement_usd,"
+        "currency,deal_value_native,deal_value_usd,"
+        "acquirer_market_cap_at_announcement_native,"
+        "acquirer_market_cap_at_announcement_usd,"
         "deal_value_to_acquirer_market_cap,stock_consideration_fraction,"
+        "stock_consideration_value_native,"
         "stock_consideration_value_usd,"
         "stock_issuance_to_acquirer_market_cap,"
         "stock_consideration_calculation_method"

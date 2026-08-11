@@ -61,9 +61,11 @@ PORT=5000
 The merger lifecycle endpoint refreshes Bloomberg Action fields for open and
 recently terminal public-target deals. For stock-funded transactions it also
 loads the last raw acquirer price on or before announcement when fixed exchange
-terms require it, loads announcement-date `CUR_MKT_CAP` in USD, converts the
-reported USD-millions value to absolute dollars, and derives the stock-funding
-share and stock-issuance-to-market-cap ratio. Elective or incomplete terms stay
+terms require it, loads announcement-date `CUR_MKT_CAP` in both the deal's
+native reporting currency and USD, converts the reported millions to absolute
+amounts, and derives the stock-funding share and stock-issuance-to-market-cap
+ratio using matching currencies. Native deal terms remain intact while USD
+values support cross-market comparisons. Elective or incomplete terms stay
 unknown.
 
 ## Documentation

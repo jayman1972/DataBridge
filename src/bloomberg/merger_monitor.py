@@ -544,15 +544,29 @@ def build_ingest_row(
     )
     ticker_count, ticker_is_valid = ticker_classification(acquirer_symbol)
 
+    announced_date = (
+        _date_iso(reference.get("CA_MA_ANNOUNCED_DATE"))
+        or _date_iso(existing.get("announced_date"))
+    )
+    expected_completion_date = _date_iso(
+        reference.get("CA_MA_EXPECTED_COMPLETION_DATE")
+    )
+    if (
+        announced_date
+        and expected_completion_date
+        and expected_completion_date < announced_date
+    ):
+        expected_completion_date = None
+    if announced_date and complete_date and complete_date < announced_date:
+        # Bloomberg occasionally reports a terminal date one day before the
+        # announcement (usually timezone/event ordering).  Do not publish an
+        # impossible chronology; the value can be rechecked on a later refresh.
+        complete_date = None
+
     row: Dict[str, Any] = {
         "action_id": str(existing["action_id"]).strip(),
-        "announced_date": (
-            _date_iso(reference.get("CA_MA_ANNOUNCED_DATE"))
-            or _date_iso(existing.get("announced_date"))
-        ),
-        "expected_completion_date": _date_iso(
-            reference.get("CA_MA_EXPECTED_COMPLETION_DATE")
-        ),
+        "announced_date": announced_date,
+        "expected_completion_date": expected_completion_date,
         "status": status,
         "payment_type": payment_type,
         "cash_terms": cash_terms,

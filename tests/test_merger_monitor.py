@@ -239,6 +239,23 @@ class BloombergMergerMonitorTests(unittest.TestCase):
         self.assertEqual(withdrawn["withdrawal_date"], "2026-07-21")
         self.assertNotIn("actual_completion_date", withdrawn)
 
+    def test_pre_announcement_lifecycle_dates_are_treated_as_unknown(self) -> None:
+        row = build_ingest_row(
+            {
+                "action_id": "84188222",
+                "announced_date": "2013-11-13",
+                "target_is_private": False,
+            },
+            {
+                "CA_MA_DEAL_STATUS": "Completed",
+                "CA_MA_EXPECTED_COMPLETION_DATE": "2013-11-12",
+                "CA_MA_COMPLETE_DT": "2013-11-12",
+            },
+        )
+
+        self.assertNotIn("expected_completion_date", row)
+        self.assertNotIn("actual_completion_date", row)
+
     def test_terminal_deals_are_rechecked_for_five_days(self) -> None:
         self.assertTrue(
             should_monitor_deal(

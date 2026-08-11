@@ -98,6 +98,29 @@ class BloombergMergerMonitorTests(unittest.TestCase):
         self.assertIs(row["acquirer_ticker_is_valid"], False)
         self.assertIs(row["eligible_for_model_builder"], True)
 
+    def test_lifecycle_refresh_preserves_stock_funding_metrics(self) -> None:
+        row = build_ingest_row(
+            {
+                "action_id": "244404168",
+                "announced_date": "2026-01-05",
+                "target_is_private": False,
+                "deal_value_usd": 2_000_000_000,
+                "acquirer_market_cap_at_announcement_usd": 5_000_000_000,
+                "stock_consideration_fraction": 0.6,
+                "stock_consideration_value_usd": 1_200_000_000,
+                "stock_issuance_to_acquirer_market_cap": 0.24,
+                "stock_consideration_calculation_method":
+                    "stock_fraction_x_deal_value",
+            },
+            {
+                "CA_MA_ACQUIRER_TICKER": "BUY US Equity",
+                "CA_MA_TARGET_TICKER": "TGT US Equity",
+                "CA_MA_DEAL_STATUS": "Pending",
+            },
+        )
+        self.assertEqual(row["stock_consideration_fraction"], 0.6)
+        self.assertEqual(row["stock_issuance_to_acquirer_market_cap"], 0.24)
+
     def test_completed_and_withdrawn_dates_are_mapped_by_status(self) -> None:
         existing = {
             "action_id": "244404168",

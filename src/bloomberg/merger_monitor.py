@@ -207,6 +207,28 @@ def build_ingest_row(
         "stock_exchange_ratio": parse_stock_exchange_ratio(stock_terms),
         "cash_consideration_per_share":
             parse_cash_consideration_per_share(cash_terms),
+        # The Action reference fields above do not expose a reliable stock
+        # funding percentage or announcement-date market cap. Preserve values
+        # populated by the BQL/backfill workflow on every lifecycle refresh.
+        "deal_value_usd": existing.get("deal_value_usd"),
+        "acquirer_market_cap_at_announcement_usd": existing.get(
+            "acquirer_market_cap_at_announcement_usd"
+        ),
+        "deal_value_to_acquirer_market_cap": existing.get(
+            "deal_value_to_acquirer_market_cap"
+        ),
+        "stock_consideration_fraction": existing.get(
+            "stock_consideration_fraction"
+        ),
+        "stock_consideration_value_usd": existing.get(
+            "stock_consideration_value_usd"
+        ),
+        "stock_issuance_to_acquirer_market_cap": existing.get(
+            "stock_issuance_to_acquirer_market_cap"
+        ),
+        "stock_consideration_calculation_method": existing.get(
+            "stock_consideration_calculation_method"
+        ),
     }
     if status in TERMINAL_COMPLETED_STATUSES:
         row["actual_completion_date"] = complete_date
@@ -230,7 +252,12 @@ def _response_data(response: Any) -> List[Dict[str, Any]]:
 def load_merger_deals(supabase: Any) -> List[Dict[str, Any]]:
     selected = (
         "action_id,announced_date,status,actual_completion_date,withdrawal_date,"
-        "acquirer_bloomberg_symbol,target_bloomberg_symbol,target_is_private"
+        "acquirer_bloomberg_symbol,target_bloomberg_symbol,target_is_private,"
+        "deal_value_usd,acquirer_market_cap_at_announcement_usd,"
+        "deal_value_to_acquirer_market_cap,stock_consideration_fraction,"
+        "stock_consideration_value_usd,"
+        "stock_issuance_to_acquirer_market_cap,"
+        "stock_consideration_calculation_method"
     )
     rows: List[Dict[str, Any]] = []
     page_size = 1000
@@ -315,6 +342,10 @@ def refresh_open_merger_actions(
 
     stock_true = sum(row.get("uses_stock_consideration") is True for row in ingest_rows)
     stock_false = sum(row.get("uses_stock_consideration") is False for row in ingest_rows)
+    stock_issuance_ratio_known = sum(
+        row.get("stock_issuance_to_acquirer_market_cap") is not None
+        for row in ingest_rows
+    )
     return {
         "success": len(errors) == 0,
         "dry_run": dry_run,
@@ -325,6 +356,7 @@ def refresh_open_merger_actions(
         "stock_consideration_true": stock_true,
         "stock_consideration_false": stock_false,
         "stock_consideration_unknown": len(ingest_rows) - stock_true - stock_false,
+        "stock_issuance_ratio_known": stock_issuance_ratio_known,
         "errors": errors,
         "rpc_results": rpc_results,
         "preview": ingest_rows[:10] if dry_run else [],

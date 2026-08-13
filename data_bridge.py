@@ -1116,10 +1116,14 @@ def refresh_bloomberg_merger_actions():
 
         try:
             batch_size = int(data.get("batchSize", 50))
+            database_batch_size = int(data.get("databaseBatchSize", 10))
             terminal_recheck_days = int(data.get("terminalRecheckDays", 5))
         except (TypeError, ValueError):
             return jsonify({
-                "error": "batchSize and terminalRecheckDays must be integers"
+                "error": (
+                    "batchSize, databaseBatchSize, and terminalRecheckDays "
+                    "must be integers"
+                )
             }), 400
 
         result = refresh_open_merger_actions(
@@ -1127,6 +1131,7 @@ def refresh_bloomberg_merger_actions():
             bloomberg_client,
             as_of_date,
             batch_size=max(1, min(batch_size, 100)),
+            database_batch_size=max(1, min(database_batch_size, 25)),
             terminal_recheck_days=max(0, min(terminal_recheck_days, 30)),
             dry_run=bool(data.get("dryRun", False)),
         )

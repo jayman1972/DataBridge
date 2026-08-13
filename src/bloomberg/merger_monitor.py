@@ -667,12 +667,71 @@ def _chunks(values: List[Dict[str, Any]], size: int) -> Iterable[List[Dict[str, 
         yield values[index:index + size]
 
 
+def _is_statement_timeout(error: Exception) -> bool:
+    message = str(error).lower()
+    return "57014" in message or "statement timeout" in message
+
+
+def _ingest_merger_rows(
+    supabase: Any,
+    as_of_date: date,
+    rows: List[Dict[str, Any]],
+    rpc_results: List[Any],
+    errors: List[str],
+) -> None:
+    """Write one database batch, bisecting only when PostgreSQL times out.
+
+    The RPC is transactional, so a timed-out batch is rolled back and can be
+    retried safely as smaller batches. A single pathological Action ID is
+    reported without discarding lifecycle updates for the other deals.
+    """
+    if not rows:
+        return
+    try:
+        response = supabase.rpc(
+            "ingest_security_merger_deals",
+            {
+                "p_as_of_date": as_of_date.isoformat(),
+                "p_rows": rows,
+                "p_source": "bloomberg",
+            },
+        ).execute()
+        rpc_results.extend(_response_data(response))
+        return
+    except Exception as exc:
+        if not _is_statement_timeout(exc):
+            raise
+        if len(rows) == 1:
+            action_id = str(rows[0].get("action_id") or "unknown").strip()
+            errors.append(
+                f"{action_id} Action: database statement timeout during lifecycle ingest"
+            )
+            return
+
+    midpoint = max(1, len(rows) // 2)
+    _ingest_merger_rows(
+        supabase,
+        as_of_date,
+        rows[:midpoint],
+        rpc_results,
+        errors,
+    )
+    _ingest_merger_rows(
+        supabase,
+        as_of_date,
+        rows[midpoint:],
+        rpc_results,
+        errors,
+    )
+
+
 def refresh_open_merger_actions(
     supabase: Any,
     bloomberg_client: Any,
     as_of_date: date,
     *,
     batch_size: int = 50,
+    database_batch_size: int = 10,
     terminal_recheck_days: int = 5,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
@@ -724,16 +783,17 @@ def refresh_open_merger_actions(
 
     rpc_results: List[Any] = []
     if not dry_run:
-        for batch in _chunks(ingest_rows, max(1, min(int(batch_size), 100))):
-            response = supabase.rpc(
-                "ingest_security_merger_deals",
-                {
-                    "p_as_of_date": as_of_date.isoformat(),
-                    "p_rows": batch,
-                    "p_source": "bloomberg",
-                },
-            ).execute()
-            rpc_results.extend(_response_data(response))
+        for batch in _chunks(
+            ingest_rows,
+            max(1, min(int(database_batch_size), 25)),
+        ):
+            _ingest_merger_rows(
+                supabase,
+                as_of_date,
+                batch,
+                rpc_results,
+                errors,
+            )
 
     stock_true = sum(row.get("uses_stock_consideration") is True for row in ingest_rows)
     stock_false = sum(row.get("uses_stock_consideration") is False for row in ingest_rows)
@@ -748,6 +808,7 @@ def refresh_open_merger_actions(
         "deals_in_database": len(all_deals),
         "actions_requested": len(candidates),
         "actions_refreshed": len(ingest_rows),
+        "database_batch_size": max(1, min(int(database_batch_size), 25)),
         "stock_consideration_true": stock_true,
         "stock_consideration_false": stock_false,
         "stock_consideration_unknown": len(ingest_rows) - stock_true - stock_false,

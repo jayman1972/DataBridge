@@ -58,6 +58,35 @@ class _Supabase:
         return _RpcQuery(self, params)
 
 
+class _TimeoutRpcQuery:
+    def __init__(self, owner, params):
+        self.owner = owner
+        self.params = params
+
+    def execute(self):
+        batch_size = len(self.params["p_rows"])
+        self.owner.rpc_attempt_sizes.append(batch_size)
+        if batch_size > self.owner.timeout_above:
+            raise RuntimeError(
+                "{'message': 'canceling statement due to statement timeout', "
+                "'code': '57014'}"
+            )
+        self.owner.rpc_params.append(self.params)
+        return _Response({"deals_upserted": batch_size})
+
+
+class _SupabaseWithTimeout(_Supabase):
+    def __init__(self, rows, timeout_above):
+        super().__init__(rows)
+        self.timeout_above = timeout_above
+        self.rpc_attempt_sizes = []
+
+    def rpc(self, name, params):
+        if name != "ingest_security_merger_deals":
+            raise AssertionError(name)
+        return _TimeoutRpcQuery(self, params)
+
+
 class _Bloomberg:
     def get_reference_data(self, securities, _fields):
         return {
@@ -323,6 +352,37 @@ class BloombergMergerMonitorTests(unittest.TestCase):
         self.assertIs(written[0]["eligible_for_model_builder"], True)
         self.assertIs(written[1]["eligible_for_model_builder"], False)
         self.assertIs(written[0]["uses_stock_consideration"], False)
+
+    def test_refresh_splits_database_batches_after_statement_timeout(self) -> None:
+        rows = [
+            {
+                "action_id": str(1000 + index),
+                "announced_date": "2026-07-20",
+                "status": "Pending",
+                "target_is_private": False,
+            }
+            for index in range(12)
+        ]
+        supabase = _SupabaseWithTimeout(rows, timeout_above=3)
+
+        result = refresh_open_merger_actions(
+            supabase,
+            _Bloomberg(),
+            date(2026, 7, 26),
+            batch_size=50,
+            database_batch_size=10,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertIn(10, supabase.rpc_attempt_sizes)
+        self.assertTrue(
+            all(len(params["p_rows"]) <= 3 for params in supabase.rpc_params)
+        )
+        self.assertEqual(
+            sum(len(params["p_rows"]) for params in supabase.rpc_params),
+            12,
+        )
+        self.assertEqual(result["database_batch_size"], 10)
 
     def test_refresh_enriches_stock_funding_with_announcement_history(self) -> None:
         supabase = _Supabase([{

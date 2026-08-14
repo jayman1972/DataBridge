@@ -24,6 +24,7 @@ Write-Host ""
 
 $MARKET_DASHBOARD_PROJECT_REF = "aphjduxfgsrqswonmgyb"
 $WEALTH_SCOPE_PROJECT_REF = "gndrtpvvldqalpbvvgrr"
+$SALESFLOW_PROJECT_REF = "ihdlspbpaseuukryidth"
 $PORT = 5000
 
 # Paths: script is in projects/DataBridge
@@ -31,6 +32,7 @@ $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PROJECTS_DIR = Split-Path $SCRIPT_DIR -Parent
 $MARKET_DASHBOARD_DIR = Join-Path $PROJECTS_DIR "market-dashboard"
 $WEALTH_SCOPE_DIR = Join-Path $PROJECTS_DIR "wealth-scope-ui"
+$SALESFLOW_DIR = Join-Path $PROJECTS_DIR "salesflowhome"
 
 Write-Host "Checking for existing ngrok tunnel on port $PORT..." -ForegroundColor Yellow
 $existingNgrokUrl = $null
@@ -132,6 +134,9 @@ if ($ngrokUrl) {
         Update-SupabaseSecret -ProjectDir $MARKET_DASHBOARD_DIR -ProjectName "market-dashboard" -ProjectRef $MARKET_DASHBOARD_PROJECT_REF -Url $ngrokUrl | Out-Null
         if (Test-Path $WEALTH_SCOPE_DIR) {
             Update-SupabaseSecret -ProjectDir $WEALTH_SCOPE_DIR -ProjectName "wealth-scope" -ProjectRef $WEALTH_SCOPE_PROJECT_REF -Url $ngrokUrl | Out-Null
+        }
+        if (Test-Path $SALESFLOW_DIR) {
+            Update-SupabaseSecret -ProjectDir $SALESFLOW_DIR -ProjectName "salesflow" -ProjectRef $SALESFLOW_PROJECT_REF -Url $ngrokUrl | Out-Null
         }
     }
     Write-Host ""

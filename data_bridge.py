@@ -847,7 +847,9 @@ def fundata_monthly():
             except (TypeError, ValueError):
                 continue
             if _ISO_DATE_RE.fullmatch(month_end) and math.isfinite(monthly_return):
-                deduplicated[month_end] = monthly_return
+                # Fundata returns percentage points (4.78 means 4.78%).
+                # SalesFlow's calculation engine expects decimal returns.
+                deduplicated[month_end] = monthly_return / 100.0
         series.append({
             "instrumentId": instrument_id,
             "legalName": payload.get("LegalName") or instrument_id,

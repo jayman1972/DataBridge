@@ -166,7 +166,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
-DATA_BRIDGE_BUILD = "2026-08-08-ibkr-archived"
+DATA_BRIDGE_BUILD = "2026-08-14-fundata-proxy"
 
 _ecal_logger = logging.getLogger("data_bridge.economic_calendar")
 if not _ecal_logger.handlers:
@@ -790,6 +790,73 @@ def bloomberg_update():
 # ---------------------------------------------------------------------------
 # /historical and /reference - used by market-dashboard update Edge Function
 # ---------------------------------------------------------------------------
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_FUNDATA_INSTRUMENT_RE = re.compile(r"^\d{1,12}$")
+
+
+@app.route("/fundata-monthly", methods=["POST"])
+def fundata_monthly():
+    """Fetch Fundata monthly returns from the office network for SalesFlow.
+
+    Fundata authorizes the office network but rejects requests from Supabase's
+    Edge network. The API user ID remains a Supabase secret and is supplied
+    only in this HTTPS server-to-server request.
+    """
+    data = request.get_json(silent=True) or {}
+    user_id = str(data.get("userId") or "").strip()
+    raw_ids = data.get("instrumentIds") or []
+    instrument_ids = list(dict.fromkeys(str(value).strip() for value in raw_ids)) if isinstance(raw_ids, list) else []
+    start_date = str(data.get("startDate") or "").strip()
+    end_date = str(data.get("endDate") or "").strip()
+
+    if not user_id:
+        return jsonify({"error": "Fundata API user ID is required."}), 401
+    if not instrument_ids or len(instrument_ids) > 10 or any(not _FUNDATA_INSTRUMENT_RE.fullmatch(value) for value in instrument_ids):
+        return jsonify({"error": "Provide between 1 and 10 valid Fundata instrument IDs."}), 400
+    if not _ISO_DATE_RE.fullmatch(start_date) or not _ISO_DATE_RE.fullmatch(end_date) or start_date > end_date:
+        return jsonify({"error": "Provide valid startDate and endDate values."}), 400
+
+    series = []
+    for instrument_id in instrument_ids:
+        upstream_url = (
+            "https://data.fundataapi.com/data/getPerformanceMonthly/EN/"
+            f"{user_id}/{instrument_id}/{start_date}/{end_date}"
+        )
+        try:
+            upstream = requests.get(
+                upstream_url,
+                headers={"Accept": "application/json"},
+                timeout=25,
+            )
+        except requests.RequestException as exc:
+            return jsonify({"error": f"Fundata request failed for instrument {instrument_id}: {exc}"}), 502
+        if upstream.status_code != 200:
+            return jsonify({"error": f"Fundata returned status {upstream.status_code} for instrument {instrument_id}."}), 502
+        try:
+            payload = upstream.json()
+        except ValueError:
+            message = upstream.text.strip()[:120] or "invalid JSON"
+            return jsonify({"error": f"Fundata rejected instrument {instrument_id}: {message}"}), 502
+
+        deduplicated = {}
+        for point in payload.get("PerformanceMonthly") or []:
+            month_end = str(point.get("MonthEndDate") or "")[:10]
+            try:
+                monthly_return = float(point.get("Return"))
+            except (TypeError, ValueError):
+                continue
+            if _ISO_DATE_RE.fullmatch(month_end) and math.isfinite(monthly_return):
+                deduplicated[month_end] = monthly_return
+        series.append({
+            "instrumentId": instrument_id,
+            "legalName": payload.get("LegalName") or instrument_id,
+            "points": sorted(deduplicated.items()),
+        })
+
+    return jsonify({"series": series}), 200
+
+
 def _normalize_bloomberg_ticker(ticker: str) -> str:
     """Bloomberg API expects 'Equity' not 'EQUITY' for equity securities."""
     if not ticker:
@@ -4818,7 +4885,7 @@ if __name__ == "__main__":
         print(f"Supabase URL: {SUPABASE_URL}")
         print(f"Listening on http://127.0.0.1:{SERVICE_PORT}")
         print()
-        print("Endpoints: /health, /bloomberg-update, /bloomberg/mergers/refresh, /bloomberg/quotes, /quotes, /instrument-search, /historical, /historical-debug, /reference, /bds,")
+        print("Endpoints: /health, /bloomberg-update, /bloomberg/mergers/refresh, /bloomberg/quotes, /quotes, /instrument-search, /fundata-monthly, /historical, /historical-debug, /reference, /bds,")
         print("  /economic-calendar, /clarifi/process, /clarifi/list, /ehp/process, /sggg/portfolio,")
         print("  /sggg/options-tax-reconciliation,")
         print("  /emsx/options-closeout-check,")

@@ -166,7 +166,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
 # Uses BLPAPI (BQL only available in BQuant IDE)
 SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
-DATA_BRIDGE_BUILD = "2026-08-14-fundata-proxy"
+DATA_BRIDGE_BUILD = "2026-08-15-bloomberg-provider-errors"
 
 _ecal_logger = logging.getLogger("data_bridge.economic_calendar")
 if not _ecal_logger.handlers:
@@ -519,7 +519,10 @@ def health():
     is_available = bloomberg_client.is_available()
     client_info = {
         "client_type": type(bloomberg_client).__name__,
-        "available": is_available
+        "available": is_available,
+        "request_status": "blocked" if getattr(bloomberg_client, "last_request_error", None) else "no_block_detected",
+        "last_request_error": getattr(bloomberg_client, "last_request_error", None),
+        "last_request_error_at": getattr(bloomberg_client, "last_request_error_at", None),
     }
     
     status_code = 200 if is_available else 503

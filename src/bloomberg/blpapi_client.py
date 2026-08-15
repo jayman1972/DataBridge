@@ -120,6 +120,63 @@ class BLPAPIClient(BloombergClientBase):
         self.port = port
         self.service = "//blp/refdata"
         self._session = None
+        # A Bloomberg Desktop API session can connect successfully while
+        # refdata requests are being rejected (for example LIMIT /
+        # WORKFLOW_REVIEW_NEEDED).  Keep the most recent provider-level error
+        # so /health can distinguish socket connectivity from usable data.
+        self.last_request_error: Optional[str] = None
+        self.last_request_error_at: Optional[str] = None
+
+    @staticmethod
+    def _element_string(element: Any, name: str) -> Optional[str]:
+        try:
+            if element is not None and element.hasElement(name):
+                value = element.getElementAsString(name)
+                return str(value).strip() or None
+        except Exception:
+            return None
+        return None
+
+    def _raise_for_response_error(self, message: Any) -> None:
+        """Raise provider-level errors instead of returning a false empty result.
+
+        Bloomberg puts account/workflow failures in a top-level
+        ``responseError`` element.  Security/field parsers never see those
+        responses, so ignoring the element makes a valid security look as if
+        it has no identity or price history.
+        """
+        try:
+            has_error = message.hasElement("responseError")
+        except Exception:
+            has_error = False
+        if not has_error:
+            return
+
+        error = message.getElement("responseError")
+        category = self._element_string(error, "category")
+        subcategory = self._element_string(error, "subcategory")
+        provider_message = self._element_string(error, "message")
+        source = self._element_string(error, "source")
+        try:
+            code = str(error.getElementAsInteger("code")) if error.hasElement("code") else None
+        except Exception:
+            code = None
+
+        classification = " / ".join(part for part in (category, subcategory) if part)
+        details = provider_message or "Bloomberg rejected the request"
+        suffix_parts = [part for part in (f"code {code}" if code else None, source) if part]
+        suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
+        rendered = f"Bloomberg request blocked"
+        if classification:
+            rendered += f": {classification}"
+        rendered += f" - {details}{suffix}"
+        self.last_request_error = rendered
+        self.last_request_error_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        raise Exception(rendered)
+
+    def _clear_request_error(self) -> None:
+        self.last_request_error = None
+        self.last_request_error_at = None
     
     def is_available(self) -> bool:
         """Check if blpapi is available and Terminal is running"""
@@ -294,6 +351,7 @@ class BLPAPIClient(BloombergClientBase):
 
                 if event.eventType() in (blpapi.Event.RESPONSE, blpapi.Event.PARTIAL_RESPONSE):
                     for msg in event:
+                        self._raise_for_response_error(msg)
                         if msg.hasElement("securityData"):
                             # HistoricalDataRequest: securityData is single element, not array
                             securityData = msg.getElement("securityData")
@@ -371,6 +429,7 @@ class BLPAPIClient(BloombergClientBase):
                 if event.eventType() == blpapi.Event.RESPONSE:
                     break
 
+            self._clear_request_error()
             if _debug:
                 print(f"[BLPAPI] Response: {len(records)} records for {ticker!r}")
             return records
@@ -432,6 +491,7 @@ class BLPAPIClient(BloombergClientBase):
                 
                 if event.eventType() in (blpapi.Event.RESPONSE, blpapi.Event.PARTIAL_RESPONSE):
                     for msg in event:
+                        self._raise_for_response_error(msg)
                         if msg.hasElement("securityData"):
                             security_data_array = msg.getElement("securityData")
                             # Use indexed access (documented BLPAPI pattern); .values() is unreliable across builds
@@ -466,6 +526,7 @@ class BLPAPIClient(BloombergClientBase):
                 if event.eventType() == blpapi.Event.RESPONSE:
                     break
             
+            self._clear_request_error()
             return result
         
         finally:

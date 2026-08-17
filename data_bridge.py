@@ -233,7 +233,8 @@ _ibkr_history_semaphore = threading.Semaphore(5)  # max 5 concurrent history req
 USERNAME = os.getenv("USERNAME") or os.getenv("USER") or "user"
 CLARIFI_DIR = os.getenv("CLARIFI_DIR", f"C:\\Users\\{USERNAME}\\OneDrive\\Desktop\\EHP_Files\\DailyExports from Clarifi\\")
 
-# Bloomberg field mappings (matches existing mappings)
+# Bloomberg field mappings (matches existing mappings).
+# Bollinger breadth is BQL-owned and intentionally absent from DAPI requests.
 BLOOMBERG_MAPPINGS = [
     {"databaseColumn": "gdp_nowcast_ny_fed", "ticker": "NOWCYQCP Index", "field": "PX_LAST"},
     {"databaseColumn": "gdp_nowcast_atlanta_fed", "ticker": "GDGCAFJP Index", "field": "PX_LAST"},
@@ -244,13 +245,12 @@ BLOOMBERG_MAPPINGS = [
     {"databaseColumn": "cpi_core_cleveland_fed", "ticker": "CLEVXCYC Index", "field": "PX_LAST"},
     {"databaseColumn": "spx_index_close_price", "ticker": "SPX Index", "field": "PX_LAST"},
     {"databaseColumn": "spx_pct_members_14d_rsi_above_70", "ticker": "SPX Index", "field": "PCT_MEMB_WITH_14D_RSI_GT_70"},
-    {"databaseColumn": "spx_pct_members_above_upper_bollinger", "ticker": "SPX Index", "field": "PCT_MEMB_PX_ABV_UPPER_BOLL_BAND"},
     {"databaseColumn": "spx_up_vs_down_volume", "ticker": ".UPVSDOWN U Index", "field": "PX_LAST"},
     {"databaseColumn": "spx_pct_members_new_52w_high", "ticker": "SPX Index", "field": "PCT_MEMBERS_WITH_NEW_52W_HIGHS"},
+    {"databaseColumn": "spx_pct_members_new_52w_low", "ticker": "SPX Index", "field": "PCT_MEMBERS_WITH_NEW_52_WK_LOWS"},
     {"databaseColumn": "spx_30d_rsi", "ticker": "SPX Index", "field": "RSI 30D"},
     {"databaseColumn": "spx_rsi_14d", "ticker": "SPX Index", "field": "RSI 14D"},
     {"databaseColumn": "vix_25_delta_call_to_put_ratio", "ticker": ".25DVIX U Index", "field": "PX_LAST"},
-    {"databaseColumn": "spx_pct_members_below_lower_bollinger", "ticker": "SPX Index", "field": "PCT_MEMB_PX_BLW_LWR_BOLL_BAND"},
     {"databaseColumn": "spx_pct_members_above_50d_ma", "ticker": "SPX Index", "field": "PCT_MEMB_PX_GT_50D_MOV_AVG"},
     {"databaseColumn": "spx_pct_members_above_10d_ma", "ticker": "SPX Index", "field": "PCT_MEMB_PX_GT_10D_MOV_AVG"},
     {"databaseColumn": "spx_pct_members_14d_rsi_below_30", "ticker": "SPX Index", "field": "PCT_MEMB_WITH_14D_RSI_LT_30"},

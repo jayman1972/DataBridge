@@ -4,6 +4,11 @@ Field mapping between Bloomberg Terminal API fields and BQL data items.
 
 from typing import Optional
 
+BQL_OWNED_FIELDS = {
+    "PCT_MEMB_PX_ABV_UPPER_BOLL_BAND",
+    "PCT_MEMB_PX_BLW_LWR_BOLL_BAND",
+}
+
 # Mapping from Bloomberg Terminal API field names to BQL data item names
 # Note: Some fields might need special handling in BQL (e.g., index statistics)
 FIELD_MAPPING = {
@@ -20,9 +25,8 @@ FIELD_MAPPING = {
     
     # Index membership statistics (these are complex in BQL)
     "PCT_MEMB_WITH_14D_RSI_GT_70": None,  # Needs special handling
-    "PCT_MEMB_PX_ABV_UPPER_BOLL_BAND": None,  # Needs special handling
     "PCT_MEMBERS_WITH_NEW_52W_HIGHS": None,  # Needs special handling
-    "PCT_MEMB_PX_BLW_LWR_BOLL_BAND": None,  # Needs special handling
+    "PCT_MEMBERS_WITH_NEW_52_WK_LOWS": None,  # Needs special handling
     "PCT_MEMB_PX_GT_50D_MOV_AVG": None,  # Needs special handling
     "PCT_MEMB_PX_GT_10D_MOV_AVG": None,  # Needs special handling
     "PCT_MEMB_WITH_14D_RSI_LT_30": None,  # Needs special handling
@@ -38,6 +42,10 @@ def get_bql_field_name(terminal_field: str) -> Optional[str]:
     Returns:
         BQL data item name (e.g., "px_last") or None if not mappable
     """
+    # BQL-owned analytics are deliberately not eligible for a DAPI mapping.
+    if terminal_field in BQL_OWNED_FIELDS:
+        return None
+
     # Direct mapping
     if terminal_field in FIELD_MAPPING:
         return FIELD_MAPPING[terminal_field]

@@ -580,6 +580,150 @@ class BLPAPIClient(BloombergClientBase):
                 deduped.append(s)
         return deduped
 
+    def _extract_bulk_field_rows(self, bulk_element: Any) -> list[dict[str, Any]]:
+        """Preserve every column in a Bloomberg bulk-data row.
+
+        ``get_bds_data`` intentionally reduces index-member tables to one
+        string per row. Corporate-action review needs the complete row (dates,
+        amounts, ratios, flags, and vendor descriptors), so it uses this
+        separate lossless parser.
+        """
+        rows: list[dict[str, Any]] = []
+        if bulk_element is None or bulk_element.isNull():
+            return rows
+        row_count = bulk_element.numValues()
+        for index in range(row_count):
+            element_getter = getattr(bulk_element, "getValueAsElement", None)
+            row = (
+                element_getter(index)
+                if callable(element_getter)
+                else bulk_element.getValue(index)
+            )
+            if row is None:
+                continue
+            if hasattr(row, "numElements") and callable(
+                getattr(row, "numElements", None)
+            ):
+                parsed: dict[str, Any] = {}
+                for column_index in range(row.numElements()):
+                    column = row.getElement(column_index)
+                    if column.isNull():
+                        continue
+                    value = _coerce_blp_reference_value(column.getValue())
+                    if isinstance(value, (date, datetime)):
+                        value = value.isoformat()
+                    parsed[str(column.name())] = value
+                if parsed:
+                    rows.append(parsed)
+                continue
+            value = _coerce_blp_reference_value(row)
+            if isinstance(value, (date, datetime)):
+                value = value.isoformat()
+            rows.append({"value": value})
+        return rows
+
+    def get_bds_rows(
+        self,
+        ticker: str,
+        fields: list[str],
+        overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Fetch structured BDS rows for one security in one request.
+
+        This is deliberately single-security. It exists for incident-driven
+        CACS inspection and must not become a broad-universe scan primitive.
+        """
+        if not ticker or not fields:
+            raise ValueError("ticker and fields are required")
+
+        session = self._create_session()
+        if not session:
+            raise RuntimeError(
+                "Failed to start Bloomberg session. "
+                "Is Bloomberg Terminal running and logged in?"
+            )
+
+        try:
+            ref_data_service = session.getService(self.service)
+            blp_request = ref_data_service.createRequest("ReferenceDataRequest")
+            blp_request.getElement("securities").appendValue(ticker)
+            for field in fields:
+                blp_request.getElement("fields").appendValue(field)
+
+            if overrides:
+                overrides_element = blp_request.getElement("overrides")
+                for field_id, raw_value in overrides.items():
+                    normalized_id = str(field_id or "").strip()
+                    normalized_value = str(raw_value or "").strip()
+                    if not normalized_id or not normalized_value:
+                        continue
+                    override = overrides_element.appendElement()
+                    override.setElement("fieldId", normalized_id)
+                    override.setElement("value", normalized_value)
+
+            session.sendRequest(blp_request)
+            field_rows: dict[str, list[dict[str, Any]]] = {
+                field: [] for field in fields
+            }
+            errors: list[str] = []
+
+            while True:
+                event = session.nextEvent(500)
+                if event.eventType() in (
+                    blpapi.Event.RESPONSE,
+                    blpapi.Event.PARTIAL_RESPONSE,
+                ):
+                    for message in event:
+                        self._raise_for_response_error(message)
+                        if not message.hasElement("securityData"):
+                            continue
+                        security_data_array = message.getElement("securityData")
+                        for item_index in range(security_data_array.numValues()):
+                            security_data = security_data_array.getValueAsElement(
+                                item_index
+                            )
+                            if security_data.hasElement("securityError"):
+                                security_error = security_data.getElement(
+                                    "securityError"
+                                )
+                                raise RuntimeError(
+                                    f"{security_error.getElementAsString('category')} - "
+                                    f"{security_error.getElementAsString('message')}"
+                                )
+                            field_data = security_data.getElement("fieldData")
+                            for field in fields:
+                                if field_data.hasElement(field):
+                                    parsed = self._extract_bulk_field_rows(
+                                        field_data.getElement(field)
+                                    )
+                                    field_rows[field].extend(parsed)
+
+                            if security_data.hasElement("fieldExceptions"):
+                                exceptions = security_data.getElement(
+                                    "fieldExceptions"
+                                )
+                                for exception_index in range(
+                                    exceptions.numValues()
+                                ):
+                                    exception = exceptions.getValueAsElement(
+                                        exception_index
+                                    )
+                                    field_id = exception.getElementAsString(
+                                        "fieldId"
+                                    )
+                                    error_info = exception.getElement("errorInfo")
+                                    errors.append(
+                                        f"{field_id}: "
+                                        f"{error_info.getElementAsString('message')}"
+                                    )
+                if event.eventType() == blpapi.Event.RESPONSE:
+                    break
+
+            self._clear_request_error()
+            return {"fields": field_rows, "errors": errors}
+        finally:
+            session.stop()
+
     def get_bds_data(
         self,
         ticker: str,

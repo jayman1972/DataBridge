@@ -1265,6 +1265,107 @@ def bds():
         return jsonify({"error": str(e)}), 500
 
 
+CACS_BDS_FIELDS = (
+    "DVD_HIST_ALL",
+    "EQY_DVD_HIST_SPLITS",
+    "EQY_DVD_ADJUST_FACT",
+)
+CACS_REFERENCE_FIELDS = (
+    "TICKER",
+    "SECURITY_NAME",
+    "ID_BB_GLOBAL",
+    "ID_BB_GLOBAL_SHARE_CLASS_LEVEL",
+    "ID_ISIN",
+    "ID_CUSIP",
+    "ID_SEDOL1",
+    "EQY_PRIM_EXCH",
+    "CRNCY",
+    "LAST_TRADEABLE_DT",
+)
+
+
+@app.route("/corporate-actions", methods=["POST"])
+def corporate_actions():
+    """Run one bounded Bloomberg CACS inspection for one security.
+
+    This endpoint intentionally accepts a singular ``symbol`` rather than a
+    list. It is used after a ticker becomes unresponsive, not as a Bloomberg
+    universe scanner.
+    """
+    if bloomberg_client is None:
+        return jsonify({"error": "Bloomberg client not available"}), 503
+    if not hasattr(bloomberg_client, "get_bds_rows"):
+        return jsonify(
+            {"error": "Bloomberg client does not support structured BDS rows"}
+        ), 501
+
+    data = request.get_json() or {}
+    symbol = str(data.get("symbol") or "").strip()
+    if not symbol:
+        return jsonify({"error": "symbol is required"}), 400
+    if len(symbol) > 200:
+        return jsonify({"error": "symbol is too long"}), 400
+
+    requested_fields = data.get("fields") or list(CACS_BDS_FIELDS)
+    if not isinstance(requested_fields, list):
+        return jsonify({"error": "fields must be an array"}), 400
+    fields = [str(field).strip() for field in requested_fields if str(field).strip()]
+    unsupported = sorted(set(fields) - set(CACS_BDS_FIELDS))
+    if unsupported:
+        return jsonify(
+            {"error": f"unsupported corporate-action fields: {unsupported}"}
+        ), 400
+    if not fields:
+        return jsonify({"error": "at least one field is required"}), 400
+
+    today = datetime.now(timezone.utc).date()
+    start_date_raw = str(data.get("start_date") or (today - timedelta(days=45)))
+    end_date_raw = str(data.get("end_date") or (today + timedelta(days=45)))
+    try:
+        start_date = date_type.fromisoformat(start_date_raw)
+        end_date = date_type.fromisoformat(end_date_raw)
+    except ValueError:
+        return jsonify({"error": "start_date and end_date must be YYYY-MM-DD"}), 400
+    if end_date < start_date:
+        return jsonify({"error": "end_date must not precede start_date"}), 400
+    if (end_date - start_date).days > 800:
+        return jsonify({"error": "corporate-action window cannot exceed 800 days"}), 400
+
+    normalized = _normalize_bloomberg_ticker(symbol)
+    overrides = {
+        "DVD_START_DT": start_date.strftime("%Y%m%d"),
+        "DVD_END_DT": end_date.strftime("%Y%m%d"),
+    }
+    cacs = bloomberg_client.get_bds_rows(
+        ticker=normalized,
+        fields=fields,
+        overrides=overrides,
+    )
+    reference_payload = bloomberg_client.get_reference_data(
+        [normalized],
+        list(CACS_REFERENCE_FIELDS),
+    )
+    reference = reference_payload.get(normalized, {})
+    has_cacs_rows = any(bool(rows) for rows in cacs.get("fields", {}).values())
+    has_reference_identity = any(
+        reference.get(field) not in (None, "") for field in CACS_REFERENCE_FIELDS
+    )
+    return jsonify(
+        {
+            "success": has_cacs_rows or has_reference_identity,
+            "mode": "single_security_incident",
+            "security": normalized,
+            "window": {
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat(),
+            },
+            "fields": cacs.get("fields", {}),
+            "reference": reference,
+            "errors": cacs.get("errors", []),
+        }
+    ), 200
+
+
 # ---------------------------------------------------------------------------
 # SGGG / PSC connection test (for IP whitelist / OpenVPN checks)
 # ---------------------------------------------------------------------------
@@ -4890,7 +4991,7 @@ if __name__ == "__main__":
         print(f"Supabase URL: {SUPABASE_URL}")
         print(f"Listening on http://127.0.0.1:{SERVICE_PORT}")
         print()
-        print("Endpoints: /health, /bloomberg-update, /bloomberg/mergers/refresh, /bloomberg/quotes, /quotes, /instrument-search, /fundata-monthly, /historical, /historical-debug, /reference, /bds,")
+        print("Endpoints: /health, /bloomberg-update, /bloomberg/mergers/refresh, /bloomberg/quotes, /quotes, /instrument-search, /fundata-monthly, /historical, /historical-debug, /reference, /bds, /corporate-actions,")
         print("  /economic-calendar, /clarifi/process, /clarifi/list, /ehp/process, /sggg/portfolio,")
         print("  /sggg/options-tax-reconciliation,")
         print("  /emsx/options-closeout-check,")

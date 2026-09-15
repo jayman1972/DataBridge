@@ -140,8 +140,8 @@ echo Using CLARIFI_DIR=%CLARIFI_DIR%
 
 REM Check if Data Bridge is already running (idempotent)
 echo Checking for existing Data Bridge on port %PORT%...
-REM Kill any existing data_bridge.py listeners so the tunnel starts cleanly.
-REM (Only targets python processes whose command line includes data_bridge.py.)
+REM Kill any existing DataBridge listeners so the tunnel starts cleanly.
+REM (Only targets python processes whose command line includes a DataBridge entry point.)
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$port=%PORT%; " ^
   "$conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue; " ^
@@ -149,7 +149,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "  foreach ($c in $conns) { " ^
   "    $procId = $c.OwningProcess; " ^
   "    try { $p = Get-CimInstance Win32_Process -Filter \"ProcessId=$procId\" -ErrorAction SilentlyContinue } catch { $p = $null }; " ^
-  "    if ($p -and $p.CommandLine -match 'data_bridge\.py') { " ^
+  "    if ($p -and $p.CommandLine -match 'data_bridge(_runtime)?\.py') { " ^
   "      Write-Host \"Stopping existing Data Bridge (PID $procId)...\" -ForegroundColor Yellow; " ^
   "      try { Stop-Process -Id $procId -Force -ErrorAction Stop } catch { Write-Host \"  Failed to stop PID ${procId} - $($_.Exception.Message)\" -ForegroundColor Red } " ^
   "    } " ^
@@ -158,7 +158,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 
 echo Starting Data Bridge service...
 set DATA_BRIDGE_DEBUG=1
-start "Data Bridge Service" cmd /k "cd /d %~dp0 && set DATA_BRIDGE_DEBUG=1 && python data_bridge.py"
+start "Data Bridge Service" cmd /k "cd /d %~dp0 && set DATA_BRIDGE_DEBUG=1 && python data_bridge_runtime.py"
 timeout /t 3 /nobreak >nul
 
 REM Check for ngrok (local ngrok.exe or in PATH)

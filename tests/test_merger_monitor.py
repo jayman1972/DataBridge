@@ -215,6 +215,23 @@ class BloombergMergerMonitorTests(unittest.TestCase):
         self.assertIs(row["acquirer_ticker_is_valid"], False)
         self.assertIs(row["eligible_for_model_builder"], True)
 
+    def test_reviewed_non_acquisition_stays_ineligible(self) -> None:
+        row = build_ingest_row(
+            {
+                "action_id": "233056097",
+                "announced_date": "2023-02-01",
+                "target_is_private": False,
+                "model_builder_review_status": "excluded",
+            },
+            {
+                "CA_MA_ACQUIRER_TICKER": "APO US Equity",
+                "CA_MA_TARGET_TICKER": "WDC US Equity",
+                "CA_MA_DEAL_STATUS": "Completed",
+            },
+        )
+
+        self.assertIs(row["eligible_for_model_builder"], False)
+
     def test_lifecycle_refresh_preserves_stock_funding_metrics(self) -> None:
         row = build_ingest_row(
             {
@@ -306,6 +323,16 @@ class BloombergMergerMonitorTests(unittest.TestCase):
                 5,
             )
         )
+        self.assertFalse(
+            should_monitor_deal(
+                {
+                    "status": "Completed",
+                    "actual_completion_date": None,
+                },
+                date(2026, 7, 26),
+                5,
+            )
+        )
 
     def test_ticker_classification(self) -> None:
         self.assertEqual(ticker_classification("AAA US Equity"), (1, True))
@@ -335,6 +362,13 @@ class BloombergMergerMonitorTests(unittest.TestCase):
                 "announced_date": "2026-07-20",
                 "status": "Pending",
                 "target_is_private": True,
+            },
+            {
+                "action_id": "103",
+                "announced_date": "2026-07-20",
+                "status": "Pending",
+                "target_is_private": False,
+                "model_builder_review_status": "excluded",
             },
         ])
         result = refresh_open_merger_actions(

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional
-
+from collections.abc import Iterable
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 MERGER_ACTION_FIELDS = [
     "CA_MA_CASH_TERMS",
@@ -53,11 +53,11 @@ def _is_missing(value: Any) -> bool:
     }
 
 
-def _text(value: Any) -> Optional[str]:
+def _text(value: Any) -> str | None:
     return None if _is_missing(value) else str(value).strip()
 
 
-def _date_iso(value: Any) -> Optional[str]:
+def _date_iso(value: Any) -> str | None:
     if _is_missing(value):
         return None
     if isinstance(value, datetime):
@@ -71,13 +71,13 @@ def _date_iso(value: Any) -> Optional[str]:
         pass
     for fmt in ("%Y%m%d", "%m/%d/%Y", "%d/%m/%Y"):
         try:
-            return datetime.strptime(text, fmt).date().isoformat()
+            return datetime.strptime(text, fmt).replace(tzinfo=UTC).date().isoformat()
         except ValueError:
             continue
     return None
 
 
-def _leading_number(value: Any) -> Optional[float]:
+def _leading_number(value: Any) -> float | None:
     if _is_missing(value):
         return None
     if isinstance(value, (int, float)):
@@ -86,7 +86,7 @@ def _leading_number(value: Any) -> Optional[float]:
     return float(match.group(0)) if match else None
 
 
-def parse_stock_exchange_ratio(value: Any) -> Optional[float]:
+def parse_stock_exchange_ratio(value: Any) -> float | None:
     if _is_missing(value):
         return None
     text = str(value).strip()
@@ -98,7 +98,7 @@ def parse_stock_exchange_ratio(value: Any) -> Optional[float]:
     return _leading_number(text)
 
 
-def parse_cash_consideration_per_share(value: Any) -> Optional[float]:
+def parse_cash_consideration_per_share(value: Any) -> float | None:
     if _is_missing(value):
         return None
     text = str(value).strip()
@@ -118,7 +118,7 @@ def _normalized_payment_type(value: Any) -> str:
     )
 
 
-def _consideration_amount(value: Any) -> Optional[tuple[float, str, Optional[str]]]:
+def _consideration_amount(value: Any) -> tuple[float, str, str | None] | None:
     """Return a comparable consideration amount, basis, and currency.
 
     Bloomberg Action terms can be fixed per-share amounts (``11.25/sh.``) or
@@ -148,9 +148,9 @@ def derive_stock_consideration_fraction(
     payment_type: Any,
     stock_terms: Any,
     cash_terms: Any,
-    acquirer_price_at_announcement: Optional[float] = None,
-    acquirer_price_currency: Optional[str] = None,
-) -> Optional[float]:
+    acquirer_price_at_announcement: float | None = None,
+    acquirer_price_currency: str | None = None,
+) -> float | None:
     """Derive the 0..1 stock-funded share without treating unknown as cash."""
     payment = _normalized_payment_type(payment_type)
     if "_OR_" in payment or "ELECT" in payment:
@@ -199,7 +199,7 @@ def derive_stock_consideration_fraction(
     return None
 
 
-def payment_uses_stock(payment_type: Any, stock_terms: Any) -> Optional[bool]:
+def payment_uses_stock(payment_type: Any, stock_terms: Any) -> bool | None:
     if parse_stock_exchange_ratio(stock_terms) is not None:
         return True
     payment = str(payment_type or "").strip().upper().replace(" ", "_")
@@ -210,7 +210,7 @@ def payment_uses_stock(payment_type: Any, stock_terms: Any) -> Optional[bool]:
     return None
 
 
-def _number(value: Any) -> Optional[float]:
+def _number(value: Any) -> float | None:
     if _is_missing(value):
         return None
     try:
@@ -226,8 +226,8 @@ def _latest_historical_value(
     announced_date: str,
     field: str,
     *,
-    currency: Optional[str] = None,
-) -> Optional[float]:
+    currency: str | None = None,
+) -> float | None:
     end_date = date.fromisoformat(announced_date)
     start_date = end_date - timedelta(days=10)
     records = bloomberg_client.get_historical_data(
@@ -252,7 +252,7 @@ def _latest_historical_value(
     return _number(eligible[-1].get(field))
 
 
-def _historical_equity_symbol(value: Any) -> Optional[str]:
+def _historical_equity_symbol(value: Any) -> str | None:
     symbol = _text(value)
     if not symbol:
         return None
@@ -276,10 +276,10 @@ def _native_currency_for_acquirer(value: Any, stored_currency: Any) -> str:
 
 
 def enrich_stock_funding_metrics(
-    row: Dict[str, Any],
+    row: dict[str, Any],
     bloomberg_client: Any,
-    history_cache: Dict[tuple[str, str, str, Optional[str]], Optional[float]],
-    warnings: List[str],
+    history_cache: dict[tuple[str, str, str, str | None], float | None],
+    warnings: list[str],
 ) -> None:
     """Add native-currency and USD announcement-date funding metrics."""
     source_symbol = _text(row.get("acquirer_bloomberg_symbol"))
@@ -320,7 +320,7 @@ def enrich_stock_funding_metrics(
     announced_date = _date_iso(row.get("announced_date"))
     valid_symbol = row.get("acquirer_ticker_is_valid") is True
 
-    def history(field: str, currency: Optional[str] = None) -> Optional[float]:
+    def history(field: str, currency: str | None = None) -> float | None:
         if not symbol or not announced_date:
             return None
         key = (symbol, announced_date, field, currency)
@@ -333,7 +333,17 @@ def enrich_stock_funding_metrics(
                     field,
                     currency=currency,
                 )
-            except Exception as exc:  # enrichment gaps must not break lifecycle updates
+            except (
+                AttributeError,
+                ConnectionError,
+                ImportError,
+                KeyError,
+                NotImplementedError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:  # enrichment gaps must not break lifecycle updates
                 history_cache[key] = None
                 warnings.append(
                     f"{row.get('action_id')} {source_symbol or symbol} {field}: {exc}"
@@ -481,7 +491,7 @@ def enrich_stock_funding_metrics(
             )
 
 
-def split_equity_symbols(value: Any) -> List[str]:
+def split_equity_symbols(value: Any) -> list[str]:
     if _is_missing(value):
         return []
     return [
@@ -500,13 +510,13 @@ def ticker_classification(value: Any) -> tuple[int, bool]:
     )
 
 
-def normalize_status(value: Any) -> Optional[str]:
+def normalize_status(value: Any) -> str | None:
     text = _text(value)
     return text.upper().replace(" ", "_") if text else None
 
 
 def should_monitor_deal(
-    row: Dict[str, Any],
+    row: dict[str, Any],
     as_of_date: date,
     terminal_recheck_days: int,
 ) -> bool:
@@ -517,16 +527,20 @@ def should_monitor_deal(
         row.get("actual_completion_date") or row.get("withdrawal_date")
     )
     if terminal_date is None:
-        return True
+        # The ModelBuilder uses the first point-in-time terminal observation
+        # when Bloomberg omits the historical completion date. Re-requesting
+        # the same terminal Action every day only moves its observation clock
+        # forward and can make a completed deal appear perpetually active.
+        return False
     return date.fromisoformat(terminal_date) >= (
         as_of_date - timedelta(days=max(0, terminal_recheck_days))
     )
 
 
 def build_ingest_row(
-    existing: Dict[str, Any],
-    reference: Dict[str, Any],
-) -> Dict[str, Any]:
+    existing: dict[str, Any],
+    reference: dict[str, Any],
+) -> dict[str, Any]:
     status = normalize_status(
         reference.get("CA_MA_DEAL_STATUS") or existing.get("status")
     )
@@ -563,7 +577,7 @@ def build_ingest_row(
         # impossible chronology; the value can be rechecked on a later refresh.
         complete_date = None
 
-    row: Dict[str, Any] = {
+    row: dict[str, Any] = {
         "action_id": str(existing["action_id"]).strip(),
         "announced_date": announced_date,
         "expected_completion_date": expected_completion_date,
@@ -576,7 +590,10 @@ def build_ingest_row(
         "target_is_private": existing.get("target_is_private"),
         "acquirer_ticker_count": ticker_count,
         "acquirer_ticker_is_valid": ticker_is_valid,
-        "eligible_for_model_builder": existing.get("target_is_private") is False,
+        "eligible_for_model_builder": (
+            existing.get("target_is_private") is False
+            and existing.get("model_builder_review_status") != "excluded"
+        ),
         "uses_stock_consideration": payment_uses_stock(payment_type, stock_terms),
         "stock_exchange_ratio": parse_stock_exchange_ratio(stock_terms),
         "cash_consideration_per_share":
@@ -620,7 +637,7 @@ def build_ingest_row(
     return {key: value for key, value in row.items() if value is not None}
 
 
-def _response_data(response: Any) -> List[Dict[str, Any]]:
+def _response_data(response: Any) -> list[dict[str, Any]]:
     if response is None:
         return []
     data = getattr(response, "data", None)
@@ -631,10 +648,11 @@ def _response_data(response: Any) -> List[Dict[str, Any]]:
     return list(data or [])
 
 
-def load_merger_deals(supabase: Any) -> List[Dict[str, Any]]:
+def load_merger_deals(supabase: Any) -> list[dict[str, Any]]:
     selected = (
         "action_id,announced_date,status,actual_completion_date,withdrawal_date,"
         "acquirer_bloomberg_symbol,target_bloomberg_symbol,target_is_private,"
+        "model_builder_review_status,model_builder_review_reason,"
         "currency,deal_value_native,deal_value_usd,"
         "acquirer_market_cap_at_announcement_native,"
         "acquirer_market_cap_at_announcement_usd,"
@@ -644,7 +662,7 @@ def load_merger_deals(supabase: Any) -> List[Dict[str, Any]]:
         "stock_issuance_to_acquirer_market_cap,"
         "stock_consideration_calculation_method"
     )
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     page_size = 1000
     offset = 0
     while True:
@@ -662,7 +680,7 @@ def load_merger_deals(supabase: Any) -> List[Dict[str, Any]]:
     return rows
 
 
-def _chunks(values: List[Dict[str, Any]], size: int) -> Iterable[List[Dict[str, Any]]]:
+def _chunks(values: list[dict[str, Any]], size: int) -> Iterable[list[dict[str, Any]]]:
     for index in range(0, len(values), size):
         yield values[index:index + size]
 
@@ -675,9 +693,9 @@ def _is_statement_timeout(error: Exception) -> bool:
 def _ingest_merger_rows(
     supabase: Any,
     as_of_date: date,
-    rows: List[Dict[str, Any]],
-    rpc_results: List[Any],
-    errors: List[str],
+    rows: list[dict[str, Any]],
+    rpc_results: list[Any],
+    errors: list[str],
 ) -> None:
     """Write one database batch, bisecting only when PostgreSQL times out.
 
@@ -734,7 +752,7 @@ def refresh_open_merger_actions(
     database_batch_size: int = 10,
     terminal_recheck_days: int = 5,
     dry_run: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if supabase is None:
         raise RuntimeError("Supabase client is not configured")
     if bloomberg_client is None:
@@ -745,13 +763,14 @@ def refresh_open_merger_actions(
         row
         for row in all_deals
         if row.get("target_is_private") is not True
+        and row.get("model_builder_review_status") != "excluded"
         and should_monitor_deal(row, as_of_date, terminal_recheck_days)
     ]
-    errors: List[str] = []
-    warnings: List[str] = []
-    ingest_rows: List[Dict[str, Any]] = []
-    history_cache: Dict[
-        tuple[str, str, str, Optional[str]], Optional[float]
+    errors: list[str] = []
+    warnings: list[str] = []
+    ingest_rows: list[dict[str, Any]] = []
+    history_cache: dict[
+        tuple[str, str, str, str | None], float | None
     ] = {}
     for batch in _chunks(candidates, max(1, min(int(batch_size), 100))):
         action_security_by_id = {
@@ -781,7 +800,7 @@ def refresh_open_merger_actions(
             )
             ingest_rows.append(row)
 
-    rpc_results: List[Any] = []
+    rpc_results: list[Any] = []
     if not dry_run:
         for batch in _chunks(
             ingest_rows,

@@ -55,6 +55,8 @@ PORT=5000
 | `POST /bloomberg/mergers/refresh` | market-dashboard merger lifecycle update |
 | `POST /economic-calendar` | market-dashboard refresh-economic-calendar |
 | `GET/POST /sggg/portfolio` | market-dashboard refresh-portfolio |
+| `POST /sggg/alphadesk-trade-file` | market-dashboard production trade export |
+| `POST /sggg/alphadesk-security-coverage` | authenticated production security/SEDOL validation |
 | `POST /clarifi/process` | market-dashboard update |
 | `POST /ehp/process` | market-dashboard update |
 

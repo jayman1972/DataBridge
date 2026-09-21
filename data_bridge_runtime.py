@@ -11,6 +11,15 @@ from bloomberg.etf_constituents import (
     fetch_etf_constituent_snapshots,
     normalize_etf_tickers,
 )
+from sggg.production_routes import register_sggg_production_routes
+
+data_bridge.DATA_BRIDGE_BUILD = "2026-09-21-alphadesk-production-guardrails"
+register_sggg_production_routes(
+    data_bridge.app,
+    supabase_client=data_bridge.supabase,
+    supabase_url=data_bridge.SUPABASE_URL,
+    service_key=data_bridge.SUPABASE_KEY,
+)
 
 
 @data_bridge.app.route("/bloomberg/etf-constituents", methods=["POST"])

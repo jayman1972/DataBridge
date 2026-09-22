@@ -13,7 +13,7 @@ from bloomberg.etf_constituents import (
 )
 from sggg.production_routes import register_sggg_production_routes
 
-data_bridge.DATA_BRIDGE_BUILD = "2026-09-21-alphadesk-production-guardrails"
+data_bridge.DATA_BRIDGE_BUILD = "2026-09-22-alphadesk-identity-resolution"
 register_sggg_production_routes(
     data_bridge.app,
     supabase_client=data_bridge.supabase,

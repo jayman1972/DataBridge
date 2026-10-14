@@ -92,6 +92,7 @@ from sggg.options_closeout import (
     select_live_underlying_quote,
 )
 from sggg.options_closeout_alert import collect_flagged_groups, should_run_closeout_alert
+from sggg.options_closeout_coverage import load_start_positions, finish_coverage
 
 from supabase import create_client, Client
 
@@ -317,7 +318,7 @@ def _compact_to_ymd(s: str) -> Optional[str]:
     return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
 
 
-def _psc_probe_snapshot_before(cursor, portfolio: str, report_compact: str, lookback_days: int = 14) -> Optional[str]:
+def _psc_probe_snapshot_before(cursor, portfolio: str, report_compact: str, lookback_days: int = 14, deadline: Optional[float] = None) -> Optional[str]:
     """
     Resolve latest POSN_DATE strictly before report_compact by probing likely dates with equality.
     This avoids expensive MAX()/ORDER BY scans which can time out on some PSC installs.
@@ -328,6 +329,8 @@ def _psc_probe_snapshot_before(cursor, portfolio: str, report_compact: str, look
         return None
 
     for back in range(1, max(1, int(lookback_days)) + 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("PSC closeout snapshot query budget exhausted")
         cand = report_date - timedelta(days=back)
         cand_compact = cand.strftime("%Y%m%d")
         cursor.execute(
@@ -557,15 +560,15 @@ def _is_us_market_hours() -> bool:
 
 
 def _eastern_today_iso() -> str:
-    """Current New York calendar date, used for same-day exercise checks."""
+    """Explicit Toronto date for same-day exercise checks; no host-clock fallback."""
     try:
         if HAS_ZONEINFO:
-            return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+            return datetime.now(ZoneInfo("America/Toronto")).date().isoformat()
         if HAS_PYTZ:
-            return datetime.now(pytz.timezone("America/New_York")).date().isoformat()
+            return datetime.now(pytz.timezone("America/Toronto")).date().isoformat()
     except Exception:
         pass
-    return datetime.now().date().isoformat()
+    raise RuntimeError("America/Toronto timezone data is unavailable")
 
 
 def _option_underlying_quotes(open_positions: List[dict]) -> Dict[str, dict]:
@@ -1964,13 +1967,18 @@ def _emsx_history_get_fills(
         filtered_out: List[dict] = []
         filtered_out_count = 0
 
+        deadline = time.monotonic() + 45
         while True:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("EMSX GetFills timed out before the final response")
             ev = session.nextEvent(5000)
             et = ev.eventType()
             for msg in ev:
                 if msg.correlationIds() and msg.correlationIds()[0].value() != corr.value():
                     continue
                 mtype = str(msg.messageType())
+                if msg.hasElement("responseError") or mtype in ("RequestFailure", "SessionTerminated", "ServiceDown"):
+                    raise RuntimeError("EMSX GetFills failed before a complete final response")
                 if mtype.lower().endswith("errorinfo") or mtype == "ErrorInfo":
                     # Semi-camel casing per docs
                     code = msg.getElementAsInteger("ERROR_CODE") if msg.hasElement("ERROR_CODE") else None
@@ -2596,105 +2604,73 @@ def emsx_options_closeout_check():
         # Optional: start-of-day positions from PSC (yesterday/last snapshot) to correctly interpret intraday exits.
         starting_net_by_security: Dict[str, float] = {}
         starting_positions_date = None
+        coverage = {"status": "incomplete", "issues": ["PSC starting positions were not requested"],
+                    "portfolios": [], "aggregation_scope": "security_net_across_funds"}
         if bool(data.get("use_psc_start_positions") is True):
-            try:
-                # Resolve PSC portfolios. For "All funds" (no specific mapping), aggregate all known portfolios.
-                portfolio = _psc_portfolio_from_request(data)
-                portfolios: List[str] = [portfolio] if portfolio else list(PSC_ALL_FUNDS_PORTFOLIOS)
-
-                # Use the latest snapshot strictly prior to the report date.
-                # This naturally handles weekends/holidays without needing a trading-day calendar.
-                report_compact = _ymd_to_compact(date_iso)
-                cache_key = f"v2|{report_compact}||{','.join(portfolios)}"
-                if cache_key in _PSC_START_POS_CACHE:
-                    starting_net_by_security = dict(_PSC_START_POS_CACHE.get(cache_key) or {})
-                    starting_positions_date = (_PSC_START_POS_CACHE_META.get(cache_key) or {}).get("starting_positions_date")
-                else:
-                    pyodbc, err = _pyodbc_or_503()
-                    if not err and pyodbc is not None:
-                        conn = pyodbc.connect("DSN=PSC_VIEWER")
-                        cursor = conn.cursor()
-
-                        def _accumulate_rows(rows: list):
-                            for rr in rows or []:
-                                desc_raw = (str(rr[0]).strip() if rr and rr[0] is not None else "")
-                                canon = _canonical_option_key(desc_raw)
-                                desc_key = _normalize_option_desc_key(desc_raw) or desc_raw.upper()
-                                sec = canon or desc_key
-                                ls = (str(rr[1]).strip().upper() if len(rr) > 1 and rr[1] is not None else "")
-                                qty = float(rr[2]) if len(rr) > 2 and rr[2] is not None else 0.0
-                                if not sec:
-                                    continue
-                                # PSC QUANTITY is already signed (shorts are typically negative).
-                                # Using LONG_SHORT to re-sign can double-flip and break aggregation across funds.
-                                signed = qty
-                                starting_net_by_security[sec] = starting_net_by_security.get(sec, 0.0) + signed
-
-                        placeholders = ",".join(["?"] * len(portfolios))
-                        sec_type_filter = "SECURITY_TYPE IN ('EquityOption','Equity Option')"
-
-                        if len(portfolios) == 1:
-                            # Single-fund fast path: one probe + one fetch.
-                            snap = _psc_probe_snapshot_before(cursor, portfolios[0], report_compact, lookback_days=14) or ""
-                            starting_positions_date = snap or None
-                            if snap:
-                                cursor.execute(
-                                    "SELECT DESCRIPTION, LONG_SHORT, QUANTITY, SECURITY_TYPE, PORTFOLIO FROM psc_position_history "
-                                    "WHERE PORTFOLIO = ? AND POSN_DATE = ? AND " + sec_type_filter,
-                                    (portfolios[0], snap),
-                                )
-                                _accumulate_rows(cursor.fetchall())
-                        else:
-                            # All-funds path: portfolios can have different latest snapshots.
-                            # Resolve a snapshot per portfolio (fast probes), then fetch per snapshot bucket.
-                            snap_by_portfolio: Dict[str, str] = {}
-                            for p in portfolios:
-                                snap = _psc_probe_snapshot_before(cursor, p, report_compact, lookback_days=14)
-                                if snap:
-                                    snap_by_portfolio[p] = snap
-
-                            snaps_used = sorted(set(snap_by_portfolio.values()))
-                            starting_positions_date = (max(snaps_used) if snaps_used else None)
-
-                            for snap in snaps_used:
-                                ps = [p for p, s in snap_by_portfolio.items() if s == snap]
-                                if not ps:
-                                    continue
-                                ps_placeholders = ",".join(["?"] * len(ps))
-                                cursor.execute(
-                                    "SELECT DESCRIPTION, LONG_SHORT, QUANTITY, SECURITY_TYPE, PORTFOLIO FROM psc_position_history "
-                                    f"WHERE PORTFOLIO IN ({ps_placeholders}) AND POSN_DATE = ? AND {sec_type_filter}",
-                                    tuple(ps) + (snap,),
-                                )
-                                _accumulate_rows(cursor.fetchall())
-
+            portfolio = _psc_portfolio_from_request(data)
+            portfolios = [portfolio] if portfolio else list(PSC_ALL_FUNDS_PORTFOLIOS)
+            minimum_snapshot_date = data.get("required_start_positions_date") or None
+            cache_key = f"v3|{date_iso}|{minimum_snapshot_date or ''}|{','.join(portfolios)}"
+            # Scheduled controls probe each portfolio on every check; interactive
+            # reruns may reuse a complete same-day PSC snapshot and its coverage.
+            cached = _PSC_START_POS_CACHE_META.get(cache_key) or {}
+            if not data.get("require_complete_coverage") and cached.get("coverage", {}).get("status") == "complete":
+                starting_net_by_security = dict(_PSC_START_POS_CACHE[cache_key])
+                coverage = cached["coverage"]
+            else:
+                conn = None
+                try:
+                    pyodbc, psc_error = _pyodbc_or_503()
+                    if psc_error or pyodbc is None:
+                        raise RuntimeError("PSC ODBC is unavailable")
+                    conn = pyodbc.connect("DSN=PSC_VIEWER", timeout=5)
+                    # pyodbc query timeout belongs to the connection and applies
+                    # to cursors created afterwards (not a Cursor attribute).
+                    conn.timeout = 2
+                    cursor = conn.cursor()
+                    starting_net_by_security, coverage = load_start_positions(
+                        cursor, portfolios, date_iso, _psc_probe_snapshot_before,
+                        _canonical_option_key, _normalize_option_desc_key, minimum_snapshot_date)
+                    if data.get("require_complete_coverage") and not minimum_snapshot_date:
+                        coverage["status"] = "incomplete"
+                        coverage["issues"].append("Required prior US-session snapshot date was not supplied")
+                    if coverage["status"] == "complete":
+                        _PSC_START_POS_CACHE[cache_key] = dict(starting_net_by_security)
+                        _PSC_START_POS_CACHE_META[cache_key] = {"coverage": coverage}
+                except Exception as psc_error:
+                    coverage = {"status": "incomplete", "issues": [f"PSC start positions unavailable: {psc_error}"],
+                                "portfolios": [], "aggregation_scope": "security_net_across_funds"}
+                finally:
+                    if conn is not None:
                         try:
                             conn.close()
                         except Exception:
                             pass
-
-                        _PSC_START_POS_CACHE[cache_key] = dict(starting_net_by_security)
-                        _PSC_START_POS_CACHE_META[cache_key] = {"starting_positions_date": starting_positions_date}
-            except Exception:
-                # Don't fail the EMSX check if PSC isn't reachable; just proceed with zero start positions.
-                starting_net_by_security = starting_net_by_security or {}
+            snapshot_dates = [item["snapshot_date"] for item in coverage.get("portfolios", []) if item.get("snapshot_date")]
+            # Keep the browser's legacy label, but expose all individual dates too.
+            starting_positions_date = max(snapshot_dates).replace("-", "") if snapshot_dates else None
 
         try:
             trades = _emsx_history_get_fills(date_iso=date_iso, uuids=uuids, team=team)
             analysis = _options_closeout_analyze(_log_serialize(trades), starting_net_by_security=starting_net_by_security)
             exercise_risks: List[dict] = []
             exercise_risk_status = "not_evaluated_report_date_is_not_today"
-            if date_iso == _eastern_today_iso():
-                exercise_risk_status = "complete"
-                try:
+            try:
+                if date_iso == _eastern_today_iso():
+                    exercise_risk_status = "complete"
                     open_positions = analysis.get("open_positions") or []
+                    expiring_positions = [
+                        position for position in open_positions
+                        if (contract := parse_option_contract(position.get("security"))) is not None
+                        and contract["expiration_date"] == date_iso
+                    ]
                     expiring_roots = sorted({
                         contract["underlying"]
-                        for position in open_positions
+                        for position in expiring_positions
                         if (contract := parse_option_contract(position.get("security"))) is not None
                         and contract["expiration_date"] == date_iso
                     })
-                    underlying_quotes = _option_underlying_quotes(open_positions)
+                    underlying_quotes = _option_underlying_quotes(expiring_positions)
                     exercise_risks = evaluate_expiring_itm_positions(
                         open_positions,
                         date_iso,
@@ -2703,10 +2679,8 @@ def emsx_options_closeout_check():
                     missing_roots = [root for root in expiring_roots if root not in underlying_quotes]
                     if missing_roots:
                         exercise_risk_status = f"missing_quotes: {', '.join(missing_roots)}"
-                except Exception as quote_error:
-                    # The core trade/action report remains useful when Bloomberg
-                    # quotes are temporarily unavailable, but surface the gap.
-                    exercise_risk_status = f"quote_error: {quote_error}"
+            except Exception as quote_error:
+                exercise_risk_status = f"quote_error: {quote_error}"
 
             risks_by_security = {risk["security"]: risk for risk in exercise_risks}
             for group in analysis.get("groups") or []:
@@ -2725,6 +2699,7 @@ def emsx_options_closeout_check():
                 "starting_positions_count": len(starting_net_by_security),
                 "exercise_risk_status": exercise_risk_status,
                 "exercise_risks": exercise_risks,
+                "coverage": finish_coverage(coverage, analysis, parse_option_contract, exercise_risk_status),
                 **analysis,
             }, 200)
         except Exception as e:

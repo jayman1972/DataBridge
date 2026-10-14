@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import math
 from typing import Any, Dict, Iterable, List, Optional
 
 
@@ -62,7 +63,7 @@ def select_live_underlying_quote(
     as_of_raw = quote.get("LAST_UPDATE_DT")
     as_of_match = re.search(r"\d{4}-\d{2}-\d{2}", str(as_of_raw or ""))
     as_of_date = as_of_match.group(0) if as_of_match else None
-    if expected_date and as_of_date and as_of_date != expected_date:
+    if expected_date and as_of_date != expected_date:
         return None
 
     candidates = [("PX_LAST", quote.get("PX_LAST"))]
@@ -80,7 +81,7 @@ def select_live_underlying_quote(
             price = float(value)
         except (TypeError, ValueError):
             continue
-        if price > 0:
+        if math.isfinite(price) and price > 0:
             return {"price": price, "price_field": field, "as_of_date": as_of_date}
     return None
 

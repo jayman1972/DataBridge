@@ -88,6 +88,21 @@ class PortfolioSnapshotTests(unittest.TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertIn("fund NAV", response.get_json()["error"])
 
+    def test_production_snapshot_never_uses_ambiguous_prefix_fallback(self):
+        # A prefix such as EHP Alpha% could return EHP Alpha Hedge on a day
+        # when the exact EHP Alpha portfolio has no positions.
+        cursor = FakeCursor([])
+        response = self.get(
+            cursor, "/sggg/portfolio?date=20261013&fund=EHP%20Alpha&profile=production_snapshot"
+        )
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            response.get_json()["error"],
+            "PSC portfolio query returned no rows for all SQL variants",
+        )
+        self.assertEqual(len(cursor.queries), 1)
+        self.assertIn("ph.PORTFOLIO = ?", cursor.queries[0][0])
+
 
 if __name__ == "__main__":
     unittest.main()

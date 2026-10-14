@@ -1425,10 +1425,6 @@ def _psc_production_snapshot(cursor, fund, query_date):
     cursor.execute(sql, (fund, query_date))
     rows = cursor.fetchall()
     if not rows:
-        cursor.execute(sql.replace("ph.PORTFOLIO = ?", "ph.PORTFOLIO LIKE ?"),
-                       (f"{fund}%", query_date))
-        rows = cursor.fetchall()
-    if not rows:
         raise RuntimeError("PSC portfolio query returned no rows for all SQL variants")
 
     def number(value):

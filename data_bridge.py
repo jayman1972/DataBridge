@@ -1409,6 +1409,56 @@ def sggg_health():
 # SGGG / PSC portfolio endpoint (tunneled from Supabase like Bloomberg)
 # Requires: OpenVPN connected so PSC is reachable; pyodbc + ODBC DSN=PSC_VIEWER
 # ---------------------------------------------------------------------------
+def _psc_production_snapshot(cursor, fund, query_date):
+    """Read only the PSC columns needed for a production starting snapshot."""
+    sql = (
+        "SELECT ph.STRATEGY, ph.COMPANY_SYMBOL, ph.SECURITY_TYPE, ph.SEC_CCY, "
+        "ph.BBG_TICKER, ph.LONG_SHORT, SUM(ph.QUANTITY) AS QUANTITY, "
+        "SUM(ph.EXPOSURE) AS EXPOSURE, MAX(ph.CLOSE_PRICE) AS CLOSE_PRICE, "
+        "SUM(ph.VALUE) AS VALUE, MAX(ph.PORTFOLIO_NAV) AS PORTFOLIO_NAV "
+        "FROM psc_position_history ph "
+        "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? "
+        "GROUP BY ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL, "
+        "ph.SECURITY_TYPE, ph.SEC_CCY, ph.BBG_TICKER, ph.LONG_SHORT "
+        "ORDER BY ph.STRATEGY, ph.COMPANY_SYMBOL"
+    )
+    cursor.execute(sql, (fund, query_date))
+    rows = cursor.fetchall()
+    if not rows:
+        cursor.execute(sql.replace("ph.PORTFOLIO = ?", "ph.PORTFOLIO LIKE ?"),
+                       (f"{fund}%", query_date))
+        rows = cursor.fetchall()
+    if not rows:
+        raise RuntimeError("PSC portfolio query returned no rows for all SQL variants")
+
+    def number(value):
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    fund_nav = number(rows[0][10])
+    if fund_nav is None or not math.isfinite(fund_nav) or fund_nav <= 0:
+        raise ValueError("PSC production snapshot has no valid fund NAV")
+    positions = []
+    for row in rows:
+        exposure = number(row[7])
+        positions.append({
+            "strategy": (row[0] or "").strip() or None,
+            "company_symbol": (row[1] or "").strip() or None,
+            "security_type": (row[2] or "").strip() or None,
+            "currency": (row[3] or "").strip() or None,
+            "bbg_ticker": (row[4] or "").strip() or None,
+            "long_short": (row[5] or "").strip() or None,
+            "quantity": number(row[6]),
+            "exposure": exposure,
+            "exposure_pct_nav": exposure / fund_nav * 100 if exposure is not None else None,
+            "close_price": number(row[8]),
+            "value": number(row[9]),
+        })
+    return fund_nav, positions
+
+
 @app.route("/sggg/portfolio", methods=["GET", "POST"])
 def sggg_portfolio():
     """
@@ -1420,13 +1470,13 @@ def sggg_portfolio():
     try:
         data = request.get_json(silent=True) or {}
         query_date = request.args.get("date") or data.get("date")
+        from urllib.parse import parse_qs
         # Prefer query param `fund=` (from the app), but be defensive: some proxies/clients
         # have been observed to drop non-date params from request.args. Fall back to parsing
         # the raw query string and/or JSON body.
         fund = (request.args.get("fund") or "").strip()
         if not fund:
             try:
-                from urllib.parse import parse_qs
                 qs = parse_qs((request.query_string or b"").decode("utf-8", errors="ignore"))
                 fund = (qs.get("fund", [""])[0] or "").strip()
             except Exception:
@@ -1439,6 +1489,16 @@ def sggg_portfolio():
             query_date = query_date.replace("-", "")[:8]
         else:
             query_date = datetime.now().strftime("%Y%m%d")
+        if not re.fullmatch(r"\d{8}", query_date):
+            return jsonify({"error": "Invalid PSC portfolio date (expected YYYYMMDD)"}), 400
+        try:
+            date_type(int(query_date[:4]), int(query_date[4:6]), int(query_date[6:8]))
+        except ValueError:
+            return jsonify({"error": "Invalid PSC portfolio calendar date"}), 400
+        raw_profile = parse_qs((request.query_string or b"").decode("utf-8", errors="ignore")).get("profile", [None])[0]
+        profile = request.args.get("profile") or raw_profile or data.get("profile")
+        if profile not in (None, "production_snapshot"):
+            return jsonify({"error": "Unsupported PSC portfolio profile"}), 400
 
         print(f"[/sggg/portfolio] date={query_date} fund={fund}", flush=True)
 
@@ -1457,6 +1517,22 @@ def sggg_portfolio():
             conn = pyodbc.connect("DSN=PSC_VIEWER")
             cursor = conn.cursor()
 
+            if profile == "production_snapshot":
+                fund_nav, positions = _psc_production_snapshot(cursor, fund, query_date)
+                nav_date_iso = f"{query_date[:4]}-{query_date[4:6]}-{query_date[6:8]}"
+                env_rate = os.environ.get("USD_CAD_RATE")
+                try:
+                    usd_cad_rate = float(env_rate) if env_rate else None
+                except (TypeError, ValueError):
+                    usd_cad_rate = None
+                return jsonify({
+                    "fund": fund,
+                    "fund_nav": fund_nav,
+                    "nav_date": nav_date_iso,
+                    "usd_cad_rate": usd_cad_rate,
+                    "positions": positions,
+                })
+
             # IMPORTANT: For external reporting, do NOT filter by STRATEGY or SECURITY_TYPE.
             # Strategies/security-type whitelists are internal and can cause valid portfolios
             # (e.g. credit/income) to return empty.
@@ -1472,9 +1548,39 @@ def sggg_portfolio():
                 "  ph.SEC_CCY AS Currency, ph.BBG_TICKER, ph.SECTOR, ph.COUNTRY, ph.LONG_SHORT, "
                 "  sd.SEDOL, "
             )
+            cursor.execute(
+                "SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() "
+                "AND TABLE_NAME IN ('psc_position_history', 'psc_security_data')"
+            )
+            available_columns = {"psc_position_history": set(), "psc_security_data": set()}
+            for table_name, column_name in cursor.fetchall():
+                available_columns[str(table_name).lower()].add(str(column_name).upper())
+            if not available_columns["psc_position_history"] or not available_columns["psc_security_data"]:
+                raise RuntimeError("PSC schema metadata is unavailable for the portfolio query")
+            optional_columns = (
+                ("psc_security_data", "STRIKE"),
+                ("psc_position_history", "SECURITY_DELTA"),
+                ("psc_position_history", "EXPOSURE_PCT_NAV"),
+                ("psc_position_history", "BETA_PCT_NAV"),
+                ("psc_position_history", "FX_EXPOSURE_DISPLAY_CCY"),
+            )
+            missing_fields = [column for table, column in optional_columns
+                              if column not in available_columns[table]]
+
+            def _optional_aggregate(table, column, aggregate):
+                if column not in available_columns[table]:
+                    return f"  NULL AS {column}, "
+                alias = "sd" if table == "psc_security_data" else "ph"
+                return f"  {aggregate}({alias}.{column}) AS {column}, "
+
             sql_option_extra = (
-                "  MAX(sd.STRIKE) AS STRIKE, "
-                "  MAX(ph.SECURITY_DELTA) AS SECURITY_DELTA, "
+                _optional_aggregate("psc_security_data", "STRIKE", "MAX")
+                + _optional_aggregate("psc_position_history", "SECURITY_DELTA", "MAX")
+            )
+            sql_metrics = (
+                _optional_aggregate("psc_position_history", "EXPOSURE_PCT_NAV", "SUM")
+                + _optional_aggregate("psc_position_history", "BETA_PCT_NAV", "SUM")
             )
             sql_tail_from = (
                 "FROM psc_position_history ph "
@@ -1485,7 +1591,7 @@ def sggg_portfolio():
                 "  ph.SEC_CCY, ph.BBG_TICKER, ph.SECTOR, ph.COUNTRY, ph.LONG_SHORT, sd.SEDOL "
                 "ORDER BY ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL"
             )
-            def _sql_tail_core(fx_exposure_col: str) -> str:
+            def _sql_tail_core() -> str:
                 return (
                     "  SUM(ph.QUANTITY) AS QUANTITY, "
                     "  AVG(ph.AVG_PRICE) AS AVG_PRICE, "
@@ -1496,28 +1602,11 @@ def sggg_portfolio():
                     "  SUM(ph.DIVIDENDS) AS DIVIDENDS, "
                     "  SUM(ph.VALUE) AS VALUE, "
                     "  SUM(ph.EXPOSURE) AS EXPOSURE, "
-                    "  SUM(ph.DAY_PROFIT) AS DAY_PROFIT, "
-                    f"  SUM(ph.{fx_exposure_col}) AS FX_EXPOSURE, "
+                    "  SUM(ph.DAY_PROFIT) AS DAY_PROFIT, " +
+                    _optional_aggregate("psc_position_history", "FX_EXPOSURE_DISPLAY_CCY", "SUM")
+                    .replace(" AS FX_EXPOSURE_DISPLAY_CCY", " AS FX_EXPOSURE") +
                     "  MAX(ph.PORTFOLIO_NAV) AS PORTFOLIO_NAV "
                 )
-
-            def _psc_metrics_fragment(mode: str) -> str:
-                # PSC pct columns (FX % NAV = FX Exposure Display CCY / PORTFOLIO_NAV in sql tail).
-                if mode == "pct_full":
-                    return (
-                        "  SUM(ph.EXPOSURE_PCT_NAV) AS EXPOSURE_PCT_NAV, "
-                        "  SUM(ph.BETA_PCT_NAV) AS BETA_PCT_NAV, "
-                    )
-                if mode == "beta_only":
-                    return (
-                        "  SUM(ph.BETA_PCT_NAV) AS BETA_PCT_NAV, "
-                    )
-                return ""
-
-            def _build_portfolio_sql(metrics_mode: str, with_options: bool, fx_exposure_col: str) -> str:
-                metrics = _psc_metrics_fragment(metrics_mode)
-                body = sql_base + (sql_option_extra if with_options else "") + metrics + _sql_tail_core(fx_exposure_col) + sql_tail_from
-                return body
 
             def _run_portfolio_query(sql_text: str, params: tuple):
                 cursor.execute(sql_text, params)
@@ -1532,53 +1621,20 @@ def sggg_portfolio():
                     return n / 100.0
                 return n
 
-            rows = []
-            has_option_columns = False
-            metrics_mode = "none"
-            fx_exposure_col_used = "FX_EXPOSURE_DISPLAY_CCY"
-            metrics_modes_to_try = ["pct_full", "beta_only", "none"]
-            fx_exposure_cols_to_try = ("FX_EXPOSURE_DISPLAY_CCY", "FX_EXPOSURE_LOC")
-
-            for fx_col in fx_exposure_cols_to_try:
-                for metrics_mode_try in metrics_modes_to_try:
-                    for with_options in (True, False):
-                        candidate_sql = _build_portfolio_sql(metrics_mode_try, with_options, fx_col)
-                        try:
-                            sql_exact = candidate_sql.replace(
-                                "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
-                                "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? ",
-                            )
-                            rows = _run_portfolio_query(sql_exact, (fund, query_date))
-                            if not rows:
-                                sql_like = candidate_sql.replace(
-                                    "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
-                                    "WHERE ph.PORTFOLIO LIKE ? AND ph.POSN_DATE_INT = ? ",
-                                )
-                                rows = _run_portfolio_query(sql_like, (f"{fund}%", query_date))
-                            if rows:
-                                has_option_columns = with_options
-                                metrics_mode = metrics_mode_try
-                                fx_exposure_col_used = fx_col
-                                print(
-                                    f"[/sggg/portfolio] fx_col={fx_col} metrics_mode={metrics_mode} options={with_options} rows={len(rows)}",
-                                    flush=True,
-                                )
-                                break
-                        except Exception as err:
-                            if with_options:
-                                print(
-                                    f"[/sggg/portfolio] query failed fx_col={fx_col} metrics={metrics_mode_try} options=True: {err}",
-                                    flush=True,
-                                )
-                                continue
-                            print(
-                                f"[/sggg/portfolio] query failed fx_col={fx_col} metrics={metrics_mode_try} options=False: {err}",
-                                flush=True,
-                            )
-                    if rows:
-                        break
-                if rows:
-                    break
+            candidate_sql = sql_base + sql_option_extra + sql_metrics + _sql_tail_core() + sql_tail_from
+            sql_exact = candidate_sql.replace(
+                "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
+                "WHERE ph.PORTFOLIO = ? AND ph.POSN_DATE_INT = ? ",
+            )
+            rows = _run_portfolio_query(sql_exact, (fund, query_date))
+            if not rows:
+                sql_like = candidate_sql.replace(
+                    "WHERE (ph.PORTFOLIO = ? OR ph.PORTFOLIO LIKE ?) AND ph.POSN_DATE_INT = ? ",
+                    "WHERE ph.PORTFOLIO LIKE ? AND ph.POSN_DATE_INT = ? ",
+                )
+                rows = _run_portfolio_query(sql_like, (f"{fund}%", query_date))
+            if rows:
+                print(f"[/sggg/portfolio] rows={len(rows)} missing_fields={missing_fields}", flush=True)
 
             if not rows:
                 raise RuntimeError("PSC portfolio query returned no rows for all SQL variants")
@@ -1613,21 +1669,17 @@ def sggg_portfolio():
 
             positions = []
             for row in rows:
-                strike = _num(row[11]) if has_option_columns and len(row) > 11 else None
-                security_delta = _num(row[12]) if has_option_columns and len(row) > 12 else None
-                i = 13 if has_option_columns else 11
+                strike = _num(row[11]) if len(row) > 11 else None
+                security_delta = _num(row[12]) if len(row) > 12 else None
+                i = 13
 
                 exposure_pct_nav_frac = None
                 fx_exposure_pct_nav = None
                 beta_pct_nav = None
 
-                if metrics_mode == "pct_full":
-                    exposure_pct_nav_frac = _psc_pct_nav_fraction(row[i] if len(row) > i else None)
-                    beta_pct_nav = _psc_pct_nav_fraction(row[i + 1] if len(row) > i + 1 else None)
-                    i += 2
-                elif metrics_mode == "beta_only":
-                    beta_pct_nav = _psc_pct_nav_fraction(row[i] if len(row) > i else None)
-                    i += 1
+                exposure_pct_nav_frac = _psc_pct_nav_fraction(row[i] if len(row) > i else None)
+                beta_pct_nav = _psc_pct_nav_fraction(row[i + 1] if len(row) > i + 1 else None)
+                i += 2
 
                 qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, fx_exp_i, nav_i = (
                     i,
@@ -1692,6 +1744,7 @@ def sggg_portfolio():
             "fund_nav": fund_nav,
             "nav_date": nav_date_iso,
             "usd_cad_rate": usd_cad_rate,
+            "missing_fields": missing_fields,
             "positions": positions,
         })
     except Exception as e:

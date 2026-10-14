@@ -2,7 +2,7 @@
 # Run from projects\DataBridge
 # Supports: -NgrokPath "path\to\ngrok.exe" or "ngrok" (from PATH)
 
-param([string]$NgrokPath = "")
+param([string]$NgrokPath = "", [string]$StatusFile = "")
 
 $ErrorActionPreference = "Continue"
 
@@ -78,14 +78,14 @@ function Update-SupabaseSecret {
     Push-Location $ProjectDir
     try {
         Write-Host "Updating Supabase secret for $ProjectName..." -ForegroundColor Yellow
-        & $SupabaseCmd link --project-ref $ProjectRef 2>&1
-        & $SupabaseCmd secrets set "DATA_BRIDGE_URL=$Url" 2>&1
-        & $SupabaseCmd secrets set "BLOOMBERG_BRIDGE_URL=$Url" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  [OK] $ProjectName" -ForegroundColor Green
-            return $true
-        }
-        return $false
+        & $SupabaseCmd link --project-ref $ProjectRef 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) { return $false }
+        & $SupabaseCmd secrets set "DATA_BRIDGE_URL=$Url" 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) { return $false }
+        & $SupabaseCmd secrets set "BLOOMBERG_BRIDGE_URL=$Url" 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) { return $false }
+        Write-Host "  [OK] $ProjectName" -ForegroundColor Green
+        return $true
     } catch {
         Write-Host "  Error: $_" -ForegroundColor Red
         return $false
@@ -128,15 +128,33 @@ if ($ngrokUrl) {
     if ($env:ADMIN_TUNNEL -eq "0") { $isAdmin = $false }
     if ($env:ADMIN_TUNNEL -eq "1") { $isAdmin = $true }
 
+    $syncResults = [ordered]@{}
     if ($env:SKIP_SUPABASE_UPDATE -eq "1" -or -not $isAdmin) {
         Write-Host "Skipping Supabase update (non-admin or SKIP_SUPABASE_UPDATE=1)" -ForegroundColor Yellow
+        $syncResults["market-dashboard"] = $false
     } else {
-        Update-SupabaseSecret -ProjectDir $MARKET_DASHBOARD_DIR -ProjectName "market-dashboard" -ProjectRef $MARKET_DASHBOARD_PROJECT_REF -Url $ngrokUrl | Out-Null
+        $syncResults["market-dashboard"] = Update-SupabaseSecret -ProjectDir $MARKET_DASHBOARD_DIR -ProjectName "market-dashboard" -ProjectRef $MARKET_DASHBOARD_PROJECT_REF -Url $ngrokUrl
         if (Test-Path $WEALTH_SCOPE_DIR) {
-            Update-SupabaseSecret -ProjectDir $WEALTH_SCOPE_DIR -ProjectName "wealth-scope" -ProjectRef $WEALTH_SCOPE_PROJECT_REF -Url $ngrokUrl | Out-Null
+            $syncResults["wealth-scope"] = Update-SupabaseSecret -ProjectDir $WEALTH_SCOPE_DIR -ProjectName "wealth-scope" -ProjectRef $WEALTH_SCOPE_PROJECT_REF -Url $ngrokUrl
         }
         if (Test-Path $SALESFLOW_DIR) {
-            Update-SupabaseSecret -ProjectDir $SALESFLOW_DIR -ProjectName "salesflow" -ProjectRef $SALESFLOW_PROJECT_REF -Url $ngrokUrl | Out-Null
+            $syncResults["salesflow"] = Update-SupabaseSecret -ProjectDir $SALESFLOW_DIR -ProjectName "salesflow" -ProjectRef $SALESFLOW_PROJECT_REF -Url $ngrokUrl
+        }
+    }
+    $syncSucceeded = $true
+    foreach ($result in $syncResults.Values) {
+        if (-not $result) { $syncSucceeded = $false }
+    }
+    if ($StatusFile) {
+        try {
+            [pscustomobject]@{
+                url = $ngrokUrl
+                updated = $syncSucceeded
+                projects = $syncResults
+                checked_at = (Get-Date).ToString("o")
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $StatusFile -Encoding UTF8
+        } catch {
+            Write-Host "Could not write tunnel status file: $_" -ForegroundColor Red
         }
     }
     Write-Host ""
@@ -151,7 +169,7 @@ if ($ngrokUrl) {
 
     # Initial health check after 5 seconds
     Start-Sleep -Seconds 5
-    if (-not $ngrokProcess.HasExited) {
+    if (-not $ngrokProcess -or -not $ngrokProcess.HasExited) {
         try {
             $headers = @{}
             if ($ngrokUrl -match "ngrok") { $headers["ngrok-skip-browser-warning"] = "1" }
@@ -168,9 +186,9 @@ if ($ngrokUrl) {
         }
     }
 
-    while (-not $ngrokProcess.HasExited) {
+    while (-not $ngrokProcess -or -not $ngrokProcess.HasExited) {
         Start-Sleep -Seconds $checkInterval
-        if ($ngrokProcess.HasExited) { break }
+        if ($ngrokProcess -and $ngrokProcess.HasExited) { break }
         try {
             $headers = @{}
             if ($ngrokUrl -match "ngrok") { $headers["ngrok-skip-browser-warning"] = "1" }
@@ -201,10 +219,12 @@ if ($ngrokUrl) {
             }
         }
     }
-    if ($ngrokProcess.HasExited) {
+    if ($ngrokProcess -and $ngrokProcess.HasExited) {
         Write-Host "Ngrok process ended." -ForegroundColor Yellow
     }
 } else {
     Write-Host "Could not detect ngrok URL. Check ngrok output." -ForegroundColor Yellow
-    Wait-Process -Id $ngrokProcess.Id -ErrorAction SilentlyContinue
+    if ($ngrokProcess) {
+        Wait-Process -Id $ngrokProcess.Id -ErrorAction SilentlyContinue
+    }
 }

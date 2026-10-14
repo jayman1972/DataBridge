@@ -16,6 +16,7 @@ bloomberg-service.env
 *.log
 ngrok_error.txt
 ngrok_output.txt
+tray/bin/
 
 # IBKR Client Portal Gateway — install locally (see docs/IBKR_GATEWAY.md)
 IBRK/

@@ -8,6 +8,11 @@ Replaces the previously scattered implementations in:
 
 ## Quick Start
 
+For a signed-in Windows session without persistent console windows, see the
+[tray launcher](tray/README.md). It supervises the same bridge and tunnel,
+starts at sign-in, and opens a status window when a connection needs attention.
+Do not run it alongside the manual launcher.
+
 ```batch
 cd c:\Users\jmann\projects\DataBridge
 start-data-bridge-ngrok.bat

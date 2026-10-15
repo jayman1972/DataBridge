@@ -24,12 +24,18 @@ namespace Ehp.DataBridge.Tray
                 catch { return 1; }
             }
             bool created;
+            using (var showStatus = new EventWaitHandle(false, EventResetMode.AutoReset,
+                "Local\\EHPDataBridgeTrayShowStatus"))
             using (var mutex = new Mutex(true, "Local\\EHPDataBridgeTray", out created))
             {
-                if (!created) return 0;
+                if (!created)
+                {
+                    showStatus.Set();
+                    return 0;
+                }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new BridgeTrayContext());
+                Application.Run(new BridgeTrayContext(showStatus));
                 GC.KeepAlive(mutex);
             }
             return 0;
@@ -95,6 +101,7 @@ namespace Ehp.DataBridge.Tray
         private readonly Icon healthyIcon;
         private readonly Icon attentionIcon;
         private readonly System.Threading.Timer timer;
+        private readonly RegisteredWaitHandle showStatusRegistration;
         private Icon currentIcon;
         private OwnedProcess bridge;
         private OwnedProcess tunnel;
@@ -110,7 +117,7 @@ namespace Ehp.DataBridge.Tray
         private int bridgeAttempts;
         private int tunnelAttempts;
 
-        internal BridgeTrayContext()
+        internal BridgeTrayContext(EventWaitHandle showStatus)
         {
             repository = Path.GetFullPath(Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory, "..", ".."));
@@ -157,6 +164,13 @@ namespace Ehp.DataBridge.Tray
             icon.ContextMenuStrip = menu;
             icon.DoubleClick += delegate { ShowStatus(); };
             Log("Tray started. Repository=" + repository);
+            showStatusRegistration = ThreadPool.RegisterWaitForSingleObject(showStatus,
+                delegate(object state, bool timedOut)
+                {
+                    if (exiting) return;
+                    try { form.BeginInvoke(new MethodInvoker(ShowStatus)); }
+                    catch (InvalidOperationException) { }
+                }, null, Timeout.Infinite, false);
             timer = new System.Threading.Timer(Poll, null, 0, 15000);
         }
 
@@ -460,6 +474,7 @@ namespace Ehp.DataBridge.Tray
         private void ExitApp()
         {
             exiting = true;
+            showStatusRegistration.Unregister(null);
             timer.Dispose();
             lock (processLock)
             {

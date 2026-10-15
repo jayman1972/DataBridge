@@ -55,6 +55,8 @@ or ngrok management port rather than killing another user's process.
 Use `uninstall.ps1` to remove auto-start. Exit the running app from its tray
 menu to stop the bridge and tunnel process trees it started. Closing its
 status window only hides the window; the bridge keeps running.
+Launching `bin/DataBridgeTray.exe` again while it is running opens the existing
+status window, so a taskbar pin works as a status launcher.
 
 Logs are in `%LOCALAPPDATA%\EHP\DataBridgeTray\bridge-tray.log`. A status file
 in the same directory records the last tunnel URL and whether the launcher's

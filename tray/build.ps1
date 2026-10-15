@@ -2,7 +2,8 @@ $ErrorActionPreference = "Stop"
 
 $sources = @(
     (Join-Path $PSScriptRoot "DataBridgeTray.cs"),
-    (Join-Path $PSScriptRoot "BridgeTrayLogic.cs")
+    (Join-Path $PSScriptRoot "BridgeTrayLogic.cs"),
+    (Join-Path $PSScriptRoot "TunnelRequestActivity.cs")
 )
 $outputDirectory = Join-Path $PSScriptRoot "bin"
 $output = Join-Path $outputDirectory "DataBridgeTray.exe"

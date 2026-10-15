@@ -12,6 +12,13 @@ The tray app is not a Windows service. It starts **after this user signs in**,
 not before sign-in, and it exits on sign-out. This is intentional for the
 Bloomberg Desktop API and the account's VPN, ODBC DSN, and file access.
 
+The status window charts the last four hours of tunnel requests in five-minute
+bars, using ngrok's local cumulative counter. Health checks are included. The
+tray stores only time buckets and counts in
+`%LOCALAPPDATA%\EHP\DataBridgeTray\tunnel-requests.json`; it does not store
+request URLs or bodies. Earlier time slots are shown as untracked until four
+hours of history have been collected. The counts survive a tray restart.
+
 ## Prerequisites
 
 - Run on the PSC-connected Windows PC under the account with `PSC_VIEWER`,

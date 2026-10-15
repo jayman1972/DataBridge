@@ -85,8 +85,10 @@ namespace Ehp.DataBridge.Tray
         private readonly string logDirectory;
         private readonly string logPath;
         private readonly string tunnelStatusPath;
+        private readonly string activityPath;
         private readonly object logLock = new object();
         private readonly object processLock = new object();
+        private readonly TunnelRequestActivity requestActivity;
         private readonly StatusForm form;
         private readonly NotifyIcon icon;
         private readonly Icon checkingIcon;
@@ -101,6 +103,7 @@ namespace Ehp.DataBridge.Tray
         private int tunnelMissing;
         private bool alerted;
         private bool exiting;
+        private bool activitySaveFailed;
         private DateTime startedAt;
         private DateTime nextBridgeStart;
         private DateTime nextTunnelStart;
@@ -116,7 +119,24 @@ namespace Ehp.DataBridge.Tray
             Directory.CreateDirectory(logDirectory);
             logPath = Path.Combine(logDirectory, "bridge-tray.log");
             tunnelStatusPath = Path.Combine(logDirectory, "tunnel-sync.json");
+            activityPath = Path.Combine(logDirectory, "tunnel-requests.json");
             RotateLog();
+            try
+            {
+                requestActivity = File.Exists(activityPath)
+                    ? TunnelRequestActivity.FromJson(File.ReadAllText(activityPath), DateTime.UtcNow)
+                    : new TunnelRequestActivity();
+            }
+            catch (IOException error)
+            {
+                requestActivity = new TunnelRequestActivity();
+                Log("Could not load tunnel request history: " + error.Message);
+            }
+            catch (UnauthorizedAccessException error)
+            {
+                requestActivity = new TunnelRequestActivity();
+                Log("Could not load tunnel request history: " + error.Message);
+            }
             startedAt = DateTime.UtcNow;
             form = new StatusForm(logPath, Restart, ExitApp);
             IntPtr unused = form.Handle;
@@ -201,12 +221,32 @@ namespace Ehp.DataBridge.Tray
             catch (UriFormatException) { return 0; }
         }
 
-        private string TunnelUrl()
+        private TunnelSnapshot ReadTunnel()
         {
             string body;
             if (HttpCode("http://127.0.0.1:4040/api/tunnels", out body) != 200)
                 return null;
-            return BridgeTrayLogic.FindTunnelUrl(body);
+            return BridgeTrayLogic.FindTunnel(body);
+        }
+
+        private void SaveRequestActivity()
+        {
+            string temporary = activityPath + ".tmp";
+            try
+            {
+                File.WriteAllText(temporary, requestActivity.ToJson());
+                if (File.Exists(activityPath)) File.Replace(temporary, activityPath, null);
+                else File.Move(temporary, activityPath);
+                activitySaveFailed = false;
+            }
+            catch (IOException error) { LogActivitySaveError(error); }
+            catch (UnauthorizedAccessException error) { LogActivitySaveError(error); }
+        }
+
+        private void LogActivitySaveError(Exception error)
+        {
+            if (!activitySaveFailed) Log("Could not save tunnel request history: " + error.Message);
+            activitySaveFailed = true;
         }
 
         private void StartBridge(List<string> issues)
@@ -291,7 +331,13 @@ namespace Ehp.DataBridge.Tray
                 string body;
                 int psc = HttpCode("http://127.0.0.1:5000/sggg/health", out body);
                 int bloomberg = HttpCode("http://127.0.0.1:5000/health", out body);
-                string url = TunnelUrl();
+                TunnelSnapshot tunnelSnapshot = ReadTunnel();
+                string url = tunnelSnapshot == null ? null : tunnelSnapshot.Url;
+                DateTime sampledAt = DateTime.UtcNow;
+                if (tunnelSnapshot != null && tunnelSnapshot.RequestCount.HasValue
+                    && requestActivity.Observe(sampledAt, tunnelSnapshot.RequestCount.Value))
+                    SaveRequestActivity();
+                RequestActivitySeries activitySeries = requestActivity.Snapshot(sampledAt);
                 int publicCode = url == null ? 0 : HttpCode(url + "/sggg/health", out body);
                 bool synchronized = false;
                 if (url != null && File.Exists(tunnelStatusPath))
@@ -344,7 +390,7 @@ namespace Ehp.DataBridge.Tray
                     + " | URL sync: " + (synchronized ? "complete" : "pending/failed");
                 if (form.IsHandleCreated && !form.IsDisposed)
                     form.BeginInvoke((MethodInvoker)delegate {
-                        UpdateUi(text, attention, issues.Count == 0);
+                        UpdateUi(text, attention, issues.Count == 0, activitySeries);
                     });
             }
             catch (Exception error)
@@ -354,10 +400,12 @@ namespace Ehp.DataBridge.Tray
             finally { Interlocked.Exchange(ref polling, 0); }
         }
 
-        private void UpdateUi(string text, bool attention, bool healthy)
+        private void UpdateUi(string text, bool attention, bool healthy,
+            RequestActivitySeries activitySeries)
         {
             if (exiting) return;
             form.SetStatus(text);
+            form.SetActivity(activitySeries);
             Icon nextIcon = attention ? attentionIcon : healthy ? healthyIcon : checkingIcon;
             if (currentIcon != nextIcon)
             {
@@ -433,32 +481,59 @@ namespace Ehp.DataBridge.Tray
     internal sealed class StatusForm : Form
     {
         private readonly TextBox status;
+        private readonly Label activityTotal;
+        private readonly RequestActivityChart activityChart;
         private bool allowClose;
 
         internal StatusForm(string logPath, Action restart, Action exit)
         {
             Text = "EHP DataBridge";
-            Width = 600;
-            Height = 330;
+            ClientSize = new Size(700, 470);
+            MinimumSize = new Size(620, 460);
             StartPosition = FormStartPosition.CenterScreen;
             ShowInTaskbar = true;
             var label = new Label { Text = "PSC / Bloomberg / tunnel status",
-                Left = 16, Top = 15, Width = 540, Height = 25,
+                Left = 16, Top = 15, Width = 668, Height = 25,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
                 Font = new Font(SystemFonts.DefaultFont, FontStyle.Bold) };
-            status = new TextBox { Left = 16, Top = 45, Width = 550, Height = 180,
-                Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
+            status = new TextBox { Left = 16, Top = 45, Width = 668, Height = 124,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+                Multiline = true, ReadOnly = true, TabStop = false,
+                ScrollBars = ScrollBars.Vertical,
                 Text = "Starting..." };
-            var retry = new Button { Text = "Restart", Left = 16, Top = 237, Width = 100 };
+            var activityTitle = new Label {
+                Text = "Tunnel requests (health checks included)",
+                Left = 16, Top = 185, Width = 350, Height = 22,
+                Font = new Font(SystemFonts.DefaultFont, FontStyle.Bold)
+            };
+            activityTotal = new Label {
+                Text = "0 in 4h", Left = 470, Top = 185, Width = 214, Height = 22,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                TextAlign = ContentAlignment.MiddleRight
+            };
+            activityChart = new RequestActivityChart {
+                Left = 16, Top = 212, Width = 668, Height = 178,
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom
+                    | AnchorStyles.Left | AnchorStyles.Right
+            };
+            var retry = new Button { Text = "Restart", Left = 16, Top = 426, Width = 100,
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
             retry.Click += delegate { restart(); };
-            var logs = new Button { Text = "Open logs", Left = 130, Top = 237, Width = 100 };
+            var logs = new Button { Text = "Open logs", Left = 130, Top = 426, Width = 100,
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
             logs.Click += delegate { Process.Start("explorer.exe",
                 "\"" + Path.GetDirectoryName(logPath) + "\""); };
-            var hide = new Button { Text = "Hide", Left = 345, Top = 237, Width = 100 };
+            var hide = new Button { Text = "Hide", Left = 470, Top = 426, Width = 100,
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
             hide.Click += delegate { Hide(); };
-            var quit = new Button { Text = "Exit", Left = 460, Top = 237, Width = 100 };
+            var quit = new Button { Text = "Exit", Left = 584, Top = 426, Width = 100,
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
             quit.Click += delegate { exit(); };
             Controls.Add(label);
             Controls.Add(status);
+            Controls.Add(activityTitle);
+            Controls.Add(activityTotal);
+            Controls.Add(activityChart);
             Controls.Add(retry);
             Controls.Add(logs);
             Controls.Add(hide);
@@ -470,7 +545,156 @@ namespace Ehp.DataBridge.Tray
         }
 
         internal void SetStatus(string value) { status.Text = value; }
+        internal void SetActivity(RequestActivitySeries series)
+        {
+            if (series.TrackingSinceUtcTicks == 0)
+                activityTotal.Text = "Waiting for data";
+            else if (DateTime.UtcNow.Ticks - series.TrackingSinceUtcTicks
+                < TimeSpan.TicksPerHour * 4)
+                activityTotal.Text = series.Total.ToString("N0") + " since "
+                    + new DateTime(series.TrackingSinceUtcTicks, DateTimeKind.Utc)
+                        .ToLocalTime().ToString("h:mm tt");
+            else activityTotal.Text = series.Total.ToString("N0") + " in 4h";
+            activityChart.SetSeries(series);
+        }
         internal void AllowClose() { allowClose = true; }
+    }
+
+    internal sealed class RequestActivityChart : Control
+    {
+        private readonly ToolTip tooltip = new ToolTip();
+        private RequestActivitySeries series;
+        private int hovered = -1;
+
+        internal RequestActivityChart()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+            BackColor = SystemColors.Control;
+            AccessibleName = "Tunnel requests over the last four hours";
+        }
+
+        internal void SetSeries(RequestActivitySeries value)
+        {
+            series = value;
+            Invalidate();
+        }
+
+        private Rectangle PlotBounds()
+        {
+            return new Rectangle(40, 10, Math.Max(0, Width - 54), Math.Max(0, Height - 40));
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            var plot = PlotBounds();
+            if (plot.Width < 48 || plot.Height < 20) return;
+            if (series == null || series.TrackingSinceUtcTicks == 0)
+            {
+                using (var untracked = new SolidBrush(Color.FromArgb(233, 237, 239)))
+                    e.Graphics.FillRectangle(untracked, plot);
+                using (var muted = new SolidBrush(Color.FromArgb(91, 104, 111)))
+                {
+                    const string waiting = "Waiting for tunnel data";
+                    SizeF size = e.Graphics.MeasureString(waiting, Font);
+                    e.Graphics.DrawString(waiting, Font, muted,
+                        plot.Left + (plot.Width - size.Width) / 2,
+                        plot.Top + (plot.Height - size.Height) / 2);
+                }
+                return;
+            }
+            long maximum = 1;
+            foreach (long count in series.Counts)
+                if (count > maximum) maximum = count;
+            using (var grid = new Pen(Color.FromArgb(211, 219, 222)))
+            using (var muted = new SolidBrush(Color.FromArgb(91, 104, 111)))
+            using (var untracked = new SolidBrush(Color.FromArgb(233, 237, 239)))
+            using (var bars = new SolidBrush(Color.FromArgb(45, 166, 143)))
+            using (var highlight = new SolidBrush(Color.FromArgb(20, 119, 108)))
+            {
+                double untrackedBuckets = (series.TrackingSinceUtcTicks
+                    - series.FirstBucketUtcTicks)
+                    / (double)(TimeSpan.TicksPerMinute * TunnelRequestActivity.BucketMinutes);
+                float untrackedWidth = (float)Math.Max(0,
+                    Math.Min(plot.Width, untrackedBuckets * plot.Width
+                        / TunnelRequestActivity.BucketCount));
+                e.Graphics.FillRectangle(untracked, plot.Left, plot.Top,
+                    untrackedWidth, plot.Height);
+                for (int row = 0; row <= 2; row++)
+                {
+                    float y = plot.Top + row * plot.Height / 2f;
+                    e.Graphics.DrawLine(grid, plot.Left, y, plot.Right, y);
+                }
+                string peak = maximum.ToString("N0");
+                SizeF peakSize = e.Graphics.MeasureString(peak, Font);
+                e.Graphics.DrawString(peak, Font, muted,
+                    plot.Left - peakSize.Width - 5, plot.Top - 3);
+                e.Graphics.DrawString("0", Font, muted,
+                    plot.Left - 14, plot.Bottom - Font.Height + 3);
+                float slot = plot.Width / (float)TunnelRequestActivity.BucketCount;
+                for (int i = 0; i < series.Counts.Length; i++)
+                {
+                    if (series.Counts[i] == 0) continue;
+                    float height = Math.Max(2f,
+                        (float)(series.Counts[i] / (double)maximum * plot.Height));
+                    e.Graphics.FillRectangle(i == hovered ? highlight : bars,
+                        plot.Left + i * slot + 1, plot.Bottom - height,
+                        Math.Max(2f, slot - 2), height);
+                }
+                string[] labels = { "4h ago", "3h", "2h", "1h", "now" };
+                for (int i = 0; i < labels.Length; i++)
+                {
+                    SizeF size = e.Graphics.MeasureString(labels[i], Font);
+                    float center = plot.Left + i * plot.Width / 4f;
+                    float x = Math.Max(0, Math.Min(Width - size.Width, center - size.Width / 2));
+                    e.Graphics.DrawString(labels[i], Font, muted, x, plot.Bottom + 5);
+                }
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            var plot = PlotBounds();
+            int index = e.X >= plot.Left && e.X < plot.Right
+                && e.Y >= plot.Top && e.Y <= plot.Bottom && plot.Width > 0
+                ? (int)((e.X - plot.Left) * (long)TunnelRequestActivity.BucketCount / plot.Width)
+                : -1;
+            if (index == hovered) return;
+            hovered = index;
+            if (index >= 0 && series != null)
+            {
+                var start = new DateTime(series.FirstBucketUtcTicks
+                    + index * TimeSpan.TicksPerMinute * TunnelRequestActivity.BucketMinutes,
+                    DateTimeKind.Utc).ToLocalTime();
+                long bucketEndUtcTicks = series.FirstBucketUtcTicks
+                    + (index + 1) * TimeSpan.TicksPerMinute
+                        * TunnelRequestActivity.BucketMinutes;
+                string value = series.TrackingSinceUtcTicks == 0
+                    || series.TrackingSinceUtcTicks >= bucketEndUtcTicks
+                    ? "not tracked" : series.Counts[index].ToString("N0") + " requests";
+                tooltip.SetToolTip(this, start.ToString("MMM d, h:mm tt") + " - "
+                    + start.AddMinutes(TunnelRequestActivity.BucketMinutes).ToString("h:mm tt")
+                    + ": " + value);
+            }
+            else tooltip.SetToolTip(this, "");
+            Invalidate();
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            hovered = -1;
+            tooltip.SetToolTip(this, "");
+            Invalidate();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) tooltip.Dispose();
+            base.Dispose(disposing);
+        }
     }
 
     internal sealed class OwnedProcess : IDisposable

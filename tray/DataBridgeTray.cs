@@ -16,6 +16,7 @@ namespace Ehp.DataBridge.Tray
         [STAThread]
         private static int Main(string[] args)
         {
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
             if (args.Length == 1 && args[0] == "--self-test")
             {
                 try { BridgeTrayLogic.SelfTest(); return 0; }

@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Net;
 using System.Threading;
 using System.Web.Script.Serialization;
 
@@ -70,6 +71,8 @@ namespace Ehp.DataBridge.Tray
 
         internal static void SelfTest()
         {
+            Assert(ServicePointManager.SecurityProtocol == SecurityProtocolType.Tls12,
+                "Use TLS 1.2 for public tunnel checks");
             string tunnels = "{\"tunnels\":["
                 + "{\"public_url\":\"http://wrong\",\"config\":{\"addr\":\"localhost:5000\"}},"
                 + "{\"public_url\":\"https://wrong.example\",\"config\":{\"addr\":\"localhost:4000\"}},"

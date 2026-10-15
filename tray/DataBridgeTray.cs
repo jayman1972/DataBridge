@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -35,6 +36,49 @@ namespace Ehp.DataBridge.Tray
         }
     }
 
+    internal static class TrayIconFactory
+    {
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool DestroyIcon(IntPtr handle);
+
+        internal static Icon Create(Color accent)
+        {
+            using (var bitmap = new Bitmap(32, 32))
+            using (var graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(Color.Transparent);
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using (var background = new SolidBrush(Color.FromArgb(29, 40, 47)))
+                    graphics.FillEllipse(background, 1, 1, 30, 30);
+                using (var rim = new Pen(Color.FromArgb(110, 135, 145), 1.5f))
+                    graphics.DrawEllipse(rim, 1.5f, 1.5f, 29, 29);
+                using (var span = new Pen(accent, 4f))
+                {
+                    span.StartCap = LineCap.Round;
+                    span.EndCap = LineCap.Round;
+                    graphics.DrawBezier(span, new PointF(7, 21), new PointF(11, 9),
+                        new PointF(21, 9), new PointF(25, 21));
+                }
+                using (var deck = new Pen(Color.White, 2.5f))
+                {
+                    deck.StartCap = LineCap.Round;
+                    deck.EndCap = LineCap.Round;
+                    graphics.DrawLine(deck, 7, 23, 25, 23);
+                }
+                using (var node = new SolidBrush(Color.White))
+                    graphics.FillEllipse(node, 13.5f, 9.5f, 5, 5);
+
+                IntPtr handle = bitmap.GetHicon();
+                try
+                {
+                    using (var borrowed = Icon.FromHandle(handle))
+                        return (Icon)borrowed.Clone();
+                }
+                finally { DestroyIcon(handle); }
+            }
+        }
+    }
+
     internal sealed class BridgeTrayContext : ApplicationContext
     {
         private readonly string repository;
@@ -45,7 +89,11 @@ namespace Ehp.DataBridge.Tray
         private readonly object processLock = new object();
         private readonly StatusForm form;
         private readonly NotifyIcon icon;
+        private readonly Icon checkingIcon;
+        private readonly Icon healthyIcon;
+        private readonly Icon attentionIcon;
         private readonly System.Threading.Timer timer;
+        private Icon currentIcon;
         private OwnedProcess bridge;
         private OwnedProcess tunnel;
         private int polling;
@@ -72,8 +120,13 @@ namespace Ehp.DataBridge.Tray
             startedAt = DateTime.UtcNow;
             form = new StatusForm(logPath, Restart, ExitApp);
             IntPtr unused = form.Handle;
+            checkingIcon = TrayIconFactory.Create(Color.FromArgb(255, 187, 72));
+            healthyIcon = TrayIconFactory.Create(Color.FromArgb(48, 211, 177));
+            attentionIcon = TrayIconFactory.Create(Color.FromArgb(255, 104, 99));
             icon = new NotifyIcon();
-            icon.Icon = SystemIcons.Application;
+            currentIcon = checkingIcon;
+            icon.Icon = currentIcon;
+            form.Icon = currentIcon;
             icon.Text = "EHP DataBridge starting";
             icon.Visible = true;
             var menu = new ContextMenuStrip();
@@ -290,7 +343,9 @@ namespace Ehp.DataBridge.Tray
                     + " | Public HTTP: " + publicCode
                     + " | URL sync: " + (synchronized ? "complete" : "pending/failed");
                 if (form.IsHandleCreated && !form.IsDisposed)
-                    form.BeginInvoke((MethodInvoker)delegate { UpdateUi(text, attention); });
+                    form.BeginInvoke((MethodInvoker)delegate {
+                        UpdateUi(text, attention, issues.Count == 0);
+                    });
             }
             catch (Exception error)
             {
@@ -299,11 +354,19 @@ namespace Ehp.DataBridge.Tray
             finally { Interlocked.Exchange(ref polling, 0); }
         }
 
-        private void UpdateUi(string text, bool attention)
+        private void UpdateUi(string text, bool attention, bool healthy)
         {
             if (exiting) return;
             form.SetStatus(text);
-            icon.Text = attention ? "EHP DataBridge needs attention" : "EHP DataBridge running";
+            Icon nextIcon = attention ? attentionIcon : healthy ? healthyIcon : checkingIcon;
+            if (currentIcon != nextIcon)
+            {
+                currentIcon = nextIcon;
+                icon.Icon = currentIcon;
+                form.Icon = currentIcon;
+            }
+            icon.Text = attention ? "EHP DataBridge needs attention"
+                : healthy ? "EHP DataBridge healthy" : "EHP DataBridge checking connections";
             if (attention && !alerted)
             {
                 alerted = true;
@@ -360,6 +423,9 @@ namespace Ehp.DataBridge.Tray
             icon.Dispose();
             form.AllowClose();
             form.Close();
+            checkingIcon.Dispose();
+            healthyIcon.Dispose();
+            attentionIcon.Dispose();
             ExitThread();
         }
     }

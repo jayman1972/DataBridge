@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.Net;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -73,6 +74,9 @@ namespace Ehp.DataBridge.Tray
         {
             Assert(ServicePointManager.SecurityProtocol == SecurityProtocolType.Tls12,
                 "Use TLS 1.2 for public tunnel checks");
+            using (var testIcon = TrayIconFactory.Create(Color.FromArgb(48, 211, 177)))
+                Assert(testIcon.Width == 32 && testIcon.Height == 32,
+                    "Create a 32-pixel tray icon");
             string tunnels = "{\"tunnels\":["
                 + "{\"public_url\":\"http://wrong\",\"config\":{\"addr\":\"localhost:5000\"}},"
                 + "{\"public_url\":\"https://wrong.example\",\"config\":{\"addr\":\"localhost:4000\"}},"

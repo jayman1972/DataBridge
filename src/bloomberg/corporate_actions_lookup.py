@@ -11,7 +11,7 @@ from typing import Any
 
 from .blpapi_client import _coerce_blp_reference_value, blpapi
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("data_bridge.bloomberg.corporate_actions")
 ACTION_FIELDS = {
     "dividends": "DVD_HIST_ALL",
     "splits": "EQY_DVD_HIST_SPLITS",
@@ -238,6 +238,15 @@ def lookup(client: Any, options: dict[str, Any]) -> dict[str, Any]:
     """Resolve scope, batch fields, enrich Action IDs, and filter on actual dates."""
     deadline = time.monotonic() + 105
     sources = options["securities"]
+    LOGGER.info(
+        "Corporate action request source=%d types=%s scope=%s range=%s..%s basis=%s",
+        len(sources),
+        options["action_types"],
+        options["scope"],
+        options["start_date"],
+        options["end_date"],
+        options["date_basis"],
+    )
     warnings = [
         "API-derived lookup, not the complete CACT screen. Listings, delistings, name/ticker changes and other unsupported action families are not included.",
         "Only announced Bloomberg data is available; a future window is not a forecast. Related equities do not expand ETF/fund holdings.",

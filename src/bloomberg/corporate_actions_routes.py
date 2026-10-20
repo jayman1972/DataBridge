@@ -18,7 +18,7 @@ from flask import jsonify, request
 
 from .corporate_actions_lookup import lookup, validate_request
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("data_bridge.bloomberg.corporate_actions.routes")
 LOOKUP_LOCK = threading.Lock()
 
 
@@ -37,6 +37,12 @@ def cached_lookup(
                 (cache_key, time.time() - 300),
             ).fetchone()
             if row:
+                LOGGER.info(
+                    "Corporate action cache hit source=%d range=%s..%s",
+                    len(options["securities"]),
+                    options["start_date"],
+                    options["end_date"],
+                )
                 return {**json.loads(row[0]), "cached": True}
     result = lookup(client, options)
     if not result["errors"]:

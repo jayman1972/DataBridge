@@ -7,17 +7,23 @@ from datetime import date, datetime, timezone
 from flask import jsonify, request
 
 import data_bridge
+from bloomberg.corporate_actions_routes import register_corporate_action_routes
 from bloomberg.etf_constituents import (
     fetch_etf_constituent_snapshots,
     normalize_etf_tickers,
 )
 from sggg.production_routes import register_sggg_production_routes
 
-data_bridge.DATA_BRIDGE_BUILD = "2026-09-22-alphadesk-identity-resolution"
+data_bridge.DATA_BRIDGE_BUILD = "2026-10-20-corporate-actions-lookup"
 register_sggg_production_routes(
     data_bridge.app,
     supabase_client=data_bridge.supabase,
     supabase_url=data_bridge.SUPABASE_URL,
+    service_key=data_bridge.SUPABASE_KEY,
+)
+register_corporate_action_routes(
+    data_bridge.app,
+    client=data_bridge.bloomberg_client,
     service_key=data_bridge.SUPABASE_KEY,
 )
 
@@ -28,7 +34,9 @@ def bloomberg_etf_constituents():
     if data_bridge.bloomberg_client is None:
         return jsonify({"error": "Bloomberg client not available"}), 503
     if not hasattr(data_bridge.bloomberg_client, "get_bds_rows"):
-        return jsonify({"error": "Bloomberg client does not support structured BDS"}), 501
+        return jsonify(
+            {"error": "Bloomberg client does not support structured BDS"}
+        ), 501
     payload = request.get_json() or {}
     try:
         etfs = normalize_etf_tickers(payload.get("etfs"))

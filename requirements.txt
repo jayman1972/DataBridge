@@ -8,3 +8,4 @@ requests>=2.28.0
 # openpyxl is optional; NAV working paper falls back to stdlib xlsx reader if missing
 # xlrd required for legacy .xls compliance check workbooks (Steps tab)
 xlrd>=2.0.1
+pywin32>=311; sys_platform == "win32"

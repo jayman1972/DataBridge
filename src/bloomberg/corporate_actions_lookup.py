@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Collection
 from datetime import date, datetime
 from typing import Any
 
@@ -54,7 +55,9 @@ def normalize_identifier(value: str) -> str:
     return text
 
 
-def validate_request(payload: Any) -> dict[str, Any]:
+def validate_request(
+    payload: Any, *, allowed_types: Collection[str] | None = None
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise TypeError("A JSON object is required")
     raw = payload.get("securities")
@@ -67,13 +70,14 @@ def validate_request(payload: Any) -> dict[str, Any]:
     securities = list(dict.fromkeys(normalize_identifier(item) for item in raw))
     scope = payload.get("scope", "security_plus")
     basis = payload.get("date_basis", "effective")
-    types = payload.get("action_types", list(ACTION_FIELDS))
+    allowed_types = ACTION_FIELDS if allowed_types is None else allowed_types
+    types = payload.get("action_types", list(allowed_types))
     if scope not in SCOPES or basis not in {"announced", "effective"}:
         raise ValueError("Invalid scope or date basis")
     if (
         not isinstance(types, list)
         or not types
-        or not all(isinstance(item, str) and item in ACTION_FIELDS for item in types)
+        or not all(isinstance(item, str) and item in allowed_types for item in types)
     ):
         raise ValueError("Select supported action types")
     try:
@@ -234,7 +238,9 @@ def action_id(row: dict[str, Any]) -> str | None:
     return str(value) if value is not None and str(value).isdigit() else None
 
 
-def lookup(client: Any, options: dict[str, Any]) -> dict[str, Any]:
+def lookup(
+    client: Any, options: dict[str, Any], *, include_universe: bool = False
+) -> dict[str, Any]:
     """Resolve scope, batch fields, enrich Action IDs, and filter on actual dates."""
     deadline = time.monotonic() + 105
     sources = options["securities"]
@@ -319,7 +325,7 @@ def lookup(client: Any, options: dict[str, Any]) -> dict[str, Any]:
         dict.fromkeys([ACTION_FIELDS[kind] for kind in options["action_types"]])
     )
     payload: dict[str, dict[str, Any]] = {}
-    for offset in range(0, len(universe), 75):
+    for offset in range(0, len(universe) if fields else 0, 75):
         chunk = list(universe)[offset : offset + 75]
         if time.monotonic() >= deadline:
             errors.append(
@@ -493,4 +499,9 @@ def lookup(client: Any, options: dict[str, Any]) -> dict[str, Any]:
         "expanded_count": len(universe),
         "request": options,
         "as_of": datetime.now().astimezone().isoformat(),
+        **(
+            {"resolved_universe": {key: sorted(value) for key, value in universe.items()}}
+            if include_universe
+            else {}
+        ),
     }

@@ -14,7 +14,7 @@ from bloomberg.etf_constituents import (
 )
 from sggg.production_routes import register_sggg_production_routes
 
-data_bridge.DATA_BRIDGE_BUILD = "2026-10-20-corporate-actions-lookup"
+data_bridge.DATA_BRIDGE_BUILD = "2026-10-21-corporate-actions-bql-jobs"
 register_sggg_production_routes(
     data_bridge.app,
     supabase_client=data_bridge.supabase,

@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -16,6 +17,7 @@ from typing import Any
 
 from flask import jsonify, request
 
+from .corporate_actions_jobs import JobManager, QueueFullError
 from .corporate_actions_lookup import lookup, validate_request
 
 LOGGER = logging.getLogger("data_bridge.bloomberg.corporate_actions.routes")
@@ -55,18 +57,77 @@ def cached_lookup(
 
 
 def register_corporate_action_routes(
-    app: Any, *, client: Any, service_key: str
+    app: Any, *, client: Any, service_key: str, job_manager: JobManager | None = None
 ) -> None:
-    @app.route("/bloomberg/corporate-actions-lookup", methods=["POST"])
-    def corporate_actions_lookup():
+    manager_lock = threading.Lock()
+
+    def manager() -> JobManager:
+        nonlocal job_manager
+        with manager_lock:
+            if job_manager is None:
+                root = (
+                    Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+                    / "EHP"
+                    / "DataBridge"
+                    / "corporate-actions-jobs"
+                )
+                job_manager = JobManager(root, client)
+            return job_manager
+
+    def authorized() -> bool:
         token = (
             (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
         )
-        if (
-            not token
-            or not service_key
-            or not secrets.compare_digest(token, service_key)
+        return bool(
+            token and service_key and secrets.compare_digest(token, service_key)
+        )
+
+    @app.route("/bloomberg/corporate-actions-jobs", methods=["POST"])
+    def corporate_actions_jobs():
+        if not authorized():
+            return jsonify({"error": "Service authorization is required"}), 401
+        # This header is set by the authenticated edge function, never trusted
+        # without the server credential checked above.
+        owner = request.headers.get("X-Requester-Id", "")
+        if not re.fullmatch(
+            r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|service_role", owner
         ):
+            return jsonify({"error": "An authenticated requester is required"}), 400
+        if request.content_length and request.content_length > 16_384:
+            return jsonify({"error": "Request exceeds 16 KB"}), 413
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "A JSON object is required"}), 400
+        operation = payload.get("operation")
+        try:
+            if operation == "start":
+                if client is None:
+                    return jsonify({"error": "Bloomberg is unavailable"}), 503
+                result = manager().create(
+                    owner, payload.get("request_id"), payload.get("request")
+                )
+                return jsonify(result), 202
+            job_id = payload.get("job_id", "")
+            if not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{32}", job_id):
+                raise ValueError("A valid job_id is required")
+            if operation == "status":
+                return jsonify(manager().get(owner, job_id))
+            if operation == "cancel":
+                return jsonify(manager().cancel(owner, job_id))
+            raise ValueError("Invalid job operation")
+        except (ValueError, TypeError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        except KeyError:
+            return jsonify({"error": "Corporate-action job not found"}), 404
+        except QueueFullError as exc:
+            return jsonify({"error": str(exc)}), 429
+        except Exception:
+            LOGGER.exception("Corporate-action job request failed")
+            return jsonify({"error": "Could not access the Bloomberg job queue"}), 502
+
+    @app.route("/bloomberg/corporate-actions-lookup", methods=["POST"])
+    def corporate_actions_lookup():
+        if not authorized():
             return jsonify({"error": "Service authorization is required"}), 401
         if client is None:
             return jsonify({"error": "Bloomberg is unavailable"}), 503

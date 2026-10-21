@@ -90,6 +90,7 @@ from sggg.options_closeout import (
     format_option_contract,
     parse_option_contract,
     select_live_underlying_quote,
+    underlying_quote_candidates,
 )
 from sggg.options_closeout_alert import collect_flagged_groups, should_run_closeout_alert
 from sggg.options_closeout_coverage import load_start_positions, finish_coverage
@@ -584,7 +585,7 @@ def _option_underlying_quotes(open_positions: List[dict]) -> Dict[str, dict]:
     # Standard OCC options are predominantly US-listed. Include the Canadian
     # market form because PSC also carries Montreal-listed equity/ETF options.
     candidates_by_root = {
-        root: [f"{root} US Equity", f"{root} CN Equity"]
+        root: underlying_quote_candidates(root)
         for root in roots
     }
     tickers = [ticker for root in roots for ticker in candidates_by_root[root]]

@@ -46,6 +46,17 @@ def format_option_contract(value: Any) -> str:
     )
 
 
+def underlying_quote_candidates(root: str) -> List[str]:
+    """Resolve a canonical option root to report-only Bloomberg quote IDs.
+
+    AlphaDesk/PSC VIX contracts require the index quote, not an equity quote.
+    Keep the option root itself intact for positions and exercise evaluation.
+    """
+    if root == "VIX":
+        return ["VIX Index"]
+    return [f"{root} US Equity", f"{root} CN Equity"]
+
+
 def select_live_underlying_quote(
     quote: Dict[str, Any],
     expected_date: Optional[str] = None,

@@ -99,6 +99,47 @@ def apply_capital_basis(
     return {**payload, "fund_nav": nav, "capital_basis": capital}
 
 
+def _prior_nav_date(client: Any, trade_date: str) -> str:
+    floor = (date.fromisoformat(trade_date) - timedelta(days=14)).isoformat()
+    sessions = (
+        client.table("bt_exchange_sessions")
+        .select("session_date,is_open")
+        .eq("exchange_id", "XTSE")
+        .gte("session_date", floor)
+        .lt("session_date", trade_date)
+        .execute()
+        .data
+    )
+    overrides = (
+        client.table("bt_exchange_calendar_overrides")
+        .select("session_date,force_open,force_closed")
+        .eq("exchange_id", "XTSE")
+        .gte("session_date", floor)
+        .lt("session_date", trade_date)
+        .execute()
+        .data
+    )
+    for offset in range(1, 15):
+        candidate = (
+            date.fromisoformat(trade_date) - timedelta(days=offset)
+        ).isoformat()
+        override = next(
+            (row for row in overrides if row["session_date"] == candidate), {}
+        )
+        session = next(
+            (row for row in sessions if row["session_date"] == candidate), None
+        )
+        if override.get("force_open"):
+            return candidate
+        if override.get("force_closed"):
+            continue
+        if session is None:
+            raise ValueError("Fund calendar is incomplete; export is blocked")
+        if session["is_open"]:
+            return candidate
+    raise ValueError("Prior fund business day cannot be verified")
+
+
 def verify_export_capital(
     client: Any, user_id: str, filename: str, digest: str
 ) -> None:
@@ -143,54 +184,20 @@ def verify_export_capital(
         )
     if not audits:
         raise ValueError("A verified trade sizing audit is required before export")
+    # One fresh snapshot per fund/date in this request, never across exports.
+    expected_by_date: dict[str, str] = {}
+    capital_by_fund_date: dict[tuple[str, str], dict[str, Any]] = {}
+    adjustment_by_fund_date: dict[tuple[str, str], float] = {}
     for audit in audits:
         fund = audit["dashboard_fund_name"]
         trade_date = capital_date(audit["trade_date"])
-        floor = (date.fromisoformat(trade_date) - timedelta(days=14)).isoformat()
-        sessions = (
-            client.table("bt_exchange_sessions")
-            .select("session_date,is_open")
-            .eq("exchange_id", "XTSE")
-            .gte("session_date", floor)
-            .lt("session_date", trade_date)
-            .execute()
-            .data
-        )
-        overrides = (
-            client.table("bt_exchange_calendar_overrides")
-            .select("session_date,force_open,force_closed")
-            .eq("exchange_id", "XTSE")
-            .gte("session_date", floor)
-            .lt("session_date", trade_date)
-            .execute()
-            .data
-        )
-        expected = None
-        for offset in range(1, 15):
-            candidate = (
-                date.fromisoformat(trade_date) - timedelta(days=offset)
-            ).isoformat()
-            override = next(
-                (row for row in overrides if row["session_date"] == candidate), {}
-            )
-            session = next(
-                (row for row in sessions if row["session_date"] == candidate), None
-            )
-            if override.get("force_open"):
-                expected = candidate
-                break
-            if override.get("force_closed"):
-                continue
-            if session is None:
-                raise ValueError("Fund calendar is incomplete; export is blocked")
-            if session["is_open"]:
-                expected = candidate
-                break
-        if expected is None:
-            raise ValueError("Prior fund business day cannot be verified")
-        current = fetch_fund_capital(
-            "The Soar Fund" if fund == "SOAR Fund" else fund, expected
-        )
+        if trade_date not in expected_by_date:
+            expected_by_date[trade_date] = _prior_nav_date(client, trade_date)
+        expected = expected_by_date[trade_date]
+        capital_key = ("The Soar Fund" if fund == "SOAR Fund" else fund, expected)
+        if capital_key not in capital_by_fund_date:
+            capital_by_fund_date[capital_key] = fetch_fund_capital(*capital_key)
+        current = capital_by_fund_date[capital_key]
         saved = audit.get("configuration_snapshot") or {}
         basis = saved.get("fundCapitalBasis")
         if not isinstance(basis, dict) or any(
@@ -199,15 +206,20 @@ def verify_export_capital(
             raise ValueError(
                 "NAV/transfer verification is missing or changed; rerun before export"
             )
-        adjustments = (
-            client.table("bt_production_fund_rebalance_inputs")
-            .select("nav_adjustment_cad")
-            .eq("fund_name", fund)
-            .eq("trade_date", trade_date)
-            .execute()
-            .data
-        )
-        adjustment = float(adjustments[0]["nav_adjustment_cad"]) if adjustments else 0
+        adjustment_key = (fund, trade_date)
+        if adjustment_key not in adjustment_by_fund_date:
+            adjustments = (
+                client.table("bt_production_fund_rebalance_inputs")
+                .select("nav_adjustment_cad")
+                .eq("fund_name", fund)
+                .eq("trade_date", trade_date)
+                .execute()
+                .data
+            )
+            adjustment_by_fund_date[adjustment_key] = (
+                float(adjustments[0]["nav_adjustment_cad"]) if adjustments else 0
+            )
+        adjustment = adjustment_by_fund_date[adjustment_key]
         expected_values = {
             "sourceNavCad": current["nav_after_flows"],
             "navAdjustmentCad": adjustment,

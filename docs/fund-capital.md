@@ -14,3 +14,7 @@ administrator, filename and payload hash. The bridge verifies the prior XTSE
 session, current fund NAV/flows and trade-date additional cash adjustment before
 writing a file. Old drafts without proof must be rerun. This guard does not
 generate trades, rewrite drafts, or alter historical fund records.
+
+Within a single save request, the calendar is read once per trade date and NAV,
+flows and additional cash are read once per fund/date. Every draft's proof is
+still compared with those fresh results. No results are reused on a later save.

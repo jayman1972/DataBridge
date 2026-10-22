@@ -1,6 +1,7 @@
 """Fund-level flows must be applied exactly once, never summed across positions."""
 
 import unittest
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -29,6 +30,7 @@ class Cursor:
 
 class AuditClient:
     def __init__(self, audit):
+        self.calls = []
         self.tables = {
             "bt_sggg_trade_batches": [],
             "bt_sggg_trade_exports": [audit],
@@ -38,6 +40,7 @@ class AuditClient:
         }
 
     def table(self, name):
+        self.calls.append(name)
         rows = self.tables[name]
         query = SimpleNamespace()
         for method in ("select", "eq", "gte", "lt", "order", "limit", "in_"):
@@ -47,6 +50,106 @@ class AuditClient:
 
 
 class FundCapitalTests(unittest.TestCase):
+    def batch_client(self, fund_dates):
+        audits = []
+        capitals = {}
+        for fund, trade_date, nav_date in fund_dates:
+            capital = read_fund_capital(Cursor(), "EHP Alpha", nav_date)
+            capital["fund"] = fund
+            capitals[(fund, nav_date)] = capital
+            audits.append(
+                {
+                    "dashboard_fund_name": fund,
+                    "trade_date": trade_date,
+                    "configuration_snapshot": {
+                        "fundCapitalBasis": deepcopy(capital),
+                        "sourceNavCad": capital["nav_after_flows"],
+                        "navAdjustmentCad": 0,
+                        "adjustedNavCad": capital["nav_after_flows"],
+                    },
+                }
+            )
+        client = AuditClient(audits[0])
+        client.tables["bt_sggg_trade_batches"] = [
+            {
+                "source_draft_ids": list(range(len(audits))),
+                "trade_date": fund_dates[0][1],
+            }
+        ]
+        client.tables["bt_sggg_trade_drafts"] = audits
+        client.tables["bt_exchange_sessions"] = [
+            {"session_date": value, "is_open": True}
+            for value in {row[2] for row in fund_dates}
+        ]
+        return client, capitals
+
+    def test_batch_reads_each_fund_once_and_checks_every_draft(self):
+        funds = ["EHP Alpha"] * 4 + ["EHP Tact Growth Alt"] * 3 + ["The Soar Fund"]
+        client, capitals = self.batch_client(
+            [(fund, "2026-10-22", "2026-10-21") for fund in funds]
+        )
+        with patch(
+            "sggg.fund_capital.fetch_fund_capital",
+            side_effect=lambda fund, day: capitals[(fund, day)],
+        ) as fetch:
+            verify_export_capital(client, "user", "file", "hash")
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(client.calls.count("bt_exchange_sessions"), 1)
+        self.assertEqual(client.calls.count("bt_exchange_calendar_overrides"), 1)
+        self.assertEqual(client.calls.count("bt_production_fund_rebalance_inputs"), 3)
+
+        second = client.tables["bt_sggg_trade_drafts"][1]["configuration_snapshot"]
+        second["fundCapitalBasis"]["net_transfers"] -= 1
+        with (
+            patch(
+                "sggg.fund_capital.fetch_fund_capital",
+                side_effect=lambda fund, day: capitals[(fund, day)],
+            ),
+            self.assertRaisesRegex(ValueError, "rerun"),
+        ):
+            verify_export_capital(client, "user", "file", "hash")
+
+    def test_batch_checks_each_draft_cash_adjustment(self):
+        client, capitals = self.batch_client(
+            [("EHP Alpha", "2026-10-22", "2026-10-21")] * 2
+        )
+        second = client.tables["bt_sggg_trade_drafts"][1]["configuration_snapshot"]
+        second["navAdjustmentCad"] = -100
+        second["adjustedNavCad"] -= 100
+        with (
+            patch(
+                "sggg.fund_capital.fetch_fund_capital",
+                side_effect=lambda fund, day: capitals[(fund, day)],
+            ),
+            self.assertRaisesRegex(ValueError, "adjustment changed"),
+        ):
+            verify_export_capital(client, "user", "file", "hash")
+
+    def test_new_save_rechecks_source_and_does_not_reuse_success(self):
+        client, capitals = self.batch_client(
+            [("EHP Alpha", "2026-10-22", "2026-10-21")] * 2
+        )
+        capital = capitals[("EHP Alpha", "2026-10-21")]
+        with patch(
+            "sggg.fund_capital.fetch_fund_capital",
+            side_effect=[capital, RuntimeError("Source offline")],
+        ) as fetch:
+            verify_export_capital(client, "user", "file", "hash")
+            with self.assertRaisesRegex(RuntimeError, "Source offline"):
+                verify_export_capital(client, "user", "file", "hash")
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(client.calls.count("bt_exchange_sessions"), 2)
+
+    def test_calendar_is_checked_before_loading_capital(self):
+        client, _ = self.batch_client([("EHP Alpha", "2026-10-22", "2026-10-21")])
+        client.tables["bt_exchange_sessions"] = []
+        with (
+            patch("sggg.fund_capital.fetch_fund_capital") as fetch,
+            self.assertRaisesRegex(ValueError, "calendar is incomplete"),
+        ):
+            verify_export_capital(client, "user", "file", "hash")
+        fetch.assert_not_called()
+
     def test_alpha_redemption(self):
         cursor = Cursor()
         capital = read_fund_capital(cursor, "EHP Alpha", "2026-10-21")

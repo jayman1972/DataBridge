@@ -12,9 +12,11 @@ from bloomberg.etf_constituents import (
     fetch_etf_constituent_snapshots,
     normalize_etf_tickers,
 )
+from sggg.fund_capital import register_fund_capital_routes
 from sggg.production_routes import register_sggg_production_routes
 
-data_bridge.DATA_BRIDGE_BUILD = "2026-10-21-corporate-actions-bql-jobs"
+data_bridge.DATA_BRIDGE_BUILD = "2026-10-22-verified-fund-capital"
+register_fund_capital_routes(data_bridge.app, service_key=data_bridge.SUPABASE_KEY)
 register_sggg_production_routes(
     data_bridge.app,
     supabase_client=data_bridge.supabase,

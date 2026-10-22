@@ -12,6 +12,7 @@ import requests
 from flask import Flask, jsonify, request
 
 from .alphadesk_security_coverage import fetch_alphadesk_security_coverage
+from .fund_capital import verify_export_capital
 from .trade_file_export import DEFAULT_TRADE_EXPORT_DIR, save_alphadesk_trade_file
 
 _LOGGER = logging.getLogger("data_bridge.sggg.production")
@@ -81,8 +82,7 @@ def register_sggg_production_routes(
         csv_content = data.get("csv")
         payload_sha256 = data.get("payload_sha256")
         if not all(
-            isinstance(value, str)
-            for value in (filename, csv_content, payload_sha256)
+            isinstance(value, str) for value in (filename, csv_content, payload_sha256)
         ):
             return (
                 jsonify(
@@ -90,6 +90,15 @@ def register_sggg_production_routes(
                 ),
                 400,
             )
+        try:
+            verify_export_capital(supabase_client, user_id, filename, payload_sha256)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 422
+        except Exception:
+            _LOGGER.exception("Trade export capital verification failed")
+            return jsonify(
+                {"error": "Fund capital could not be verified; export is blocked."}
+            ), 503
         target_dir = Path(
             os.environ.get("SGGG_TRADE_EXPORT_DIR", str(DEFAULT_TRADE_EXPORT_DIR))
         )
@@ -122,7 +131,11 @@ def register_sggg_production_routes(
     @app.route("/sggg/alphadesk-security-coverage", methods=["POST"])
     def alphadesk_security_coverage():
         token = _bearer_token()
-        if not token or not service_key or not secrets.compare_digest(token, service_key):
+        if (
+            not token
+            or not service_key
+            or not secrets.compare_digest(token, service_key)
+        ):
             return jsonify({"error": "Service authorization is required."}), 401
         data = request.get_json(silent=True)
         securities = data.get("securities") if isinstance(data, dict) else None
@@ -141,7 +154,9 @@ def register_sggg_production_routes(
             return jsonify({"error": str(exc)}), 400
         except (ImportError, OSError, RuntimeError):
             _LOGGER.exception("AlphaDesk security coverage check failed")
-            return jsonify({"error": "AlphaDesk security coverage is unavailable."}), 503
+            return jsonify(
+                {"error": "AlphaDesk security coverage is unavailable."}
+            ), 503
         except Exception:
             _LOGGER.exception("AlphaDesk ODBC security coverage query failed")
             return jsonify({"error": "AlphaDesk security coverage query failed."}), 502

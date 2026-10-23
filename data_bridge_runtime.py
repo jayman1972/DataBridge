@@ -15,7 +15,7 @@ from bloomberg.etf_constituents import (
 from sggg.fund_capital import register_fund_capital_routes
 from sggg.production_routes import register_sggg_production_routes
 
-data_bridge.DATA_BRIDGE_BUILD = "2026-10-22-streamlined-fund-capital"
+data_bridge.DATA_BRIDGE_BUILD = "2026-10-23-pmi-scenario-export-guard"
 register_fund_capital_routes(data_bridge.app, service_key=data_bridge.SUPABASE_KEY)
 register_sggg_production_routes(
     data_bridge.app,

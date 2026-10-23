@@ -99,12 +99,12 @@ def apply_capital_basis(
     return {**payload, "fund_nav": nav, "capital_basis": capital}
 
 
-def _prior_nav_date(client: Any, trade_date: str) -> str:
+def _prior_nav_date(client: Any, trade_date: str, exchange_id: str = "XTSE") -> str:
     floor = (date.fromisoformat(trade_date) - timedelta(days=14)).isoformat()
     sessions = (
         client.table("bt_exchange_sessions")
         .select("session_date,is_open")
-        .eq("exchange_id", "XTSE")
+        .eq("exchange_id", exchange_id)
         .gte("session_date", floor)
         .lt("session_date", trade_date)
         .execute()
@@ -113,7 +113,7 @@ def _prior_nav_date(client: Any, trade_date: str) -> str:
     overrides = (
         client.table("bt_exchange_calendar_overrides")
         .select("session_date,force_open,force_closed")
-        .eq("exchange_id", "XTSE")
+        .eq("exchange_id", exchange_id)
         .gte("session_date", floor)
         .lt("session_date", trade_date)
         .execute()
@@ -184,8 +184,32 @@ def verify_export_capital(
         )
     if not audits:
         raise ValueError("A verified trade sizing audit is required before export")
+    scenario_keys = set()
+    for audit in audits:
+        scenario = (audit.get("configuration_snapshot") or {}).get("pmiScenario")
+        if scenario is None:
+            scenario_keys.add(None)
+            continue
+        if (
+            not isinstance(scenario, dict)
+            or scenario.get("version") != 1
+            or scenario.get("source") != "us_flash_pmi_composite"
+            or scenario.get("exchangeCalendarId") not in ("XTSE", "XNYS")
+            or scenario.get("tradeDate") != capital_date(audit["trade_date"])
+            or not isinstance(scenario.get("value"), (int, float))
+            or not math.isfinite(scenario["value"])
+            or not 0 < scenario["value"] <= 100
+        ):
+            raise ValueError("PMI scenario audit is invalid; rerun before export")
+        effective_date = capital_date(scenario.get("effectiveDate", ""))
+        if effective_date >= scenario["tradeDate"]:
+            raise ValueError("PMI scenario must use the prior signal session")
+        scenario_keys.add((scenario["tradeDate"], effective_date, scenario["value"]))
+    if len(scenario_keys) > 1:
+        raise ValueError("Different PMI assumptions must be exported separately")
     # One fresh snapshot per fund/date in this request, never across exports.
     expected_by_date: dict[str, str] = {}
+    scenario_date_by_calendar: dict[tuple[str, str], str] = {}
     capital_by_fund_date: dict[tuple[str, str], dict[str, Any]] = {}
     adjustment_by_fund_date: dict[tuple[str, str], float] = {}
     for audit in audits:
@@ -194,6 +218,17 @@ def verify_export_capital(
         if trade_date not in expected_by_date:
             expected_by_date[trade_date] = _prior_nav_date(client, trade_date)
         expected = expected_by_date[trade_date]
+        scenario = (audit.get("configuration_snapshot") or {}).get("pmiScenario")
+        if scenario is not None:
+            calendar_key = (trade_date, scenario["exchangeCalendarId"])
+            if calendar_key not in scenario_date_by_calendar:
+                scenario_date_by_calendar[calendar_key] = (
+                    expected
+                    if calendar_key[1] == "XTSE"
+                    else _prior_nav_date(client, trade_date, calendar_key[1])
+                )
+            if scenario["effectiveDate"] != scenario_date_by_calendar[calendar_key]:
+                raise ValueError("PMI scenario does not match the prior model session")
         capital_key = ("The Soar Fund" if fund == "SOAR Fund" else fund, expected)
         if capital_key not in capital_by_fund_date:
             capital_by_fund_date[capital_key] = fetch_fund_capital(*capital_key)

@@ -50,6 +50,32 @@ class AuditClient:
 
 
 class FundCapitalTests(unittest.TestCase):
+    def test_different_pmi_scenarios_never_reach_file_sizing(self):
+        client, _ = self.batch_client([("EHP Alpha", "2026-10-22", "2026-10-21")] * 2)
+        audits = client.tables["bt_sggg_trade_drafts"]
+        scenario = {
+            "version": 1,
+            "source": "us_flash_pmi_composite",
+            "exchangeCalendarId": "XTSE",
+            "value": 55.9,
+            "tradeDate": "2026-10-22",
+            "effectiveDate": "2026-10-21",
+        }
+        audits[0]["configuration_snapshot"]["pmiScenario"] = scenario
+        with (
+            patch("sggg.fund_capital.fetch_fund_capital") as fetch,
+            self.assertRaisesRegex(ValueError, "exported separately"),
+        ):
+            verify_export_capital(client, "user", "file", "hash")
+        fetch.assert_not_called()
+        audits[1]["configuration_snapshot"]["pmiScenario"] = {**scenario, "value": 56}
+        with self.assertRaisesRegex(ValueError, "exported separately"):
+            verify_export_capital(client, "user", "file", "hash")
+        audits[1]["configuration_snapshot"]["pmiScenario"] = scenario
+        capital = read_fund_capital(Cursor(), "EHP Alpha", "20261021")
+        with patch("sggg.fund_capital.fetch_fund_capital", return_value=capital):
+            verify_export_capital(client, "user", "file", "hash")
+
     def batch_client(self, fund_dates):
         audits = []
         capitals = {}

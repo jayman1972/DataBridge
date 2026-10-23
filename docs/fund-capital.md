@@ -18,3 +18,8 @@ generate trades, rewrite drafts, or alter historical fund records.
 Within a single save request, the calendar is read once per trade date and NAV,
 flows and additional cash are read once per fund/date. Every draft's proof is
 still compared with those fresh results. No results are reused on a later save.
+
+PMI scenario audits must match the trade date and verified prior session. The
+bridge rejects batches mixing normal drafts and PMI scenarios, or different PMI
+values. Each alternative must be exported separately; this never selects or
+submits a basket for execution.

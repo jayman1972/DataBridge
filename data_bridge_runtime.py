@@ -14,8 +14,9 @@ from bloomberg.etf_constituents import (
 )
 from sggg.fund_capital import register_fund_capital_routes
 from sggg.production_routes import register_sggg_production_routes
+from sggg.soar_risk_service import register_soar_risk_routes, start_soar_risk_scheduler
 
-data_bridge.DATA_BRIDGE_BUILD = "2026-10-23-pmi-scenario-export-guard"
+data_bridge.DATA_BRIDGE_BUILD = "2026-10-28-soar-risk-reports"
 register_fund_capital_routes(data_bridge.app, service_key=data_bridge.SUPABASE_KEY)
 register_sggg_production_routes(
     data_bridge.app,
@@ -26,6 +27,12 @@ register_sggg_production_routes(
 register_corporate_action_routes(
     data_bridge.app,
     client=data_bridge.bloomberg_client,
+    service_key=data_bridge.SUPABASE_KEY,
+)
+register_soar_risk_routes(
+    data_bridge.app,
+    bbg=data_bridge.bloomberg_client,
+    supabase_client=data_bridge.supabase,
     service_key=data_bridge.SUPABASE_KEY,
 )
 
@@ -76,6 +83,10 @@ def bloomberg_etf_constituents():
 
 
 if __name__ == "__main__":
+    start_soar_risk_scheduler(
+        bbg=data_bridge.bloomberg_client,
+        supabase_client=data_bridge.supabase,
+    )
     data_bridge.app.run(
         host="127.0.0.1",
         port=data_bridge.SERVICE_PORT,

@@ -18,7 +18,7 @@ import pyodbc
 from flask import Flask, jsonify, request, send_file
 
 from sggg.diamond_client import get_diamond_client
-from sggg.soar_risk_data import collect_soar_risk_report
+from sggg.soar_risk_data import collect_soar_risk_report, weekly_position_date
 from sggg.soar_risk_math import parse_iso_date, previous_friday
 from sggg.soar_risk_pdf import build_soar_risk_pdf
 
@@ -38,10 +38,11 @@ def generate_soar_risk_report(
     diamond = get_diamond_client()
     if diamond is None:
         raise RuntimeError("Diamond connection is unavailable")
+    position_date = weekly_position_date(diamond, as_of, bbg)
     connection = pyodbc.connect("DSN=PSC_VIEWER", timeout=15)
     try:
         report = collect_soar_risk_report(
-            as_of=as_of, diamond=diamond, bbg=bbg,
+            as_of=position_date, diamond=diamond, bbg=bbg,
             supabase_client=supabase_client, psc_connection=connection,
             generated_at=datetime.now(TORONTO),
         )
@@ -98,8 +99,9 @@ def register_soar_risk_routes(
             report, pdf = generate_soar_risk_report(
                 as_of=as_of, bbg=bbg, supabase_client=supabase_client,
             )
+            position_date = parse_iso_date(report["position_date"])
             if payload.get("save_to_disk") is True:
-                path = save_soar_risk_report(as_of, pdf)
+                path = save_soar_risk_report(position_date, pdf)
                 return jsonify(
                     {
                         "saved_path": str(path),
@@ -109,12 +111,14 @@ def register_soar_risk_routes(
                         "class_b_navpu": report["class_b_navpu"],
                     }
                 )
-            return send_file(
+            response = send_file(
                 io.BytesIO(pdf),
                 mimetype="application/pdf",
                 as_attachment=False,
-                download_name=report_filename(as_of),
+                download_name=report_filename(position_date),
             )
+            response.headers["X-Report-Position-Date"] = position_date.isoformat()
+            return response
         except (TypeError, ValueError) as exc:
             return jsonify({"error": str(exc)}), 422
         except FileExistsError as exc:
@@ -142,23 +146,31 @@ def start_soar_risk_scheduler(*, bbg: Any, supabase_client: Any) -> threading.Th
 
     def loop() -> None:
         last_error: str | None = None
+        completed_week: date | None = None
         while True:
-            as_of = scheduled_report_due()
-            if as_of is not None:
-                destination = OUTPUT_DIR / report_filename(as_of)
-                if not destination.is_file():
-                    try:
+            week_ending = scheduled_report_due()
+            if week_ending is not None and week_ending != completed_week:
+                try:
+                    diamond = get_diamond_client()
+                    if diamond is None:
+                        raise RuntimeError("Diamond connection is unavailable")
+                    position_date = weekly_position_date(diamond, week_ending, bbg)
+                    destination = OUTPUT_DIR / report_filename(position_date)
+                    if destination.is_file():
+                        completed_week = week_ending
+                    else:
                         _, pdf = generate_soar_risk_report(
-                            as_of=as_of, bbg=bbg, supabase_client=supabase_client,
+                            as_of=week_ending, bbg=bbg, supabase_client=supabase_client,
                         )
-                        saved = save_soar_risk_report(as_of, pdf)
+                        saved = save_soar_risk_report(position_date, pdf)
                         print(f"[soar-risk] saved {saved}", flush=True)
+                        completed_week = week_ending
                         last_error = None
-                    except Exception as exc:
-                        error = f"{as_of}: {type(exc).__name__}: {exc}"
-                        if error != last_error:
-                            LOGGER.exception("[soar-risk] weekly report pending: %s", error)
-                            last_error = error
+                except Exception as exc:
+                    error = f"{week_ending}: {type(exc).__name__}: {exc}"
+                    if error != last_error:
+                        LOGGER.exception("[soar-risk] weekly report pending: %s", error)
+                        last_error = error
             time.sleep(300)
 
     worker = threading.Thread(target=loop, name="soar-risk-weekly", daemon=True)

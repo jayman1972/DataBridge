@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from sggg.diamond_client import DiamondNavUnavailableError
 from sggg.nav_sheet_parse import parse_nav_sheet_summary
 from sggg.soar_risk_math import (
     growth_series,
@@ -58,6 +59,10 @@ SCENARIOS = (
 )
 
 
+class DiamondValuationDateMismatch(ValueError):
+    """The requested date maps to a different Diamond valuation strike."""
+
+
 def _number(value: Any, label: str) -> float:
     try:
         result = float(value)
@@ -82,7 +87,7 @@ def _class_b_nav(client: Any, target: date) -> tuple[dict[str, Any], dict[str, A
         raise ValueError(f"Diamond Class B NAV is unavailable for {target.isoformat()}")
     actual_date = parse_iso_date(summary.get("sheet_valuation_date"))
     if actual_date != target:
-        raise ValueError(
+        raise DiamondValuationDateMismatch(
             f"Diamond returned {actual_date.isoformat()} for requested {target.isoformat()}"
         )
     if str(summary.get("fund_parent_id", "")).lower() != SOAR_PARENT_ID:
@@ -96,6 +101,47 @@ def _class_b_nav(client: Any, target: date) -> tuple[dict[str, Any], dict[str, A
     if navpu <= 0:
         raise ValueError("Class B NAV per share must be positive")
     return summary, raw
+
+
+def _tsx_closed_on_friday(bbg: Any, friday: date) -> bool:
+    """Confirm a Canadian-market Friday holiday from nearby TSX closes."""
+    rows = bbg.get_historical_data(
+        ticker="SPTSX Index", fields=["PX_LAST"],
+        start_date=(friday - timedelta(days=7)).isoformat(),
+        end_date=friday.isoformat(), adjustment_profile="raw",
+    )
+    observed = {parse_iso_date(row.get("date")) for row in rows}
+    return friday not in observed and any(
+        friday - timedelta(days=4) <= day < friday for day in observed
+    )
+
+
+def weekly_position_date(client: Any, week_ending: date, bbg: Any = None) -> date:
+    """Use the week's final exact NAV strike, never a later month-end strike.
+
+    An unfinalized Friday is treated as a holiday only when nearby Bloomberg
+    TSX closes confirm that Friday's market was shut. Otherwise, retry rather
+    than pick an unrelated midweek/month-end NAV strike.
+    """
+    if week_ending.weekday() != 4:
+        raise ValueError("Week-ending date must be a Friday")
+    confirmed_holiday = False
+    for offset in range(5):
+        candidate = week_ending - timedelta(days=offset)
+        try:
+            _class_b_nav(client, candidate)
+        except DiamondValuationDateMismatch:
+            continue
+        except DiamondNavUnavailableError:
+            if offset == 0:
+                if bbg is None or not _tsx_closed_on_friday(bbg, week_ending):
+                    raise
+                confirmed_holiday = True
+            elif not confirmed_holiday:
+                raise
+            continue
+        return candidate
+    raise ValueError(f"No exact weekly SOAR NAV strike for week ending {week_ending}")
 
 
 def _nav_at_or_before(client: Any, target: date) -> tuple[date, float]:
@@ -124,22 +170,30 @@ def _class_b_item(raw: dict[str, Any], name: str) -> str | None:
     return None
 
 
-def _valuation_dates_after_handoff(as_of: date) -> list[date]:
+def _valuation_dates_after_handoff(client: Any, bbg: Any, as_of: date) -> list[date]:
     days: set[date] = {as_of}
-    day = MODEL_HANDOFF_DATE + timedelta(days=1)
-    while day <= as_of:
-        if day.weekday() == 4 or (day + timedelta(days=1)).month != day.month:
-            days.add(day)
-        day += timedelta(days=1)
+    friday = MODEL_HANDOFF_DATE + timedelta(days=7)
+    while friday <= as_of:
+        days.add(weekly_position_date(client, friday, bbg))
+        friday += timedelta(days=7)
+    month_end = prior_month_end(MODEL_HANDOFF_DATE.replace(day=1) + timedelta(days=35))
+    while month_end <= as_of:
+        try:
+            _class_b_nav(client, month_end)
+        except DiamondValuationDateMismatch:
+            pass  # No separate month-end strike on this calendar date.
+        else:
+            days.add(month_end)  # Include intervening returns, not an extra report.
+        month_end = prior_month_end(month_end + timedelta(days=35))
     return sorted(day for day in days if day > MODEL_HANDOFF_DATE)
 
 
-def _since_inception_annualized(client: Any, as_of: date) -> float:
+def _since_inception_annualized(client: Any, bbg: Any, as_of: date) -> float:
     if as_of < MODEL_HANDOFF_DATE:
         raise ValueError("Reports before the audited 2026-10-23 handoff are unsupported")
     multiplier = CLASS_B_HANDOFF_NAVPU / CLASS_B_INCEPTION_ADJUSTED_NAVPU
     prior_navpu = CLASS_B_HANDOFF_NAVPU
-    for day in _valuation_dates_after_handoff(as_of):
+    for day in _valuation_dates_after_handoff(client, bbg, as_of):
         summary, raw = _class_b_nav(client, day)
         previous_text = _class_b_item(raw, "Previous Valuation NAVPU")
         previous = _number(previous_text, "previous Class B NAVPU")
@@ -324,7 +378,7 @@ def _performance(client: Any, bbg: Any, as_of: date, navpu: float) -> list[dict[
     output.append(
         {
             "label": "S.I. (annl.)",
-            "fund": _since_inception_annualized(client, as_of),
+            "fund": _since_inception_annualized(client, bbg, as_of),
             "tsx": (current_benchmarks["SPTSX Index"] / inception_benchmark["SPTSX Index"]) ** (1 / years) - 1,
             "spx": (current_benchmarks["SPX Index"] / inception_benchmark["SPX Index"]) ** (1 / years) - 1,
             "anchor_date": INCEPTION_DATE.isoformat(),

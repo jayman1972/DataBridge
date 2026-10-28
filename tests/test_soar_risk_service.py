@@ -48,6 +48,7 @@ class SoarRiskServiceTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.mimetype, "application/pdf")
         self.assertEqual(response.data, b"%PDF-test")
+        self.assertEqual(response.headers["X-Report-Position-Date"], REPORT_DATE.isoformat())
 
     def test_route_rejects_invalid_date_before_generation(self) -> None:
         with patch("sggg.soar_risk_service.generate_soar_risk_report") as generate:
@@ -58,6 +59,35 @@ class SoarRiskServiceTests(unittest.TestCase):
             )
             generate.assert_not_called()
         self.assertEqual(response.status_code, 422)
+
+    def test_holiday_week_uses_actual_position_date_for_pdf_and_save(self) -> None:
+        report = {
+            "position_date": "2026-04-02",
+            "fund_nav": 1_000_000.0,
+            "class_b_navpu": 12.0,
+        }
+        headers = {"Authorization": "Bearer test-key"}
+        with patch("sggg.soar_risk_service.generate_soar_risk_report", return_value=(report, b"%PDF-test")):
+            preview = self.client.post(
+                "/sggg/risk-reports/soar", headers=headers, json={"as_of": "2026-04-03"}
+            )
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.headers["X-Report-Position-Date"], "2026-04-02")
+        self.assertIn("20260402", preview.headers["Content-Disposition"])
+
+        saved_path = Path("reports") / report_filename(date(2026, 4, 2))
+        with (
+            patch("sggg.soar_risk_service.generate_soar_risk_report", return_value=(report, b"%PDF-test")),
+            patch("sggg.soar_risk_service.save_soar_risk_report", return_value=saved_path) as save,
+        ):
+            response = self.client.post(
+                "/sggg/risk-reports/soar",
+                headers=headers,
+                json={"as_of": "2026-04-03", "save_to_disk": True},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["position_date"], "2026-04-02")
+        save.assert_called_once_with(date(2026, 4, 2), b"%PDF-test")
 
     def test_save_is_immutable(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as folder:

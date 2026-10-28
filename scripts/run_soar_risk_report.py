@@ -22,7 +22,7 @@ def main() -> int:
     )
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--date", help="Position date (YYYY-MM-DD); default previous Friday")
+    parser.add_argument("--date", help="Week-ending Friday (YYYY-MM-DD); default previous Friday")
     parser.add_argument("--output", type=Path, help="Write a review copy to this path")
     parser.add_argument("--save", action="store_true", help="Save to Reports - Internal")
     args = parser.parse_args()
@@ -35,7 +35,8 @@ def main() -> int:
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(pdf)
-    saved = save_soar_risk_report(as_of, pdf) if args.save else None
+    position_date = parse_iso_date(report["position_date"])
+    saved = save_soar_risk_report(position_date, pdf) if args.save else None
     print(
         json.dumps(
             {

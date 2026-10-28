@@ -3,14 +3,16 @@
 `data_bridge_runtime.py` serves the independent three-page SOAR PDF at
 `POST /sggg/risk-reports/soar`. The route requires the bridge service key and is
 intended to be called by the authenticated Fund Admin Edge Function. A request
-body contains `as_of` (`YYYY-MM-DD`) and optionally `save_to_disk: true`.
+body contains `as_of` (the week-ending Friday, `YYYY-MM-DD`) and optionally
+`save_to_disk: true`. A Friday holiday resolves to that week's last exact
+Diamond NAV strike; a separate month-end strike does not make an extra report.
 Without the save flag, the response is the PDF. With it, the PDF is saved to
 `\\ehp04\workgroups\James Park\EHP Funds\Risk\Reports - Internal` (override
 with `SOAR_RISK_REPORTS_DIR`) and the response confirms the filename. Existing
 reports are never replaced silently.
 
 The bridge process starts a weekly worker at launch. Starting Monday at 10:00
-Toronto time, it checks every five minutes for the preceding Friday's report
+Toronto time, it checks every five minutes for the preceding week's report
 and continues through Friday if a required source is late. It does nothing on
 weekends. It can run only while the signed-in DataBridge tray process and its
 Diamond, PSC, Bloomberg, Supabase, and network-share connections are available.
@@ -49,8 +51,10 @@ as a legacy statement in the layout; generating this report does not itself
 verify trade approvals. Report operators remain responsible for that
 attestation before distribution.
 
-Diamond can return a later valuation period than the requested position date
-or delay finalizing a period. The report deliberately fails rather than mix
-NAV from one date with positions, trades, and risk data from another. This may
-delay a weekly PDF, especially near month-end, and should be monitored in the
-bridge log.
+Diamond can return a later valuation period than the requested Friday or
+delay finalizing it. An unfinalized Friday is treated as a holiday only when
+Bloomberg's nearby TSX closes confirm the Canadian market was shut that day;
+otherwise the worker retries. The report uses Friday's exact NAV strike or
+the latest exact strike earlier that week when Friday had no strike. It never
+mixes NAV from one date with positions, trades, and risk data from another.
+Month-end delays should be monitored in the bridge log.

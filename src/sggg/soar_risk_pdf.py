@@ -340,7 +340,7 @@ def _chart(pdf: canvas.Canvas, chart: dict[str, Any]) -> None:
 
     legend_top = 662
     pdf.setFillColor(colors.HexColor("#CFCFCF"))
-    pdf.rect(166, PAGE_HEIGHT - legend_top - 5, 13, 5, stroke=0, fill=1)
+    pdf.rect(166, PAGE_HEIGHT - legend_top + 1, 13, 5, stroke=0, fill=1)
     _text(pdf, 183, legend_top, "Slippage ($,RHS)", size=7.5)
     pdf.setStrokeColor(BLUE)
     pdf.setLineWidth(2)
@@ -377,7 +377,7 @@ def _page_three(pdf: canvas.Canvas, report: dict[str, Any]) -> None:
         "  -Sept 11, 2001: 9/5/2001 - 9/26/2001 (SPX -11%)",
         "  -Lehman Default: 9/15/2008 - 10/14/2008 (SPX -16.3%)",
         "  -Equity Markets Rebound in 2009: 3/4/2009 - 6/1/2009 (SPX +34.9%)",
-        "  -Covid-19 Sell Off: 2/3/2020 - 4/30/2020 (SPX -10.4%)",
+        "  -Covid-19 Sell Off: 2/3/2020 - 3/31/2020 (SPX -20.4%)",
     )
     for index, line in enumerate(notes):
         _text(pdf, 38, 202 + index * 11, line, size=8.7)

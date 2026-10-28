@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from sggg.soar_risk_data import SCENARIOS
 from sggg.soar_risk_math import (
     growth_series,
     historical_var_95,
@@ -20,6 +21,12 @@ from sggg.soar_risk_math import (
 
 
 class SoarRiskMathTests(unittest.TestCase):
+    def test_covid_scenario_ends_on_march_31(self) -> None:
+        self.assertEqual(
+            SCENARIOS[0],
+            ("Covid-19 Sell Off", date(2020, 2, 3), date(2020, 3, 31)),
+        )
+
     def test_previous_friday_for_monday_and_friday(self) -> None:
         self.assertEqual(previous_friday(date(2026, 10, 26)), date(2026, 10, 23))
         self.assertEqual(previous_friday(date(2026, 10, 30)), date(2026, 10, 23))

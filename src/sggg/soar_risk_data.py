@@ -52,7 +52,7 @@ MODEL_TXT_PATH = Path(
 MODEL_GAP_PATH = Path(__file__).resolve().parent / "data" / "soar_model_gap_20261019_20261023.csv"
 
 SCENARIOS = (
-    ("Covid-19 Sell Off", date(2020, 2, 3), date(2020, 4, 30)),
+    ("Covid-19 Sell Off", date(2020, 2, 3), date(2020, 3, 31)),
     ("Equity Markets Rebound in 2009", date(2009, 3, 4), date(2009, 6, 1)),
     ("Lehman Default", date(2008, 9, 15), date(2008, 10, 14)),
     ("Sept 11, 2001", date(2001, 9, 5), date(2001, 9, 26)),

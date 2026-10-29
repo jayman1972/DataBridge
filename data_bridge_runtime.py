@@ -16,7 +16,7 @@ from sggg.fund_capital import register_fund_capital_routes
 from sggg.production_routes import register_sggg_production_routes
 from sggg.soar_risk_service import register_soar_risk_routes, start_soar_risk_scheduler
 
-data_bridge.DATA_BRIDGE_BUILD = "2026-10-28-soar-risk-reports"
+data_bridge.DATA_BRIDGE_BUILD = "2026-10-29-reviewed-trade-csv-save"
 register_fund_capital_routes(data_bridge.app, service_key=data_bridge.SUPABASE_KEY)
 register_sggg_production_routes(
     data_bridge.app,

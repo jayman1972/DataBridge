@@ -322,7 +322,7 @@ class FundCapitalTests(unittest.TestCase):
                 return_value=("user", None, 200),
             ),
             patch(
-                "sggg.production_routes.verify_export_capital",
+                "sggg.production_routes.verify_recorded_trade_file",
                 side_effect=ValueError("Rerun"),
             ),
             patch("sggg.production_routes.save_alphadesk_trade_file") as write,

@@ -12,7 +12,6 @@ import requests
 from flask import Flask, jsonify, request
 
 from .alphadesk_security_coverage import fetch_alphadesk_security_coverage
-from .fund_capital import verify_export_capital
 from .trade_file_export import DEFAULT_TRADE_EXPORT_DIR, save_alphadesk_trade_file
 
 _LOGGER = logging.getLogger("data_bridge.sggg.production")
@@ -55,6 +54,29 @@ def _authenticated_admin_user_id(
         return None, "Administrator authorization could not be verified.", 503
 
 
+def verify_recorded_trade_file(
+    client: Any, user_id: str, filename: str, digest: str
+) -> None:
+    """Require the caller's recorded file, without rerunning trade-sizing policy."""
+    for table, owner in (
+        ("bt_sggg_trade_batches", "created_by"),
+        ("bt_sggg_trade_exports", "exported_by"),
+    ):
+        records = (
+            client.table(table)
+            .select("id")
+            .eq(owner, user_id)
+            .eq("filename", filename)
+            .eq("payload_sha256", digest)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if records:
+            return
+    raise ValueError("A matching export record owned by your account is required.")
+
+
 def register_sggg_production_routes(
     app: Flask,
     *,
@@ -91,13 +113,13 @@ def register_sggg_production_routes(
                 400,
             )
         try:
-            verify_export_capital(supabase_client, user_id, filename, payload_sha256)
+            verify_recorded_trade_file(supabase_client, user_id, filename, payload_sha256)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 422
         except Exception:
-            _LOGGER.exception("Trade export capital verification failed")
+            _LOGGER.exception("Trade export ownership verification failed")
             return jsonify(
-                {"error": "Fund capital could not be verified; export is blocked."}
+                {"error": "The saved export record could not be verified. Retry saving."}
             ), 503
         target_dir = Path(
             os.environ.get("SGGG_TRADE_EXPORT_DIR", str(DEFAULT_TRADE_EXPORT_DIR))

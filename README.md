@@ -78,6 +78,12 @@ unknown.
 
 ## Documentation
 
+Trade CSV saving writes the reviewed, recorded file without reloading NAV,
+transfers, prices, or strategy/scenario inputs. Draft generation still performs
+the capital checks. The save route retains administrator authentication,
+ownership of a matching export record, filename/path restrictions, SHA-256
+integrity and atomic file replacement in `C:\SGGGPSC\Data`.
+
 - [SGGG API Fields](docs/SGGG_API_FIELDS.md) – Valid fields for the PSC/SGGG position API (for `/sggg/portfolio` and related queries)
 - [Archived IBKR Client Portal Gateway](docs/IBKR_GATEWAY.md) – retained setup and reactivation instructions
 

@@ -11,8 +11,10 @@ The command waits for Clarifi and its EHP files, then starts Calculated fields u
 Check progress or investigate an error without starting a job:
 
 ```powershell
-& 'C:\Users\jmann\AppData\Local\Programs\Python\Python312\python.exe' 'C:\Tasks\hal_maintenance_jobs.py' status
-& 'C:\Users\jmann\AppData\Local\Programs\Python\Python312\python.exe' 'C:\Tasks\hal_maintenance_jobs.py' status --run-id <runId>
+$status = & 'C:\Users\jmann\AppData\Local\Programs\Python\Python312\python.exe' 'C:\Tasks\hal_maintenance_jobs.py' status | ConvertFrom-Json
+$status.runs.clarifi
+$status.runs.'calculated-fields'
+& 'C:\Users\jmann\AppData\Local\Programs\Python\Python312\python.exe' 'C:\Tasks\hal_maintenance_jobs.py' status --run-id $status.runs.clarifi.runId
 & 'C:\Users\jmann\AppData\Local\Programs\Python\Python312\python.exe' 'C:\Tasks\hal_maintenance_jobs.py' probe
 ```
 

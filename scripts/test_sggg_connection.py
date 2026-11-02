@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test SGGG PSC connection (ODBC DSN=PSC_VIEWER). Run from DataBridge folder: python scripts/test_sggg_connection.py"""
 import sys
+
 try:
     import pyodbc
 except ImportError:
@@ -13,6 +14,6 @@ try:
     cur.fetchone()
     conn.close()
     print("OK: SGGG PSC connection successful (DSN=PSC_VIEWER).")
-except Exception as e:
+except pyodbc.Error as e:
     print(f"FAIL: {e}")
     sys.exit(1)

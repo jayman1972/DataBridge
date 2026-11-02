@@ -10,11 +10,13 @@ This uses the same env loading pattern as test_sggg_diamond_connection.py, and
 then calls GetPortfolio with the GUID and dates you specify below.
 """
 
+import argparse
+import logging
 import os
 import sys
-import argparse
 from pprint import pprint
 
+logger = logging.getLogger(__name__)
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _data_bridge_root = os.path.dirname(_script_dir)
@@ -42,7 +44,7 @@ def _load_env():
                             k, v = k.strip(), v.strip()
                             if k and v:
                                 os.environ[k] = v
-            except Exception as e:  # pragma: no cover - diagnostics only
+            except (OSError, UnicodeError) as e:  # pragma: no cover - diagnostics only
                 print(f"Warning: could not read {_cfg}: {e}")
             break
 
@@ -99,7 +101,7 @@ def main():
     _load_env()
 
     try:
-        from src.sggg.diamond_client import get_diamond_client, BASE_URL
+        from src.sggg.diamond_client import BASE_URL, get_diamond_client
     except ImportError:
         try:
             from diamond_client import get_diamond_client  # type: ignore
@@ -144,6 +146,7 @@ def main():
             exclude_not_priced_positions=exclude_not_priced_positions,
         )
     except Exception as e:
+        logger.exception("Diamond GetPortfolio diagnostic failed")
         # requests raises an HTTPError with message like:
         # "401 Client Error: Unauthorized for url: ..."
         # That text is created client-side by the requests library.
@@ -155,7 +158,7 @@ def main():
                 print("Response body:")
                 print(resp.text)
             except Exception:
-                pass
+                logger.debug("Could not print Diamond response body", exc_info=True)
         sys.exit(1)
 
     print("OK: GetPortfolio response received.")

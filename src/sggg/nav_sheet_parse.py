@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
-def _return_value_to_bps(raw: Any, base_aum: Optional[float] = None) -> Optional[int]:
+def _return_value_to_bps(raw: Any, base_aum: float | None = None) -> int | None:
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
@@ -17,7 +20,7 @@ def _return_value_to_bps(raw: Any, base_aum: Optional[float] = None) -> Optional
             return None
         if s.endswith("%"):
             try:
-                return int(round(float(s[:-1].strip()) * 100))
+                return round(float(s[:-1].strip()) * 100)
             except ValueError:
                 return None
         try:
@@ -25,14 +28,14 @@ def _return_value_to_bps(raw: Any, base_aum: Optional[float] = None) -> Optional
         except ValueError:
             return None
     if abs(v) <= 1.5:
-        return int(round(v * 10_000))
+        return round(v * 10_000)
     if base_aum is not None and abs(base_aum) > 0 and abs(v) < abs(base_aum):
-        return int(round((v / float(base_aum)) * 10_000))
-    return int(round(v * 100))
+        return round((v / float(base_aum)) * 10_000)
+    return round(v * 100)
 
 
 # Fund base / reporting currency (compliance Steps AUM and Diamond fund NAV are in this currency).
-FUND_NATIVE_CURRENCY: Dict[str, str] = {
+FUND_NATIVE_CURRENCY: dict[str, str] = {
     "415a3530-3034-4536-4432-303030364337": "CAD",
     "41010000-7F7A-0A65-D559-45484608DB40": "CAD",
     "41323030-3031-4144-3637-303030364338": "CAD",
@@ -40,9 +43,9 @@ FUND_NATIVE_CURRENCY: Dict[str, str] = {
     "01010000-801A-4995-8370-45484608DE57": "CAD",
 }
 
-def _section_items_by_name(node: Any) -> Dict[str, Any]:
+def _section_items_by_name(node: Any) -> dict[str, Any]:
     """Collect SectionItem Name->Value from a NAV sheet node (fund or class)."""
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     if not isinstance(node, dict):
         return out
     for sec in node.get("SectionList") or []:
@@ -57,7 +60,7 @@ def _section_items_by_name(node: Any) -> Dict[str, Any]:
     return out
 
 
-def _parse_money_value(raw: Any) -> Optional[float]:
+def _parse_money_value(raw: Any) -> float | None:
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
@@ -115,9 +118,9 @@ def _class_series_token(class_code: str, class_id: str) -> str:
     return ""
 
 
-def _infer_fund_series_prefix(class_codes: List[str]) -> str:
+def _infer_fund_series_prefix(class_codes: list[str]) -> str:
     """Numeric fund series prefix from CAD classes (e.g. 200 from 200A, 200I)."""
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for raw in class_codes:
         code = (raw or "").strip().upper()
         m = _FUND_SERIES_PREFIX_RE.match(code)
@@ -154,15 +157,15 @@ def _display_class_label(class_code: str, class_id: str, fund_prefix: str) -> st
 
 
 def enrich_classes_display_labels(
-    classes: List[Dict[str, Any]],
-    fund_id: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    classes: list[dict[str, Any]],
+    fund_id: str | None = None,
+) -> list[dict[str, Any]]:
     """
     Re-apply display_class labels (e.g. after loading a cached snapshot parsed before prefix fix).
     """
     if not classes:
         return []
-    codes: List[str] = []
+    codes: list[str] = []
     for row in classes:
         if not isinstance(row, dict):
             continue
@@ -173,7 +176,7 @@ def enrich_classes_display_labels(
     prefix = _infer_fund_series_prefix(codes)
     if not prefix and fund_id:
         prefix = FUND_SERIES_PREFIX_BY_FUND_ID.get((fund_id or "").strip(), "")
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for row in classes:
         if not isinstance(row, dict):
             continue
@@ -200,13 +203,13 @@ def _is_navpu_section_name(name: str) -> bool:
 
 
 def _navpu_from_section_items(
-    items: Dict[str, Any],
+    items: dict[str, Any],
     *,
     want_usd: bool,
-) -> Optional[float]:
+) -> float | None:
     """Scan NAV sheet section labels for currency-specific closing NAVPU."""
-    preferred: List[float] = []
-    fallback: List[float] = []
+    preferred: list[float] = []
+    fallback: list[float] = []
     for name, raw in items.items():
         if not _is_navpu_section_name(name):
             continue
@@ -231,7 +234,7 @@ def _navpu_from_section_items(
     return fallback[0] if fallback else None
 
 
-def _entry_navpu(entry: Dict[str, Any], *, want_usd: bool) -> Optional[float]:
+def _entry_navpu(entry: dict[str, Any], *, want_usd: bool) -> float | None:
     """
     Top-level NAVPU on the class entry (authoritative when present).
 
@@ -252,7 +255,7 @@ def _entry_navpu(entry: Dict[str, Any], *, want_usd: bool) -> Optional[float]:
     return None
 
 
-def _parse_class_navpu(entry: Dict[str, Any], fund_base_ccy: str) -> Tuple[Optional[float], str]:
+def _parse_class_navpu(entry: dict[str, Any], fund_base_ccy: str) -> tuple[float | None, str]:
     """
     Per-class NAVPU in the class's own currency. USD series (code contains U) use USD NAVPU fields.
     """
@@ -275,7 +278,7 @@ def _parse_class_navpu(entry: Dict[str, Any], fund_base_ccy: str) -> Tuple[Optio
     return navpu, class_ccy
 
 
-def normalize_diamond_sheet_date(raw: Any) -> Optional[str]:
+def normalize_diamond_sheet_date(raw: Any) -> str | None:
     """Normalize ValuationDate from GetNAVSheet response to yyyy-mm-dd."""
     if raw is None:
         return None
@@ -283,7 +286,7 @@ def normalize_diamond_sheet_date(raw: Any) -> Optional[str]:
         try:
             return raw.date().isoformat()
         except Exception:
-            pass
+            logger.debug("Could not read Diamond valuation date object", exc_info=True)
     s = str(raw).strip()
     if not s:
         return None
@@ -295,7 +298,7 @@ def normalize_diamond_sheet_date(raw: Any) -> Optional[str]:
     return None
 
 
-def fund_aum_from_summary(summary: Dict[str, Any]) -> Optional[float]:
+def fund_aum_from_summary(summary: dict[str, Any]) -> float | None:
     """Fund-level AUM from a parsed GetNAVSheet summary (for cache / SGGG day change)."""
     nav = summary.get("net_asset_value_native")
     if nav is not None:
@@ -303,7 +306,7 @@ def fund_aum_from_summary(summary: Dict[str, Any]) -> Optional[float]:
     return _parse_money_value(summary.get("net_asset_value"))
 
 
-def sum_class_net_assets_cad(body: Dict[str, Any], fund_id: str) -> Optional[float]:
+def sum_class_net_assets_cad(body: dict[str, Any], fund_id: str) -> float | None:
     """Sum per-class net assets for CAD series only (USD series excluded)."""
     base = FUND_NATIVE_CURRENCY.get(fund_id, "CAD")
     raw_classes = body.get("ClassSeriesFundList")
@@ -374,16 +377,14 @@ def _is_capital_flow_item(name: str) -> bool:
         return "EQUITY" in upper or "UNITS" in upper or upper in ("SUBSCRIPTIONS", "SUBSCRIPTION")
     if "REDEMPTION" in upper or "WITHDRAWAL" in upper:
         return "EQUITY" in upper or "UNITS" in upper or upper in ("REDEMPTIONS", "REDEMPTION")
-    if "NET SUBS" in upper or "NET CAPITAL" in upper or "CAPITAL FLOW" in upper:
-        return True
-    return False
+    return bool("NET SUBS" in upper or "NET CAPITAL" in upper or "CAPITAL FLOW" in upper)
 
 
 def _is_capital_flow_section_item(section_name: str, item_name: str) -> bool:
     return _is_capital_flow_item(_capital_flow_label(section_name, item_name))
 
 
-def _iter_section_items(section: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _iter_section_items(section: dict[str, Any]) -> list[dict[str, Any]]:
     """SectionItem may be a list, a single dict, or absent."""
     raw = section.get("SectionItem")
     if isinstance(raw, dict):
@@ -393,9 +394,9 @@ def _iter_section_items(section: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
-def list_capital_flow_candidates(body: Dict[str, Any]) -> List[Dict[str, Any]]:
+def list_capital_flow_candidates(body: dict[str, Any]) -> list[dict[str, Any]]:
     """All subs/redemption-like lines on the NAV sheet, every share class (for debugging / UI)."""
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for sec in body.get("SectionList") or []:
         if not isinstance(sec, dict):
             continue
@@ -444,10 +445,10 @@ def list_capital_flow_candidates(body: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def pick_fund_aum_for_role(
-    body: Dict[str, Any],
+    body: dict[str, Any],
     fund_id: str,
     role: str,
-) -> Tuple[Optional[float], Optional[str]]:
+) -> tuple[float | None, str | None]:
     """
     Fund AUM from GetNAVSheet for opening vs closing on the sheet's valuation date.
     role: 'closing' (EOD / end of period) or 'opening' (start of period).
@@ -487,11 +488,10 @@ def pick_fund_aum_for_role(
             return v, key
     for name, raw in items.items():
         upper = (name or "").upper()
-        if "OPENING" in upper or "BEGINNING" in upper:
-            if "NET ASSET" in upper or "NAV" in upper:
-                v = _parse_money_value(raw)
-                if v is not None:
-                    return v, name
+        if ("OPENING" in upper or "BEGINNING" in upper) and ("NET ASSET" in upper or "NAV" in upper):
+            v = _parse_money_value(raw)
+            if v is not None:
+                return v, name
     if root_nav is not None:
         return root_nav, "NetAssetValue"
     class_sum = sum_class_net_assets_cad(body, fund_id)
@@ -501,9 +501,9 @@ def pick_fund_aum_for_role(
 
 
 def pick_fund_net_asset_value(
-    body: Dict[str, Any],
+    body: dict[str, Any],
     fund_id: str,
-) -> Tuple[Optional[float], str]:
+) -> tuple[float | None, str]:
     """Fund-level NetAssetValue in the fund's base currency (typically CAD)."""
     base = FUND_NATIVE_CURRENCY.get(fund_id, "CAD")
     fund_ccy = _normalize_currency_code(body.get("FundCurrency"), default=base)
@@ -530,7 +530,7 @@ def pick_fund_net_asset_value(
     return None, base
 
 
-def _opening_equity_flow_row(row: Dict[str, Any]) -> bool:
+def _opening_equity_flow_row(row: dict[str, Any]) -> bool:
     name = (row.get("name") or "").upper()
     return "ADJUSTED OPENING EQUITY" in name and (
         "CONTRIBUTION" in name or "REDEMPTION" in name
@@ -538,10 +538,10 @@ def _opening_equity_flow_row(row: Dict[str, Any]) -> bool:
 
 
 def _capital_flow_from_candidates_filtered(
-    candidates: List[Dict[str, Any]],
+    candidates: list[dict[str, Any]],
     *,
     opening_equity_only: bool,
-) -> Tuple[Optional[float], Optional[str]]:
+) -> tuple[float | None, str | None]:
     class_rows = [r for r in candidates if r.get("scope") == "class"]
     if opening_equity_only:
         class_rows = [r for r in class_rows if _opening_equity_flow_row(r)]
@@ -553,7 +553,7 @@ def _capital_flow_from_candidates_filtered(
             return total, names
         return None, None
     total = sum(float(r["amount"]) for r in class_rows)
-    labels: List[str] = []
+    labels: list[str] = []
     for row in class_rows:
         if float(row["amount"]) == 0:
             continue
@@ -571,10 +571,10 @@ def _capital_flow_from_candidates_filtered(
 
 
 def capital_flow_net_from_summary(
-    summary: Dict[str, Any],
+    summary: dict[str, Any],
     *,
     opening_equity_only: bool = False,
-) -> Tuple[Optional[float], Optional[str]]:
+) -> tuple[float | None, str | None]:
     """Net subs/reds on a single GetNAVSheet summary (one valuation date)."""
     if not summary:
         return None, None
@@ -588,7 +588,7 @@ def capital_flow_net_from_summary(
     )
 
 
-def prior_flows_for_opening_basis(summary_prior: Dict[str, Any]) -> float:
+def prior_flows_for_opening_basis(summary_prior: dict[str, Any]) -> float:
     """
     Flows on the prior sheet that adjust opening AUM before the report day.
 
@@ -604,9 +604,9 @@ def prior_flows_for_opening_basis(summary_prior: Dict[str, Any]) -> float:
 
 
 def sggg_opening_aum_from_prior_summary(
-    summary_prior: Dict[str, Any],
+    summary_prior: dict[str, Any],
     prior_date: str,
-) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[str]]:
+) -> tuple[float | None, float | None, float | None, str | None]:
     """
     SGGG opening AUM = prior GetNAVSheet EOD closing (fund NetAssetValue on prior date).
 
@@ -627,13 +627,13 @@ def sggg_opening_aum_from_prior_summary(
 
 
 def _capital_flow_from_candidates(
-    candidates: List[Dict[str, Any]],
-) -> Tuple[Optional[float], Optional[str]]:
+    candidates: list[dict[str, Any]],
+) -> tuple[float | None, str | None]:
     """Net flow from parsed candidate rows (class lines summed across all series)."""
     class_rows = [r for r in candidates if r.get("scope") == "class"]
     if class_rows:
         total = sum(float(r["amount"]) for r in class_rows)
-        labels: List[str] = []
+        labels: list[str] = []
         for row in class_rows:
             amt = float(row["amount"])
             if amt == 0:
@@ -656,7 +656,7 @@ def _capital_flow_from_candidates(
     return None, None
 
 
-def pick_capital_flow_adjustment(body: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
+def pick_capital_flow_adjustment(body: dict[str, Any]) -> tuple[float | None, str | None]:
     """
     Net subscriptions/redemptions on the valuation date from Diamond NAV sheet.
     Positive = net inflow (same sign as compliance Net Subs (reds)).
@@ -688,7 +688,7 @@ def pick_capital_flow_adjustment(body: Dict[str, Any]) -> Tuple[Optional[float],
     return None, None
 
 
-def _valuation_period_return(class_entry: Dict[str, Any]) -> Any:
+def _valuation_period_return(class_entry: dict[str, Any]) -> Any:
     for sec in class_entry.get("SectionList") or []:
         if sec.get("SectionName") != "Returns":
             continue
@@ -698,7 +698,7 @@ def _valuation_period_return(class_entry: Dict[str, Any]) -> Any:
     return None
 
 
-def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
+def parse_nav_sheet_summary(payload: Any) -> dict[str, Any]:
     """
     Normalize GetNAVSheet JSON into fund-level summary.
 
@@ -737,7 +737,7 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
     ]
     fund_series_prefix = _infer_fund_series_prefix(class_codes_for_prefix)
 
-    classes_out: List[Dict[str, Any]] = []
+    classes_out: list[dict[str, Any]] = []
     for entry in raw_classes:
         if not isinstance(entry, dict):
             continue
@@ -806,7 +806,7 @@ def parse_nav_sheet_summary(payload: Any) -> Dict[str, Any]:
 
 
 # Default class series number prefix when Diamond omits it on suffix-only ClassCodes.
-FUND_SERIES_PREFIX_BY_FUND_ID: Dict[str, str] = {
+FUND_SERIES_PREFIX_BY_FUND_ID: dict[str, str] = {
     "415a3530-3034-4536-4432-303030364337": "200",
     "41010000-7F7A-0A65-D559-45484608DB40": "550",
     "41323030-3031-4144-3637-303030364338": "500",
@@ -815,7 +815,7 @@ FUND_SERIES_PREFIX_BY_FUND_ID: Dict[str, str] = {
 }
 
 # Diamond fund parent GUID -> PSC portfolio name (Fund Admin NAV checker)
-NAV_CHECKER_FUND_ID_TO_PSC: Dict[str, str] = {
+NAV_CHECKER_FUND_ID_TO_PSC: dict[str, str] = {
     "415a3530-3034-4536-4432-303030364337": "EHP Alpha",
     "41010000-7F7A-0A65-D559-45484608DB40": "EHP Tact Growth Alt",
     "41323030-3031-4144-3637-303030364338": "EHP Select Alt",
@@ -824,7 +824,7 @@ NAV_CHECKER_FUND_ID_TO_PSC: Dict[str, str] = {
 }
 
 # Alternate PSC portfolio names (tried in order until rows are returned).
-NAV_CHECKER_PSC_PORTFOLIO_CANDIDATES: Dict[str, List[str]] = {
+NAV_CHECKER_PSC_PORTFOLIO_CANDIDATES: dict[str, list[str]] = {
     "01010000-801A-4995-8370-45484608DE57": [
         "Expon Bal Grow Fund",
         "Exponential Balanced Growth Fund",
@@ -837,11 +837,11 @@ def _compact_yyyymmdd(iso_date: str) -> str:
 
 
 def fetch_psc_portfolio_navs(
-    fund_ids: List[str],
+    fund_ids: list[str],
     prior_date_iso: str,
     valuation_date_iso: str,
     dsn: str = "PSC_VIEWER",
-) -> Dict[str, Dict[str, Optional[float]]]:
+) -> dict[str, dict[str, float | None]]:
     """
     Fund-level PORTFOLIO_NAV from PSC for prior and valuation dates.
     Returns {fund_id: {"opening": float|None, "closing": float|None}}.
@@ -864,7 +864,7 @@ def fetch_psc_portfolio_navs(
     except ImportError:
         return {}
 
-    out: Dict[str, Dict[str, Optional[float]]] = {fid: {"opening": None, "closing": None} for fid in fund_ids}
+    out: dict[str, dict[str, float | None]] = {fid: {"opening": None, "closing": None} for fid in fund_ids}
     conn = None
     try:
         conn = pyodbc.connect(f"DSN={dsn}", timeout=15)
@@ -876,7 +876,7 @@ def fetch_psc_portfolio_navs(
             "GROUP BY PORTFOLIO, POSN_DATE_INT"
         )
         cur.execute(sql, (*port_names, prior_compact, val_compact))
-        nav_by_port_date: Dict[tuple, float] = {}
+        nav_by_port_date: dict[tuple, float] = {}
         for row in cur.fetchall() or []:
             port = (str(row[0]).strip() if row[0] is not None else "")
             dt = (str(row[1]).strip() if row[1] is not None else "")
@@ -894,13 +894,14 @@ def fetch_psc_portfolio_navs(
                 "closing": closing,
             }
     except Exception:
+        logger.warning("Could not load PSC portfolio NAVs", exc_info=True)
         return {fid: {"opening": None, "closing": None} for fid in fund_ids}
     finally:
         if conn:
             try:
                 conn.close()
             except Exception:
-                pass
+                logger.debug("Could not close PSC NAV connection", exc_info=True)
     return out
 
 
@@ -926,10 +927,10 @@ def previous_business_day_iso(iso_date: str) -> str:
 
 
 def prior_open_sheet_is_usable(
-    sheet_date_iso: Optional[str],
+    sheet_date_iso: str | None,
     valuation_date_iso: str,
     requested_date_iso: str,
-) -> Tuple[bool, Optional[str]]:
+) -> tuple[bool, str | None]:
     """
     True when a prior-day GetNAVSheet can be used as opening EOD for valuation_date.
 
@@ -952,9 +953,9 @@ def prior_business_days_for_lookup(
     initial_prior_iso: str,
     *,
     max_days: int = 12,
-) -> List[str]:
+) -> list[str]:
     """Calendar prior business days to try for opening NAV (holiday walk-back)."""
-    out: List[str] = []
+    out: list[str] = []
     d = normalize_valuation_date(initial_prior_iso)
     for _ in range(max(1, max_days)):
         if d in out:
@@ -977,7 +978,7 @@ def _is_class_i_series(token: str) -> bool:
     return bool(re.search(r"\dI$", t)) and "U" not in t
 
 
-def pick_class_i_bps(classes: List[Dict[str, Any]]) -> Optional[int]:
+def pick_class_i_bps(classes: list[dict[str, Any]]) -> int | None:
     """Return valuation-period return (bps) for Class I share class."""
     for cls in classes or []:
         token = (
@@ -1015,7 +1016,7 @@ def nav_unavailable_user_message(end_date: str) -> str:
     return f"NAV not available yet for {end_date}"
 
 
-def parse_diamond_nav_unavailable(error: Exception, valuation_date: str) -> Optional[Dict[str, str]]:
+def parse_diamond_nav_unavailable(error: Exception, valuation_date: str) -> dict[str, str] | None:
     """
     Detect Diamond HTTP 400 responses where the valuation period is not finalized yet.
     Returns {end_date, message} or None if this is a different error.

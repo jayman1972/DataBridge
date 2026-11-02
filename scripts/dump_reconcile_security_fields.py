@@ -11,17 +11,16 @@ Prints every label-related column on psc_position_history / psc_security_data so
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sggg.close_price_reconcile import (  # noqa: E402
-    portfolio_details_display_ticker,
+from sggg.close_price_reconcile import (
     _looks_like_bond_description,
     _looks_like_option_description,
     parse_option_contract_key,
+    portfolio_details_display_ticker,
 )
 
 PSC_LABEL_SQL = """

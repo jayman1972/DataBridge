@@ -2,10 +2,15 @@
 Clarifi and EHP file processing for Data Bridge.
 Used by /clarifi/process and /ehp/process endpoints.
 """
+from __future__ import annotations
+
+import logging
 import re
 import traceback
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 try:
     from dateutil import parser as dateutil_parser
@@ -14,7 +19,7 @@ except ImportError:
     HAS_DATEUTIL = False
 
 
-def normalize_date(date_str: str) -> Optional[str]:
+def normalize_date(date_str: str) -> str | None:
     """Normalize date string to YYYY-MM-DD format"""
     if not date_str:
         return None
@@ -30,15 +35,14 @@ def normalize_date(date_str: str) -> Optional[str]:
             return f"{year}-{month_num:02d}-01"
     if HAS_DATEUTIL:
         try:
-            from datetime import datetime
             dt = dateutil_parser.parse(str(date_str))
             return dt.strftime("%Y-%m-%d")
-        except Exception:
-            pass
+        except (TypeError, ValueError, OverflowError):
+            return None
     return None
 
 
-def parse_delimited_file(file_path: Path, delimiter: str = '\t') -> List[Dict[str, Any]]:
+def parse_delimited_file(file_path: Path, delimiter: str = '\t') -> list[dict[str, Any]]:
     """Parse tab or comma delimited file"""
     rows = []
     try:
@@ -62,12 +66,12 @@ def parse_delimited_file(file_path: Path, delimiter: str = '\t') -> List[Dict[st
                     except ValueError:
                         row[header] = value if value else None
                 rows.append(row)
-    except Exception as e:
+    except (OSError, UnicodeError) as e:
         print(f"Error parsing file {file_path}: {e}")
     return rows
 
 
-def process_clarifi_file(file_path: Path, supabase_client) -> Dict[str, Any]:
+def process_clarifi_file(file_path: Path, supabase_client) -> dict[str, Any]:
     """Process a Clarifi file and upload to Supabase"""
     result = {"file": str(file_path.name), "inserted": 0, "errors": []}
     if not supabase_client:
@@ -168,8 +172,10 @@ def process_clarifi_file(file_path: Path, supabase_client) -> Dict[str, Any]:
             try:
                 response = supabase_client.table("market_data").select("date").not_.is_(db_column, None).execute()
                 existing_dates_map[db_column] = {row["date"] for row in response.data if row.get("date")}
-            except Exception:
-                existing_dates_map[db_column] = set()
+            except Exception as exc:
+                logger.exception("Could not check existing market_data dates for %s", db_column)
+                result["errors"].append(f"Could not check existing dates for {db_column}: {exc}")
+                return result
         records_map = {}
         for row in rows:
             date_str = row.get("date") or row.get("dates") or row.get("month") or ""
@@ -199,8 +205,10 @@ def process_clarifi_file(file_path: Path, supabase_client) -> Dict[str, Any]:
                     supabase_client.table("market_data").upsert(batch, on_conflict="date").execute()
                     result["inserted"] += len(batch)
                 except Exception as e:
+                    logger.exception("Could not upsert Clarifi market_data batch")
                     result["errors"].append(str(e))
     except Exception as e:
+        logger.exception("Could not process Clarifi file %s", file_path)
         result["errors"].append(str(e))
         traceback.print_exc()
     return result

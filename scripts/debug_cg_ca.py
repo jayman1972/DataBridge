@@ -14,7 +14,11 @@ for line in env_path.read_text(encoding="utf-8").splitlines():
         k, v = line.split("=", 1)
         os.environ.setdefault(k.strip(), v.strip())
 
-from sggg.close_price_reconcile import flatten_diamond_portfolio_records, infer_reference_date_from_psc, normalize_valuation_date
+from sggg.close_price_reconcile import (
+    flatten_diamond_portfolio_records,
+    infer_reference_date_from_psc,
+    normalize_valuation_date,
+)
 from sggg.diamond_client import get_diamond_client
 
 FIELDS = [

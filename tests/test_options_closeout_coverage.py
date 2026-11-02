@@ -1,13 +1,21 @@
+from __future__ import annotations
+
 import ast
+import logging
 import re
 import time
 import unittest
-from pathlib import Path
-from typing import Dict, List, Optional
-from unittest.mock import MagicMock, patch
-from types import SimpleNamespace
 from datetime import datetime
-from sggg.options_closeout import format_option_contract, parse_option_contract, select_live_underlying_quote
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Optional
+from unittest.mock import MagicMock, patch
+
+from sggg.options_closeout import (
+    format_option_contract,
+    parse_option_contract,
+    select_live_underlying_quote,
+)
 from sggg.options_closeout_coverage import finish_coverage, load_start_positions
 
 
@@ -20,14 +28,16 @@ def legacy_helpers():
         if isinstance(n, ast.FunctionDef) and n.name in names:
             n.decorator_list = []
     module = ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names], type_ignores=[])
-    namespace = {"re": re, "time": time, "List": List, "Dict": Dict, "Optional": Optional,
-                 "format_option_contract": format_option_contract, "datetime": datetime}
-    exec(compile(module, "isolated-closeout-helpers", "exec"), namespace)
+    namespace = {"re": re, "time": time, "List": list, "Dict": dict, "Optional": Optional,
+                 "format_option_contract": format_option_contract, "datetime": datetime,
+                 "_logger": logging.getLogger("data_bridge.test")}
+    # Execute only selected AST definitions; importing DataBridge would start live integrations.
+    exec(compile(module, "isolated-closeout-helpers", "exec"), namespace)  # noqa: S102
     return namespace
 
 
 class Cursor:
-    __slots__ = ("rows", "portfolio")
+    __slots__ = ("portfolio", "rows")
     def __init__(self, rows):
         self.rows = rows
         self.portfolio = None
@@ -125,9 +135,8 @@ class CloseoutCoverageTest(unittest.TestCase):
     def test_emsx_times_out_before_missing_final_response(self):
         blpapi = MagicMock()
         self.helpers["_try_import_blpapi"] = lambda: (blpapi, None)
-        with patch.object(time, "monotonic", side_effect=[0, 61]):
-            with self.assertRaisesRegex(RuntimeError, "timed out"):
-                self.helpers["_emsx_history_get_fills"]("2026-10-14", team="PM")
+        with patch.object(time, "monotonic", side_effect=[0, 61]), self.assertRaisesRegex(RuntimeError, "timed out"):
+            self.helpers["_emsx_history_get_fills"]("2026-10-14", team="PM")
         blpapi.Session.return_value.stop.assert_called_once()
 
     def endpoint_namespace(self):

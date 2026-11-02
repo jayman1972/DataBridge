@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 _NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _NS_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -24,14 +24,14 @@ def _col_letters_to_index(col: str) -> int:
     return n
 
 
-def _parse_cell_ref(ref: str) -> Tuple[int, int]:
+def _parse_cell_ref(ref: str) -> tuple[int, int]:
     m = re.match(r"^([A-Z]+)(\d+)$", (ref or "").upper())
     if not m:
         raise ValueError(f"Invalid cell ref: {ref!r}")
     return _col_letters_to_index(m.group(1)), int(m.group(2))
 
 
-def _parse_range(cell_range: str) -> Tuple[int, int, int, int]:
+def _parse_range(cell_range: str) -> tuple[int, int, int, int]:
     """Return min_col, min_row, max_col, max_row (1-based)."""
     part = cell_range.strip().upper()
     if ":" in part:
@@ -43,15 +43,15 @@ def _parse_range(cell_range: str) -> Tuple[int, int, int, int]:
     return min(c1, c2), min(r1, r2), max(c1, c2), max(r1, r2)
 
 
-def _read_shared_strings(zf: zipfile.ZipFile) -> List[str]:
+def _read_shared_strings(zf: zipfile.ZipFile) -> list[str]:
     try:
         data = zf.read("xl/sharedStrings.xml")
     except KeyError:
         return []
     root = ET.fromstring(data)
-    out: List[str] = []
+    out: list[str] = []
     for si in root.findall(_tag(_NS_MAIN, "si")):
-        parts: List[str] = []
+        parts: list[str] = []
         t = si.find(_tag(_NS_MAIN, "t"))
         if t is not None and t.text is not None:
             parts.append(t.text)
@@ -69,7 +69,7 @@ def _resolve_sheet_path(zf: zipfile.ZipFile, sheet_name: str) -> str:
     sheets = wb.find(_tag(_NS_MAIN, "sheets"))
     if sheets is None:
         raise RuntimeError("workbook.xml has no sheets")
-    target_rid: Optional[str] = None
+    target_rid: str | None = None
     for sh in sheets.findall(_tag(_NS_MAIN, "sheet")):
         name = sh.get("name") or ""
         if name.upper() == sheet_name.upper():
@@ -80,7 +80,7 @@ def _resolve_sheet_path(zf: zipfile.ZipFile, sheet_name: str) -> str:
         raise RuntimeError(f"Sheet {sheet_name!r} not found. Available: {names}")
 
     rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
-    sheet_target: Optional[str] = None
+    sheet_target: str | None = None
     for rel in rels.findall(_tag(_NS_REL, "Relationship")):
         if rel.get("Id") == target_rid:
             sheet_target = rel.get("Target")
@@ -92,7 +92,7 @@ def _resolve_sheet_path(zf: zipfile.ZipFile, sheet_name: str) -> str:
     return sheet_target
 
 
-def _cell_value(c: ET.Element, shared: List[str]) -> Any:
+def _cell_value(c: ET.Element, shared: list[str]) -> Any:
     cell_type = c.get("t")
     if cell_type == "s":
         v = c.find(_tag(_NS_MAIN, "v"))
@@ -124,14 +124,14 @@ def read_sheet_range(
     workbook_path: Path,
     sheet_name: str,
     cell_range: str,
-) -> List[List[Any]]:
+) -> list[list[Any]]:
     """
     Read a rectangular range from a .xlsx sheet.
     Returns rows as lists of cell values (left to right).
     """
     min_col, min_row, max_col, max_row = _parse_range(cell_range)
     width = max_col - min_col + 1
-    grid: Dict[Tuple[int, int], Any] = {}
+    grid: dict[tuple[int, int], Any] = {}
 
     with zipfile.ZipFile(workbook_path, "r") as zf:
         shared = _read_shared_strings(zf)
@@ -151,7 +151,7 @@ def read_sheet_range(
                     continue
                 grid[(row_i, col_i)] = _cell_value(c, shared)
 
-    rows_out: List[List[Any]] = []
+    rows_out: list[list[Any]] = []
     for r in range(min_row, max_row + 1):
         rows_out.append([grid.get((r, c)) for c in range(min_col, max_col + 1)])
     return rows_out

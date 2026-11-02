@@ -1,6 +1,7 @@
 """Debug capital flow parsing per fund/date."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -54,6 +55,7 @@ def main() -> None:
             try:
                 show(fid, name, d)
             except Exception as exc:
+                logging.getLogger(__name__).exception("Could not inspect Diamond capital flow")
                 print(name, d, "ERR", exc)
         prior = c.get_nav_sheet(fid, "2026-05-19")
         close = c.get_nav_sheet(fid, "2026-05-20")

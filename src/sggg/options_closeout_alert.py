@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 def should_run_closeout_alert(
     eastern_now: datetime,
-    last_completed_date: Optional[str],
+    last_completed_date: str | None,
     enabled: bool = True,
 ) -> bool:
     """True once per weekday between 3:45 p.m. and 4:00 p.m. Eastern."""
@@ -21,16 +21,16 @@ def should_run_closeout_alert(
     return time(15, 45) <= current_time < time(16, 0)
 
 
-def collect_flagged_groups(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+def collect_flagged_groups(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Build a compact, deduplicated notification payload from report output."""
-    reasons_by_security: Dict[str, List[str]] = {}
+    reasons_by_security: dict[str, list[str]] = {}
     for trade in report.get("trades") or []:
         security = str(trade.get("security") or "").strip()
         reason = str(trade.get("flag_reason") or "").strip()
         if security and reason:
             reasons_by_security.setdefault(security, []).append(reason)
 
-    flagged: List[Dict[str, Any]] = []
+    flagged: list[dict[str, Any]] = []
     for group in report.get("groups") or []:
         if int(group.get("flags_count") or 0) <= 0:
             continue

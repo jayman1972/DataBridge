@@ -4,11 +4,14 @@ Authenticates with username/password, caches AuthKey (1hr expiry), and calls Get
 Spec: Diamond API v2.03 - https://api.sgggfsi.com/api/v1/
 """
 
+from __future__ import annotations
+
 import os
 import threading
 import time
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sggg.nav_sheet_parse import (
     fund_aum_from_summary,
@@ -27,7 +30,7 @@ BASE_URL = "https://api.sgggfsi.com/api/v1"
 AUTH_EXPIRY_BUFFER_SEC = 300  # Refresh AuthKey 5 min before expiry
 
 # Successful GetNAVSheet responses only (fund_id + ValuationDate). Not used for errors / not-finalized.
-_NAV_SHEET_SUCCESS_CACHE: Dict[str, Tuple[float, Any]] = {}
+_NAV_SHEET_SUCCESS_CACHE: dict[str, tuple[float, Any]] = {}
 
 
 def _nav_sheet_success_cache_ttl_sec() -> int:
@@ -45,7 +48,7 @@ def _prune_nav_sheet_success_cache() -> None:
             _NAV_SHEET_SUCCESS_CACHE.pop(key, None)
 
 
-def get_nav_sheet_raw_cached(fund_id: str, valuation_date: str) -> Optional[Any]:
+def get_nav_sheet_raw_cached(fund_id: str, valuation_date: str) -> Any | None:
     """Return cached GetNAVSheet JSON if still within TTL (default 30 minutes)."""
     _prune_nav_sheet_success_cache()
     key = _nav_sheet_cache_key(fund_id, valuation_date)
@@ -59,7 +62,7 @@ def get_nav_sheet_raw_cached(fund_id: str, valuation_date: str) -> Optional[Any]
     return raw
 
 
-def nav_sheet_summary_cacheable(summary: Dict[str, Any]) -> bool:
+def nav_sheet_summary_cacheable(summary: dict[str, Any]) -> bool:
     """Cache only when fund-level AUM is present (class NAVs alone break SGGG day change)."""
     return fund_aum_from_summary(summary) is not None
 
@@ -72,7 +75,7 @@ def set_nav_sheet_raw_cached(fund_id: str, valuation_date: str, raw: Any) -> Non
     )
 
 
-def should_skip_diamond_early_for_today(valuation_date: str) -> Optional[str]:
+def should_skip_diamond_early_for_today(valuation_date: str) -> str | None:
     """
     Before the usual NAV release window, skip Diamond for today's valuation date.
     GetNAVSheet still takes ~60s+ to return 'not finalized' — this avoids that wait.
@@ -85,12 +88,10 @@ def should_skip_diamond_early_for_today(valuation_date: str) -> Optional[str]:
     ):
         return None
     try:
-        from zoneinfo import ZoneInfo
-
         tz = ZoneInfo("America/Toronto")
-    except Exception:
-        tz = None
-    now = datetime.now(tz) if tz else datetime.now()
+    except ZoneInfoNotFoundError:
+        tz = datetime.now().astimezone().tzinfo
+    now = datetime.now(tz)
     val = date.fromisoformat(normalize_valuation_date(valuation_date))
     if val != now.date():
         return None
@@ -121,7 +122,7 @@ class DiamondAPIClient:
         self.username = username
         self.password = password
         self.base_url = base_url.rstrip("/")
-        self._auth_key: Optional[str] = None
+        self._auth_key: str | None = None
         self._auth_key_expires_at: float = 0
         self._auth_lock = threading.Lock()
 
@@ -158,10 +159,10 @@ class DiamondAPIClient:
     def _post(
         self,
         path: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         accept_json: bool = True,
         *,
-        auth_key: Optional[str] = None,
+        auth_key: str | None = None,
     ) -> Any:
         auth = auth_key or self._ensure_auth()
         return _diamond_post(self.base_url, path, payload, auth, accept_json=accept_json)
@@ -170,7 +171,7 @@ class DiamondAPIClient:
         self,
         fund_id: str,
         valuation_date: str,
-        reference_date: Optional[str] = None,
+        reference_date: str | None = None,
         exclude_flat_positions: bool = False,
         exclude_not_priced_positions: bool = True,
     ) -> Any:
@@ -192,8 +193,8 @@ class DiamondAPIClient:
     def get_portfolio_trades(
         self,
         fund_parent_id: str,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
         date_type: str = "ValuationDate",
     ) -> Any:
         """
@@ -213,7 +214,7 @@ class DiamondAPIClient:
         fund_id: str,
         valuation_date: str,
         *,
-        auth_key: Optional[str] = None,
+        auth_key: str | None = None,
     ) -> Any:
         return fetch_nav_sheet(
             self.base_url,
@@ -227,12 +228,12 @@ class DiamondAPIClient:
         return self._post("GetFundDetails/", payload)
 
 
-_cached_diamond_client: Optional[DiamondAPIClient] = None
-_cached_diamond_credentials: Optional[Tuple[str, str]] = None
+_cached_diamond_client: DiamondAPIClient | None = None
+_cached_diamond_credentials: tuple[str, str] | None = None
 _thread_local = threading.local()
 
 
-def _get_http_session() -> "requests.Session":
+def _get_http_session() -> requests.Session:
     """One Session per thread for HTTP keep-alive to api.sgggfsi.com."""
     sess = getattr(_thread_local, "session", None)
     if sess is None:
@@ -244,7 +245,7 @@ def _get_http_session() -> "requests.Session":
 def _diamond_post(
     base_url: str,
     path: str,
-    payload: Dict[str, Any],
+    payload: dict[str, Any],
     auth_key: str,
     *,
     accept_json: bool = True,
@@ -294,7 +295,7 @@ def fetch_nav_sheet(
         raise
 
 
-def get_diamond_client() -> Optional[DiamondAPIClient]:
+def get_diamond_client() -> DiamondAPIClient | None:
     """Return a process-wide Diamond client from env vars, or None if not configured."""
     global _cached_diamond_client, _cached_diamond_credentials
     username = os.environ.get("SGGG_DIAMOND_USERNAME", "").strip()

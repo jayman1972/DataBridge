@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+import logging
+from datetime import date, timedelta
+from typing import Any
 
 from sggg.nav_sheet_parse import (
     NAV_CHECKER_FUND_ID_TO_PSC,
@@ -11,6 +12,7 @@ from sggg.nav_sheet_parse import (
     normalize_valuation_date,
 )
 
+logger = logging.getLogger(__name__)
 
 # When the requested POSN_DATE_INT has zero rows for a portfolio (e.g. US
 # holiday — AlphaDesk doesn't advance the snapshot), look backwards up to this
@@ -22,7 +24,7 @@ def _normalize_fund_guid(fund_id: str) -> str:
     return (fund_id or "").strip().upper()
 
 
-def _fund_guid_key(fund_id: str) -> Optional[str]:
+def _fund_guid_key(fund_id: str) -> str | None:
     raw = (fund_id or "").strip()
     if not raw:
         return None
@@ -35,7 +37,7 @@ def _fund_guid_key(fund_id: str) -> Optional[str]:
     return None
 
 
-def psc_portfolio_for_fund_id(fund_id: str) -> Optional[str]:
+def psc_portfolio_for_fund_id(fund_id: str) -> str | None:
     """Resolve primary PSC portfolio name; fund GUID match is case-insensitive."""
     fid = _fund_guid_key(fund_id)
     if not fid:
@@ -43,14 +45,14 @@ def psc_portfolio_for_fund_id(fund_id: str) -> Optional[str]:
     return NAV_CHECKER_FUND_ID_TO_PSC.get(fid)
 
 
-def psc_portfolio_candidates_for_fund(fund_id: str) -> List[str]:
+def psc_portfolio_candidates_for_fund(fund_id: str) -> list[str]:
     """Ordered PSC portfolio names to try (handles naming variants)."""
     fid = _fund_guid_key(fund_id)
     if not fid:
         return []
     primary = NAV_CHECKER_FUND_ID_TO_PSC.get(fid)
     extras = NAV_CHECKER_PSC_PORTFOLIO_CANDIDATES.get(fid) or []
-    out: List[str] = []
+    out: list[str] = []
     for name in [primary, *extras]:
         n = (name or "").strip()
         if n and n not in out:
@@ -58,7 +60,7 @@ def psc_portfolio_candidates_for_fund(fund_id: str) -> List[str]:
     return out
 
 # In-memory PSC position rows for follow-on price comparison (same Data Bridge process).
-_NAV_CHECKER_PSC_PORTFOLIO: Dict[str, List[Dict[str, Any]]] = {}
+_NAV_CHECKER_PSC_PORTFOLIO: dict[str, list[dict[str, Any]]] = {}
 
 _BOX_TYPE_LABELS = {
     "separate_accounts": "Separate accounts (prime broker may show flat)",
@@ -67,7 +69,7 @@ _BOX_TYPE_LABELS = {
 }
 
 
-def get_psc_portfolio_positions(fund_id: str, valuation_date_iso: str) -> List[Dict[str, Any]]:
+def get_psc_portfolio_positions(fund_id: str, valuation_date_iso: str) -> list[dict[str, Any]]:
     """Return cached PSC position rows from the latest NAV checker run (if any)."""
     key = f"{normalize_valuation_date(valuation_date_iso)}:{fund_id.strip()}"
     return list(_NAV_CHECKER_PSC_PORTFOLIO.get(key) or [])
@@ -85,7 +87,7 @@ def _norm_upper(s: Any) -> str:
     return _norm(s).upper()
 
 
-def _side(long_short: Any) -> Optional[str]:
+def _side(long_short: Any) -> str | None:
     u = _norm_upper(long_short)
     if u in ("L", "LONG"):
         return "long"
@@ -94,7 +96,7 @@ def _side(long_short: Any) -> Optional[str]:
     return None
 
 
-def _security_key(row: Dict[str, Any]) -> str:
+def _security_key(row: dict[str, Any]) -> str:
     for field in ("bbg_ticker", "sedol", "company_symbol", "security", "description"):
         v = _norm_upper(row.get(field))
         if v:
@@ -102,13 +104,13 @@ def _security_key(row: Dict[str, Any]) -> str:
     return ""
 
 
-def _tag_pair(row: Dict[str, Any]) -> Tuple[str, str]:
+def _tag_pair(row: dict[str, Any]) -> tuple[str, str]:
     return (_norm(row.get("strategy")), _norm(row.get("trade_group")))
 
 
 def _parse_position_row(
     row: tuple,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     return {
         "strategy": _norm(row[0]),
         "trade_group": _norm(row[1]),
@@ -130,7 +132,7 @@ def fetch_psc_positions_for_portfolio(
     cursor: Any,
     portfolio: str,
     posn_date_compact: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Load non-aggregated PSC rows for one fund portfolio on one date."""
     sql = (
         "SELECT ph.STRATEGY, ph.TRADE_GROUP, ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.SECURITY_TYPE, "
@@ -159,7 +161,7 @@ def _latest_posn_date_for_portfolio(
     requested_date_compact: str,
     *,
     max_lookback_days: int = _PSC_POSN_DATE_FALLBACK_DAYS,
-) -> Optional[str]:
+) -> str | None:
     """Find most recent POSN_DATE_INT <= requested for this portfolio (with row data).
 
     Capped at ``max_lookback_days`` calendar days to avoid stale snapshots.
@@ -168,7 +170,11 @@ def _latest_posn_date_for_portfolio(
     """
     try:
         requested_int = int(requested_date_compact)
-        anchor = datetime.strptime(requested_date_compact, "%Y%m%d")
+        anchor = date(
+            int(requested_date_compact[:4]),
+            int(requested_date_compact[4:6]),
+            int(requested_date_compact[6:8]),
+        )
     except (TypeError, ValueError):
         return None
     floor_int = int((anchor - timedelta(days=max_lookback_days)).strftime("%Y%m%d"))
@@ -184,6 +190,7 @@ def _latest_posn_date_for_portfolio(
         try:
             cursor.execute(sql, (port, requested_int, floor_int))
         except Exception:
+            logger.debug("PSC snapshot lookup failed for %s", portfolio, exc_info=True)
             continue
         row = cursor.fetchone()
         if row and row[0] is not None:
@@ -198,7 +205,7 @@ def _fetch_psc_positions_with_fallback(
     cursor: Any,
     portfolio: str,
     posn_date_compact: str,
-) -> Tuple[List[Dict[str, Any]], str]:
+) -> tuple[list[dict[str, Any]], str]:
     """Try exact requested date; fall back to most recent prior snapshot if empty.
 
     Returns ``(rows, actual_posn_date_compact)``. ``actual_posn_date_compact``
@@ -216,7 +223,7 @@ def _fetch_psc_positions_with_fallback(
     return [], posn_date_compact
 
 
-def detect_boxed_positions(positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def detect_boxed_positions(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Find securities with both long and short legs in the same fund snapshot.
 
@@ -225,17 +232,17 @@ def detect_boxed_positions(positions: List[Dict[str, Any]]) -> List[Dict[str, An
       - tag_mismatch: different STRATEGY/TRADE_GROUP between long vs short legs
       - both: both conditions
     """
-    by_security: Dict[str, List[Dict[str, Any]]] = {}
+    by_security: dict[str, list[dict[str, Any]]] = {}
     for row in positions:
         key = _security_key(row)
         if not key:
             continue
         by_security.setdefault(key, []).append(row)
 
-    boxes: List[Dict[str, Any]] = []
+    boxes: list[dict[str, Any]] = []
     for key, legs in by_security.items():
-        long_legs: List[Dict[str, Any]] = []
-        short_legs: List[Dict[str, Any]] = []
+        long_legs: list[dict[str, Any]] = []
+        short_legs: list[dict[str, Any]] = []
         for leg in legs:
             side = _side(leg.get("long_short"))
             if side == "long":
@@ -287,8 +294,8 @@ def detect_boxed_positions(positions: List[Dict[str, Any]]) -> List[Dict[str, An
     return boxes
 
 
-def _summarize_legs(legs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+def _summarize_legs(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for leg in legs:
         out.append(
             {
@@ -302,23 +309,23 @@ def _summarize_legs(legs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def _compact_to_iso(compact: Optional[str]) -> Optional[str]:
+def _compact_to_iso(compact: str | None) -> str | None:
     if not compact or len(compact) != 8:
         return None
     return f"{compact[0:4]}-{compact[4:6]}-{compact[6:8]}"
 
 
 def fetch_boxed_positions_for_funds(
-    fund_specs: List[Dict[str, str]],
+    fund_specs: list[dict[str, str]],
     valuation_date_iso: str,
     *,
     store_portfolios: bool = True,
     dsn: str = "PSC_VIEWER",
-) -> Tuple[
-    Dict[str, List[Dict[str, Any]]],
-    Dict[str, List[Dict[str, Any]]],
-    Optional[str],
-    Dict[str, str],
+) -> tuple[
+    dict[str, list[dict[str, Any]]],
+    dict[str, list[dict[str, Any]]],
+    str | None,
+    dict[str, str],
 ]:
     """
     Query PSC for each fund and return boxed positions keyed by fund_id.
@@ -337,10 +344,10 @@ def fetch_boxed_positions_for_funds(
         return {}, {}, "pyodbc not installed", {}
 
     requested_date_compact = _compact_date(valuation_date_iso)
-    boxed_by_fund: Dict[str, List[Dict[str, Any]]] = {}
-    positions_by_fund: Dict[str, List[Dict[str, Any]]] = {}
-    actual_posn_dates_by_fund: Dict[str, str] = {}
-    fund_error: Optional[str] = None
+    boxed_by_fund: dict[str, list[dict[str, Any]]] = {}
+    positions_by_fund: dict[str, list[dict[str, Any]]] = {}
+    actual_posn_dates_by_fund: dict[str, str] = {}
+    fund_error: str | None = None
     conn = None
     try:
         conn = pyodbc.connect(f"DSN={dsn}")
@@ -359,6 +366,7 @@ def fetch_boxed_positions_for_funds(
                     cursor, portfolio, requested_date_compact
                 )
             except Exception as leg_exc:
+                logger.warning("Could not load PSC positions for %s", portfolio, exc_info=True)
                 positions = []
                 positions_by_fund[fid] = positions
                 boxed_by_fund[fid] = []
@@ -376,6 +384,7 @@ def fetch_boxed_positions_for_funds(
                     positions
                 )
     except Exception as exc:
+        logger.warning("Could not load PSC boxed positions", exc_info=True)
         return boxed_by_fund, positions_by_fund, str(exc), actual_posn_dates_by_fund
     finally:
         if conn:

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Test SGGG Diamond API (HTTP) connection. Run from DataBridge folder: python scripts/test_sggg_diamond_connection.py"""
+import logging
 import os
 import sys
+
+logger = logging.getLogger(__name__)
 
 # DataBridge root = parent of scripts/
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -22,7 +25,7 @@ for _config_dir in [_data_bridge_root, os.path.normpath(os.path.join(_data_bridg
                         k, v = k.strip(), v.strip()
                         if k in ("SGGG_DIAMOND_USERNAME", "SGGG_DIAMOND_PASSWORD", "SGGG_DIAMOND_FUND_ID", "SGGG_DIAMOND_FUND_IDS") and v:
                             os.environ[k] = v
-        except Exception as e:
+        except (OSError, UnicodeError) as e:
             print(f"Warning: could not read {_cfg}: {e}")
         break
 
@@ -44,6 +47,7 @@ def main():
         client._ensure_auth()
         print("OK: SGGG Diamond API (HTTP) connection successful (https://api.sgggfsi.com).")
     except Exception as e:
+        logger.exception("Diamond connection diagnostic failed")
         print(f"FAIL: {e}")
         sys.exit(1)
 

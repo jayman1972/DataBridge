@@ -18,9 +18,12 @@ if env_path.exists():
             os.environ.setdefault(k.strip(), v.strip().strip('"'))
 
 from sggg.diamond_client import get_diamond_client
-from sggg.nav_sheet_parse import _is_usd_share_class, _parse_class_navpu, _parse_money_value
+from sggg.nav_sheet_parse import (
+    _is_usd_share_class,
+    _parse_class_navpu,
+)
 
-_NAV_RE = re.compile(r"nav|price|unit|pu|currency|exchange|fx|asset", re.I)
+_NAV_RE = re.compile(r"nav|price|unit|pu|currency|exchange|fx|asset", re.IGNORECASE)
 
 
 def dump_class(entry: dict, fund_base: str) -> None:

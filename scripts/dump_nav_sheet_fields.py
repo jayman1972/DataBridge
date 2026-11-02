@@ -1,6 +1,7 @@
 """Dump money fields from Diamond GetNAVSheet for debugging subs/AUM."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
@@ -18,7 +19,11 @@ if env_path.exists():
             os.environ.setdefault(k.strip(), v.strip().strip('"'))
 
 from sggg.diamond_client import get_diamond_client
-from sggg.nav_sheet_parse import _parse_money_value, _section_items_by_name, parse_nav_sheet_summary
+from sggg.nav_sheet_parse import (
+    _parse_money_value,
+    _section_items_by_name,
+    parse_nav_sheet_summary,
+)
 
 _CAPITAL_RE = re.compile(
     r"subscr|redemp|subs|capital|flow|contribut|withdraw|transfer|unit",
@@ -91,6 +96,7 @@ def main() -> None:
             for s, n, m in sorted(big, key=lambda x: -abs(x[2]))[:20]:
                 print("   ", s, n, "=", round(m, 2))
         except Exception as exc:
+            logging.getLogger(__name__).exception("Could not inspect Diamond NAV sheet")
             print("ERR", exc)
 
 

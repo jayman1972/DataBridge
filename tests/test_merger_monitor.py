@@ -1,6 +1,8 @@
 import unittest
 from datetime import date
+from unittest.mock import patch
 
+import data_bridge
 from bloomberg.merger_monitor import (
     build_ingest_row,
     derive_stock_consideration_fraction,
@@ -537,6 +539,44 @@ class BloombergMergerMonitorTests(unittest.TestCase):
             written["acquirer_market_cap_at_announcement_native"],
             6_750_000_000,
         )
+
+
+class MergerRefreshRouteContractTests(unittest.TestCase):
+    def test_scheduler_payload_preserves_response_contract(self):
+        expected = {"success": True, "actions_requested": 2, "actions_refreshed": 2, "warnings": []}
+        with patch.object(data_bridge, "refresh_open_merger_actions", return_value=expected) as refresh:
+            response = data_bridge.app.test_client().post(
+                "/bloomberg/mergers/refresh",
+                json={"asOf": "2026-10-30", "dryRun": False, "batchSize": 50,
+                      "databaseBatchSize": 10, "terminalRecheckDays": 5},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), expected)
+        self.assertEqual(refresh.call_args.args[2], date(2026, 10, 30))
+        self.assertEqual(refresh.call_args.kwargs["database_batch_size"], 10)
+
+    def test_invalid_scheduler_date_is_rejected_before_refresh(self):
+        with patch.object(data_bridge, "refresh_open_merger_actions") as refresh:
+            response = data_bridge.app.test_client().post(
+                "/bloomberg/mergers/refresh", json={"asOf": "2026-13-30"}
+            )
+        self.assertEqual(response.status_code, 400)
+        refresh.assert_not_called()
+
+        with patch.object(data_bridge, "refresh_open_merger_actions") as refresh:
+            compact_response = data_bridge.app.test_client().post(
+                "/bloomberg/mergers/refresh", json={"asOf": "20261030"}
+            )
+        self.assertEqual(compact_response.status_code, 400)
+        refresh.assert_not_called()
+
+    def test_refresh_failure_keeps_error_shape(self):
+        with patch.object(data_bridge, "refresh_open_merger_actions", side_effect=RuntimeError("offline")):
+            response = data_bridge.app.test_client().post(
+                "/bloomberg/mergers/refresh", json={"asOf": "2026-10-30"}
+            )
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json(), {"success": False, "error": "offline"})
 
 
 if __name__ == "__main__":

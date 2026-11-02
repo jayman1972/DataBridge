@@ -20,9 +20,10 @@ import json
 import os
 import re
 import shutil
-from datetime import datetime, timedelta
+from collections.abc import Sequence
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, List, Optional, Sequence, Tuple
+from typing import Any
 
 REPORT_COUNTRY_BREAKDOWN = "country_breakdown"
 REPORT_GROSS_PNL_BY_SIDE = "gross_pnl_by_side"
@@ -37,7 +38,7 @@ FULL_REPORT_SUFFIX = "_full"
 META_SUFFIX = ".meta.json"
 
 # PSC portfolios used by all three legacy scripts.
-OPERATIONS_PORTFOLIOS: Tuple[str, ...] = (
+OPERATIONS_PORTFOLIOS: tuple[str, ...] = (
     "EHP Adv Alt",
     "EHP Adv Intl Alt",
     "EHP Advantage Intl Alt",
@@ -74,10 +75,10 @@ DEFAULT_OUTPUT_DIR = os.environ.get(
 )
 
 
-def parse_etf_securities_text(text: str) -> List[str]:
+def parse_etf_securities_text(text: str) -> list[str]:
     """Parse comma/newline separated SECURITY values (e.g. SPY.US, EHF100I)."""
     raw = re.split(r"[\s,]+", (text or "").strip())
-    out: List[str] = []
+    out: list[str] = []
     seen: set[str] = set()
     for token in raw:
         sym = token.strip().upper()
@@ -99,14 +100,14 @@ def format_etf_securities_text(securities: Sequence[str]) -> str:
 
 
 # Known PSC SECURITY duplicates — exact extras only (no prefix/wildcard matching).
-PSC_ETF_SECURITY_ALIASES: dict[str, Tuple[str, ...]] = {
+PSC_ETF_SECURITY_ALIASES: dict[str, tuple[str, ...]] = {
     "QQQ.US": ("QQQ.US OLD",),
 }
 
 
-def expand_etf_securities_for_query(securities: Sequence[str]) -> List[str]:
+def expand_etf_securities_for_query(securities: Sequence[str]) -> list[str]:
     """Exact IN-list for PSC, plus configured alias rows when a canonical ticker is listed."""
-    out: List[str] = []
+    out: list[str] = []
     seen: set[str] = set()
     for security in securities:
         sym = security.strip().upper()
@@ -162,7 +163,7 @@ def _portfolio_placeholders(n: int) -> str:
     return ",".join("?" * n)
 
 
-def _fetchall_dicts(cursor) -> Tuple[List[str], List[dict]]:
+def _fetchall_dicts(cursor) -> tuple[list[str], list[dict]]:
     columns = [d[0] for d in cursor.description]
     rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
     return columns, rows
@@ -199,7 +200,7 @@ def _save_csv_to(path: Path, csv_text: str) -> str:
     return str(path)
 
 
-def _archive_previous_latest(report_type: str, stamp: datetime) -> Optional[str]:
+def _archive_previous_latest(report_type: str, stamp: datetime) -> str | None:
     """Keep one backup of the prior cumulative file before overwriting latest.csv."""
     latest_path = _latest_report_path(report_type)
     legacy_full = _full_report_path(report_type)
@@ -224,7 +225,7 @@ def _save_run_outputs(
     requested_start_compact: str,
     requested_end_compact: str,
     stamp: datetime,
-) -> dict[str, Optional[str]]:
+) -> dict[str, str | None]:
     """
     Persist:
       - latest.csv — full cumulative history (incremental runs append here)
@@ -272,7 +273,7 @@ def _full_report_meta_path(report_type: str) -> Path:
     return Path(DEFAULT_OUTPUT_DIR) / f"{report_type}{FULL_REPORT_SUFFIX}{META_SUFFIX}"
 
 
-def _normalize_posn_date_compact(value: Any) -> Optional[str]:
+def _normalize_posn_date_compact(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
@@ -285,7 +286,7 @@ def _normalize_posn_date_compact(value: Any) -> Optional[str]:
 
 
 def _compact_add_days(compact: str, days: int) -> str:
-    dt = datetime.strptime(compact, "%Y%m%d") + timedelta(days=days)
+    dt = date(int(compact[:4]), int(compact[4:6]), int(compact[6:8])) + timedelta(days=days)
     return dt.strftime("%Y%m%d")
 
 
@@ -301,7 +302,7 @@ def _read_text_stripping_bom(path: Path) -> str:
     return raw.decode("utf-8")
 
 
-def _max_posn_date_in_csv(csv_text: str) -> Optional[str]:
+def _max_posn_date_in_csv(csv_text: str) -> str | None:
     reader = csv.reader(io.StringIO(csv_text))
     try:
         header = next(reader)
@@ -311,7 +312,7 @@ def _max_posn_date_in_csv(csv_text: str) -> Optional[str]:
         date_idx = header.index(POSN_DATE_COLUMN)
     except ValueError:
         return None
-    max_compact: Optional[str] = None
+    max_compact: str | None = None
     for row in reader:
         if date_idx >= len(row):
             continue
@@ -333,7 +334,7 @@ def _append_csv(existing_csv: str, new_csv: str) -> str:
     return "\r\n".join([*existing_lines, *new_lines[1:]]) + "\r\n"
 
 
-def _find_existing_report_path(report_type: str) -> Optional[Path]:
+def _find_existing_report_path(report_type: str) -> Path | None:
     latest_path = _latest_report_path(report_type)
     if latest_path.is_file():
         return latest_path
@@ -385,7 +386,7 @@ def resolve_incremental_query_range(
     end_compact: str,
     incremental: bool,
     force_full_rebuild: bool,
-    etf_securities: Optional[Sequence[str]] = None,
+    etf_securities: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """
     Decide whether to query PSC for the full range or only new dates since the
@@ -525,7 +526,7 @@ def _etfs_sql(etf_count: int) -> str:
     """
 
 
-def _latest_period_report_path(report_type: str) -> Optional[Path]:
+def _latest_period_report_path(report_type: str) -> Path | None:
     meta = _load_report_meta(report_type)
     period = meta.get("period_report_path")
     if period:
@@ -545,7 +546,7 @@ def _latest_period_report_path(report_type: str) -> Optional[Path]:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def get_latest_saved_report(report_type: str) -> Optional[dict[str, Any]]:
+def get_latest_saved_report(report_type: str) -> dict[str, Any] | None:
     """Metadata for the newest cumulative operations report on disk."""
     if report_type not in OPERATIONS_REPORT_TYPES:
         raise ValueError(f"Unknown report_type: {report_type}")
@@ -556,22 +557,18 @@ def get_latest_saved_report(report_type: str) -> Optional[dict[str, Any]]:
     stat = path.stat()
     updated_at = meta.get("updated_at")
     if not updated_at:
-        updated_at = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+        updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
     row_count = meta.get("row_count")
     if row_count is None:
         csv_text = _read_text_stripping_bom(path)
         row_count = max(0, len(csv_text.splitlines()) - 1)
     download_name = path.name
-    if path.name == "latest.csv" or path == _latest_report_path(report_type):
-        end_compact = meta.get("end_date")
-        if end_compact and len(str(end_compact)) == 8:
-            download_name = f"{report_type}_{end_compact}.csv"
-    elif path == _full_report_path(report_type):
+    if path.name == "latest.csv" or path == _latest_report_path(report_type) or path == _full_report_path(report_type):
         end_compact = meta.get("end_date")
         if end_compact and len(str(end_compact)) == 8:
             download_name = f"{report_type}_{end_compact}.csv"
     period_path = _latest_period_report_path(report_type)
-    period_info: Optional[dict[str, Any]] = None
+    period_info: dict[str, Any] | None = None
     if period_path is not None:
         period_stat = period_path.stat()
         period_text = _read_text_stripping_bom(period_path)
@@ -601,7 +598,7 @@ def run_operations_report(
     report_type: str,
     start_compact: str,
     end_compact: str,
-    etf_securities: Optional[Sequence[str]] = None,
+    etf_securities: Sequence[str] | None = None,
     *,
     save_to_disk: bool = True,
     incremental: bool = True,
@@ -619,11 +616,11 @@ def run_operations_report(
         etf_securities=etf_securities,
     )
     query_start_compact = plan["query_start_compact"]
-    existing_csv: Optional[str] = plan.get("existing_csv")
+    existing_csv: str | None = plan.get("existing_csv")
     rows_queried = 0
-    columns: List[str] = []
+    columns: list[str] = []
     merged_csv: str
-    new_chunk_csv: Optional[str] = None
+    new_chunk_csv: str | None = None
 
     if plan.get("skipped_query") and existing_csv:
         merged_csv = existing_csv
@@ -632,7 +629,7 @@ def run_operations_report(
         merged_csv = existing_csv or ""
         rows_queried = 0
     else:
-        params_base: List[Any] = [query_start_compact, end_compact, *OPERATIONS_PORTFOLIOS]
+        params_base: list[Any] = [query_start_compact, end_compact, *OPERATIONS_PORTFOLIOS]
 
         if report_type == REPORT_COUNTRY_BREAKDOWN:
             cursor.execute(_country_breakdown_sql(), params_base)
@@ -654,11 +651,11 @@ def run_operations_report(
         merged_csv = _append_csv(existing_csv, new_chunk_csv) if existing_csv else new_chunk_csv
 
     row_count = max(0, len(merged_csv.splitlines()) - 1) if merged_csv else 0
-    saved_path: Optional[str] = None
-    period_report_path: Optional[str] = None
-    archived_path: Optional[str] = None
+    saved_path: str | None = None
+    period_report_path: str | None = None
+    archived_path: str | None = None
     period_row_count = 0
-    stamp = datetime.now()
+    stamp = datetime.now().astimezone()
     download_name = f"{report_type}_{stamp.strftime('%Y%m%d_%H%M%S')}.csv"
 
     if save_to_disk and merged_csv:

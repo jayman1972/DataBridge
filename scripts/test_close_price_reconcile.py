@@ -27,8 +27,8 @@ from sggg.close_price_reconcile import (
     normalize_bbg_key,
     normalize_diamond_close_price,
     normalize_diamond_futures_close,
-    parse_futures_option_contract_key,
     parse_futures_contract_key,
+    parse_futures_option_contract_key,
     parse_option_contract_key,
     parse_preferred_bbg_key,
     portfolio_details_display_ticker,
@@ -251,7 +251,10 @@ def test_option_security_field_and_long_description() -> None:
 
 
 def test_diamond_underlying_index_hyg_call() -> None:
-    from sggg.close_price_reconcile import build_underlying_ticker_index, _diamond_match_key
+    from sggg.close_price_reconcile import (
+        _diamond_match_key,
+        build_underlying_ticker_index,
+    )
 
     records = [
         {
@@ -829,7 +832,7 @@ def test_es_futures_trade_qty_scaled_by_contract_multiplier() -> None:
     idx = build_trade_index_by_match_key([trade], "2026-07-08")
     key = "fut:ES|2026-09"
     assert key in idx
-    assert idx[key][0]["qty"] == Decimal("25")
+    assert idx[key][0]["qty"] == Decimal(25)
 
 
 def test_trade_index_uses_valuation_date_when_trade_date_lags() -> None:
@@ -882,22 +885,22 @@ def test_es_futures_psc_prior_carry_excludes_lagged_opening_trade() -> None:
     }
     trades = [
         {
-            "qty": Decimal("-25"),
-            "price": Decimal("7510"),
+            "qty": Decimal(-25),
+            "price": Decimal(7510),
             "fx": Decimal("1.4167"),
             "trade_date": "2026-07-08",
             "valuation_date": "2026-07-09",
         },
         {
-            "qty": Decimal("40"),
+            "qty": Decimal(40),
             "price": Decimal("7558.7938"),
             "fx": Decimal("1.4167"),
             "trade_date": "2026-07-09",
             "valuation_date": "2026-07-09",
         },
         {
-            "qty": Decimal("-40"),
-            "price": Decimal("7565"),
+            "qty": Decimal(-40),
+            "price": Decimal(7565),
             "fx": Decimal("1.4167"),
             "trade_date": "2026-07-09",
             "valuation_date": "2026-07-09",
@@ -937,7 +940,7 @@ def test_futures_option_trade_qty_scaled_by_contract_multiplier() -> None:
     idx = build_trade_index_by_match_key([trade], "2026-07-07")
     key = "futopt:CLQ6|2026-08|C|77.5"
     assert key in idx
-    assert idx[key][0]["qty"] == Decimal("18")
+    assert idx[key][0]["qty"] == Decimal(18)
 
 
 def test_futures_option_close_out_mtm_pnl() -> None:
@@ -1135,7 +1138,7 @@ def test_option_trade_qty_converted_from_share_units() -> None:
     idx = build_trade_index_by_match_key(trades, "2026-07-07")
     assert len(idx) == 1
     key = next(iter(idx))
-    assert idx[key][0]["qty"] == Decimal("200")
+    assert idx[key][0]["qty"] == Decimal(200)
 
 
 def test_option_close_out_mtm_pnl() -> None:

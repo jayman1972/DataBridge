@@ -1,15 +1,16 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Complete Bloomberg Bridge Service with both quotes and historical data endpoints
 """
 
-import sys
 import json
 import logging
 import re
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
+import sys
+from datetime import datetime, timezone
+
 import blpapi
+from flask import Flask, jsonify, request
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -45,8 +46,8 @@ def initialize_bloomberg():
         logger.info("Bloomberg session initialized successfully")
         return True
         
-    except Exception as e:
-        logger.error(f"Error initializing Bloomberg: {e}")
+    except Exception:
+        logger.exception("Error initializing Bloomberg")
         return False
 
 def get_realtime_quotes(symbols, security_types=None):
@@ -176,8 +177,8 @@ def get_realtime_quotes(symbols, security_types=None):
                 break
                 
     except Exception as e:
-        logger.error(f"Error getting quotes: {e}")
-        errors.append(f"Error getting quotes: {str(e)}")
+        logger.exception("Error getting quotes")
+        errors.append(f"Error getting quotes: {e!s}")
     
     return quotes, errors
 
@@ -209,10 +210,10 @@ def get_historical_data(symbols, start_date, end_date, security_types=None, fiel
     # Set default dates if None (Bloomberg API requires dates)
     # If start_date is None, use Jan 1, 1983 to get all available data
     if start_date is None:
-        start_date = datetime(1983, 1, 1)
+        start_date = datetime(1983, 1, 1, tzinfo=timezone.utc)
     # If end_date is None, use today
     if end_date is None:
-        end_date = datetime.now()
+        end_date = datetime.now(timezone.utc)
     
     try:
         for idx, symbol in enumerate(symbols):
@@ -326,12 +327,14 @@ def get_historical_data(symbols, start_date, end_date, security_types=None, fiel
                                                         field_value = dataPoint.getElementAsFloat(requested_field)
                                                         # Store with original field name
                                                         record[requested_field] = field_value
-                                                    except:
+                                                    except Exception:
+                                                        logger.debug("Could not read Bloomberg numeric field %s", requested_field, exc_info=True)
                                                         try:
                                                             # If not float, try as string
                                                             field_value = dataPoint.getElementAsString(requested_field)
                                                             record[requested_field] = field_value
-                                                        except:
+                                                        except Exception:
+                                                            logger.debug("Could not read Bloomberg text field %s", requested_field, exc_info=True)
                                                             # If neither works, skip this field
                                                             logger.warning(f"Could not extract field {requested_field} for {symbol}")
                                             
@@ -359,12 +362,12 @@ def get_historical_data(symbols, start_date, end_date, security_types=None, fiel
                         break
                         
             except Exception as e:
-                logger.error(f"Error getting historical data for {symbol}: {e}")
-                errors.append(f"{symbol}: {str(e)}")
+                logger.exception("Error getting historical data for %s", symbol)
+                errors.append(f"{symbol}: {e!s}")
                 
     except Exception as e:
-        logger.error(f"Error in historical data request: {e}")
-        errors.append(f"Error in historical data request: {str(e)}")
+        logger.exception("Error in historical data request")
+        errors.append(f"Error in historical data request: {e!s}")
     
     return historical_data, errors
 
@@ -424,11 +427,12 @@ def get_reference_data(symbols, fields):
                                             date_str = date_value.strftime("%Y-%m-%d")
                                         else:
                                             date_str = str(date_value)
-                                    except:
-                                        date_str = datetime.now().strftime("%Y-%m-%d")
+                                    except Exception:
+                                        logger.debug("Could not convert Bloomberg reference date", exc_info=True)
+                                        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                                 else:
                                     # If no date field, use today's date
-                                    date_str = datetime.now().strftime("%Y-%m-%d")
+                                    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                                 
                                 # Extract all requested fields
                                 record = {
@@ -441,12 +445,14 @@ def get_reference_data(symbols, fields):
                                             # Try to get as float first
                                             field_value = fieldData.getElementAsFloat(field)
                                             record[field] = field_value
-                                        except:
+                                        except Exception:
+                                            logger.debug("Could not read Bloomberg numeric field %s", field, exc_info=True)
                                             try:
                                                 # If not float, try as string
                                                 field_value = fieldData.getElementAsString(field)
                                                 record[field] = field_value
-                                            except:
+                                            except Exception:
+                                                logger.debug("Could not read Bloomberg text field %s", field, exc_info=True)
                                                 # If neither works, try as datetime
                                                 try:
                                                     field_value = fieldData.getElementAsDatetime(field)
@@ -454,7 +460,8 @@ def get_reference_data(symbols, fields):
                                                         record[field] = field_value.strftime("%Y-%m-%d")
                                                     else:
                                                         record[field] = str(field_value)
-                                                except:
+                                                except Exception:
+                                                    logger.debug("Could not read Bloomberg datetime field %s", field, exc_info=True)
                                                     logger.warning(f"Could not extract field {field} for {security}")
                                 
                                 # Store record (ReferenceDataRequest typically returns single record per symbol)
@@ -484,8 +491,8 @@ def get_reference_data(symbols, fields):
                 break
                 
     except Exception as e:
-        logger.error(f"Error getting reference data: {e}")
-        errors.append(f"Error getting reference data: {str(e)}")
+        logger.exception("Error getting reference data")
+        errors.append(f"Error getting reference data: {e!s}")
     
     return reference_data, errors
 
@@ -498,7 +505,7 @@ def quotes():
         security_types = data.get('security_types', [])  # Get security types from request
         
         logger.info("=" * 80)
-        logger.info(f"[QUOTES REQUEST] Received at {datetime.now().isoformat()}")
+        logger.info(f"[QUOTES REQUEST] Received at {datetime.now(timezone.utc).isoformat()}")
         logger.info(f"[QUOTES REQUEST] Symbols ({len(symbols)}): {symbols}")
         logger.info(f"[QUOTES REQUEST] Security types: {security_types}")
         logger.info(f"[QUOTES REQUEST] Request details: {json.dumps(data, indent=2)}")
@@ -508,7 +515,7 @@ def quotes():
         response = {
             "quotes": quotes,
             "errors": errors,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "bloomberg"
         }
         
@@ -523,11 +530,11 @@ def quotes():
         return jsonify(response)
         
     except Exception as e:
-        logger.error(f"Error in quotes endpoint: {e}")
+        logger.exception("Error in quotes endpoint")
         return jsonify({
             "quotes": {},
-            "errors": [f"Error processing request: {str(e)}"],
-            "timestamp": datetime.now().isoformat(),
+            "errors": [f"Error processing request: {e!s}"],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "bloomberg"
         }), 500
 
@@ -543,7 +550,7 @@ def historical():
         end_date_str = data.get('end_date')
         
         logger.info("=" * 80)
-        logger.info(f"[HISTORICAL REQUEST] Received at {datetime.now().isoformat()}")
+        logger.info(f"[HISTORICAL REQUEST] Received at {datetime.now(timezone.utc).isoformat()}")
         logger.info(f"[HISTORICAL REQUEST] Symbols ({len(symbols)}): {symbols}")
         logger.info(f"[HISTORICAL REQUEST] Date range: {start_date_str} to {end_date_str}")
         logger.info(f"[HISTORICAL REQUEST] Security types: {security_types}")
@@ -554,16 +561,16 @@ def historical():
         start_date = None
         end_date = None
         if start_date_str:
-            start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+            start_date = datetime.strptime(start_date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
         if end_date_str:
-            end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
+            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
         
         historical_data, errors = get_historical_data(symbols, start_date, end_date, security_types, fields)
         
         response = {
             "historical_data": historical_data,
             "errors": errors,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "bloomberg"
         }
         
@@ -579,11 +586,11 @@ def historical():
         return jsonify(response)
         
     except Exception as e:
-        logger.error(f"Error in historical endpoint: {e}")
+        logger.exception("Error in historical endpoint")
         return jsonify({
             "historical_data": {},
-            "errors": [f"Error processing request: {str(e)}"],
-            "timestamp": datetime.now().isoformat(),
+            "errors": [f"Error processing request: {e!s}"],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "bloomberg"
         }), 500
 
@@ -603,7 +610,7 @@ def reference():
         response = {
             "reference_data": reference_data,
             "errors": errors,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "bloomberg"
         }
         
@@ -611,11 +618,11 @@ def reference():
         return jsonify(response)
         
     except Exception as e:
-        logger.error(f"Error in reference endpoint: {e}")
+        logger.exception("Error in reference endpoint")
         return jsonify({
             "reference_data": {},
-            "errors": [f"Error processing request: {str(e)}"],
-            "timestamp": datetime.now().isoformat(),
+            "errors": [f"Error processing request: {e!s}"],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "bloomberg"
         }), 500
 
@@ -629,8 +636,8 @@ def log_request_info():
         try:
             data = request.get_json()
             logger.info(f"[INCOMING REQUEST] JSON body: {json.dumps(data, indent=2)}")
-        except:
-            logger.info(f"[INCOMING REQUEST] JSON body: (could not parse)")
+        except Exception:
+            logger.info("[INCOMING REQUEST] JSON body: (could not parse)", exc_info=True)
 
 @app.after_request
 def log_response_info(response):
@@ -649,7 +656,7 @@ def health():
     return jsonify({
         "status": status_msg,
         "bloomberg_connected": bloomberg_status,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     })
 
 if __name__ == '__main__':

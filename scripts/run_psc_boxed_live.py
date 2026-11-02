@@ -14,10 +14,11 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -26,13 +27,14 @@ from sggg.nav_sheet_parse import NAV_CHECKER_FUND_ID_TO_PSC, normalize_valuation
 from sggg.psc_boxed_positions import (
     _security_key,
     _side,
-    detect_boxed_positions,
     fetch_boxed_positions_for_funds,
     fetch_psc_positions_for_portfolio,
 )
 
+logger = logging.getLogger(__name__)
+
 # Short names for --fund filter (case-insensitive)
-FUND_CHOICES: List[Tuple[str, str, str]] = [
+FUND_CHOICES: list[tuple[str, str, str]] = [
     ("415a3530-3034-4536-4432-303030364337", "alpha", "EHP Alpha"),
     ("41010000-7F7A-0A65-D559-45484608DB40", "tactical", "EHP Tact Growth Alt"),
     ("41323030-3031-4144-3637-303030364338", "select", "EHP Select Alt"),
@@ -40,7 +42,7 @@ FUND_CHOICES: List[Tuple[str, str, str]] = [
     ("01010000-801A-4995-8370-45484608DE57", "exponential", "Expon Bal Grow Fund"),
 ]
 
-_ALIAS_TO_SPEC: Dict[str, Dict[str, str]] = {}
+_ALIAS_TO_SPEC: dict[str, dict[str, str]] = {}
 for fid, alias, psc_name in FUND_CHOICES:
     _ALIAS_TO_SPEC[alias] = {"id": fid, "name": psc_name}
     _ALIAS_TO_SPEC[fid.lower()] = {"id": fid, "name": psc_name}
@@ -50,12 +52,12 @@ def _parse_iso(s: str) -> str:
     return normalize_valuation_date(s.strip())
 
 
-def _date_range(from_iso: str, to_iso: str) -> List[str]:
+def _date_range(from_iso: str, to_iso: str) -> list[str]:
     start = date.fromisoformat(from_iso)
     end = date.fromisoformat(to_iso)
     if end < start:
         start, end = end, start
-    out: List[str] = []
+    out: list[str] = []
     d = start
     while d <= end:
         out.append(d.isoformat())
@@ -63,10 +65,10 @@ def _date_range(from_iso: str, to_iso: str) -> List[str]:
     return out
 
 
-def _fund_specs(aliases: Optional[List[str]]) -> List[Dict[str, str]]:
+def _fund_specs(aliases: list[str] | None) -> list[dict[str, str]]:
     if not aliases:
         return [{"id": fid, "name": name} for fid, _alias, name in FUND_CHOICES]
-    specs: List[Dict[str, str]] = []
+    specs: list[dict[str, str]] = []
     for raw in aliases:
         key = raw.strip().lower()
         spec = _ALIAS_TO_SPEC.get(key)
@@ -79,15 +81,15 @@ def _fund_specs(aliases: Optional[List[str]]) -> List[Dict[str, str]]:
     return specs
 
 
-def _paired_securities(positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _paired_securities(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Long+short same security even when not classified as a box (same tags & account)."""
-    by_key: Dict[str, List[Dict[str, Any]]] = {}
+    by_key: dict[str, list[dict[str, Any]]] = {}
     for row in positions:
         key = _security_key(row)
         if key:
             by_key.setdefault(key, []).append(row)
 
-    paired: List[Dict[str, Any]] = []
+    paired: list[dict[str, Any]] = []
     for key, legs in by_key.items():
         long_qty = sum(abs(float(l.get("quantity") or 0)) for l in legs if _side(l.get("long_short")) == "long")
         short_qty = sum(abs(float(l.get("quantity") or 0)) for l in legs if _side(l.get("long_short")) == "short")
@@ -108,12 +110,12 @@ def _paired_securities(positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _print_boxes(
     valuation_date: str,
-    fund_specs: List[Dict[str, str]],
-    boxed_by_fund: Dict[str, List[Dict[str, Any]]],
-    positions_by_fund: Dict[str, List[Dict[str, Any]]],
+    fund_specs: list[dict[str, str]],
+    boxed_by_fund: dict[str, list[dict[str, Any]]],
+    positions_by_fund: dict[str, list[dict[str, Any]]],
     *,
     show_paired: bool,
-    err: Optional[str],
+    err: str | None,
 ) -> int:
     """Return count of boxes found across all funds for this date."""
     print(f"\n{'=' * 72}")
@@ -213,13 +215,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    dates: List[str] = []
+    dates: list[str] = []
     if args.from_date and args.to_date:
         dates = _date_range(_parse_iso(args.from_date), _parse_iso(args.to_date))
     elif args.dates:
         dates = [_parse_iso(d) for d in args.dates]
     else:
-        dates = [date.today().isoformat()]
+        dates = [datetime.now().astimezone().date().isoformat()]
 
     fund_specs = _fund_specs(args.funds)
     print(f"Funds: {', '.join(s['name'] for s in fund_specs)}")
@@ -227,7 +229,7 @@ def main() -> None:
     print(f"Dates: {len(dates)} ({dates[0]} … {dates[-1]})" if len(dates) > 1 else f"Date: {dates[0]}")
 
     grand_total = 0
-    dates_with_boxes: List[str] = []
+    dates_with_boxes: list[str] = []
 
     for valuation_date in dates:
         if args.positions_only:
@@ -251,6 +253,7 @@ def main() -> None:
                 conn.close()
                 print("  ".join(parts) if parts else "(no portfolios)")
             except Exception as exc:
+                logger.exception("Could not query paired PSC positions")
                 print(f"ERROR {exc}")
             continue
 

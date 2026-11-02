@@ -3,8 +3,10 @@ Base class for Bloomberg clients.
 Defines the interface that all Bloomberg clients must implement.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import Any
 
 
 class BloombergClientBase(ABC):
@@ -14,14 +16,14 @@ class BloombergClientBase(ABC):
     def get_historical_data(
         self,
         ticker: str,
-        fields: List[str],
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        periodicity: Optional[str] = None,
-        overrides: Optional[Dict[str, str]] = None,
-        adjustment_profile: Optional[str] = None,
-        currency: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        fields: list[str],
+        start_date: str | None = None,
+        end_date: str | None = None,
+        periodicity: str | None = None,
+        overrides: dict[str, str] | None = None,
+        adjustment_profile: str | None = None,
+        currency: str | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Fetch historical data for a ticker.
         
@@ -43,15 +45,14 @@ class BloombergClientBase(ABC):
                 ...
             ]
         """
-        pass
     
     @abstractmethod
     def get_reference_data(
         self,
-        tickers: List[str],
-        fields: List[str],
-        overrides: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Dict[str, Any]]:
+        tickers: list[str],
+        fields: list[str],
+        overrides: dict[str, str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """
         Fetch reference/EOD data for tickers.
         
@@ -67,10 +68,8 @@ class BloombergClientBase(ABC):
                 "VIX Index": {"PX_LAST": 15.5}
             }
         """
-        pass
     
     @abstractmethod
     def is_available(self) -> bool:
         """Check if the client is available/connected"""
-        pass
 

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Spreadsheet label (column B) -> Diamond fund parent GUID
-WORKING_PAPER_FUND_IDS: Dict[str, str] = {
+WORKING_PAPER_FUND_IDS: dict[str, str] = {
     "SUM EHP ALPHA": "415a3530-3034-4536-4432-303030364337",
     "SUM EHP SELECT ALT": "41323030-3031-4144-3637-303030364338",
     "SUM EHP STRAT INC ALT": "41010000-7F2A-D7E8-776F-45484608D91C",
@@ -34,7 +37,7 @@ def prior_business_day(d: date) -> date:
     return d
 
 
-def _parse_nav_review_date(path: Path) -> Optional[date]:
+def _parse_nav_review_date(path: Path) -> date | None:
     m = _NAV_REVIEW_RE.search(path.stem)
     if not m:
         return None
@@ -45,7 +48,7 @@ def _parse_nav_review_date(path: Path) -> Optional[date]:
         return None
 
 
-def _parse_money_cell(raw: Any) -> Optional[float]:
+def _parse_money_cell(raw: Any) -> float | None:
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
@@ -66,8 +69,8 @@ def _parse_money_cell(raw: Any) -> Optional[float]:
 
 def find_nav_review_workbook(
     valuation_date: date,
-    root: Optional[str] = None,
-) -> Tuple[Optional[Path], Optional[str]]:
+    root: str | None = None,
+) -> tuple[Path | None, str | None]:
     """
     Locate the NAV Review workbook for the valuation date.
 
@@ -78,7 +81,7 @@ def find_nav_review_workbook(
     if not base.exists():
         return None, f"NAV working paper root not found: {base}"
 
-    candidates: List[Tuple[date, float, Path]] = []
+    candidates: list[tuple[date, float, Path]] = []
     for path in base.rglob("NAV Review*.xlsx"):
         if path.name.startswith("~$"):
             continue
@@ -97,7 +100,7 @@ def find_nav_review_workbook(
         return candidates[0][2], None
 
     # Fallback: newest file by mtime (any date)
-    by_mtime: List[Tuple[float, Path]] = []
+    by_mtime: list[tuple[float, Path]] = []
     for path in base.rglob("NAV Review*.xlsx"):
         if path.name.startswith("~$"):
             continue
@@ -111,7 +114,7 @@ def find_nav_review_workbook(
     return by_mtime[0][1], "Used latest NAV Review file by modified time (no exact date match)"
 
 
-def _rows_from_openpyxl(workbook_path: Path, sheet_name: str, cell_range: str) -> List[List[Any]]:
+def _rows_from_openpyxl(workbook_path: Path, sheet_name: str, cell_range: str) -> list[list[Any]]:
     import openpyxl
 
     wb = openpyxl.load_workbook(workbook_path, read_only=True, data_only=True)
@@ -137,7 +140,7 @@ def _rows_from_openpyxl(workbook_path: Path, sheet_name: str, cell_range: str) -
         wb.close()
 
 
-def _rows_from_stdlib(workbook_path: Path, sheet_name: str, cell_range: str) -> List[List[Any]]:
+def _rows_from_stdlib(workbook_path: Path, sheet_name: str, cell_range: str) -> list[list[Any]]:
     from sggg.xlsx_stdlib import read_sheet_range
 
     return read_sheet_range(workbook_path, sheet_name, cell_range)
@@ -147,7 +150,7 @@ def read_pnl_estimates(
     workbook_path: Path,
     sheet_name: str = "PNL",
     cell_range: str = "A5:C17",
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """
     Read fund labels (column B) and NAV change estimates in dollars (column C).
     Returns dict keyed by normalized spreadsheet label.
@@ -161,7 +164,7 @@ def read_pnl_estimates(
     except ImportError:
         grid_rows = _rows_from_stdlib(workbook_path, sheet_name, cell_range)
 
-    out: Dict[str, Dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for row in grid_rows:
         cells = list(row) + [None] * (3 - len(row))
         prior_diff = _parse_money_cell(cells[0])
@@ -181,8 +184,8 @@ def read_pnl_estimates(
 
 def estimates_by_fund_id(
     valuation_date: date,
-    root: Optional[str] = None,
-) -> Dict[str, Any]:
+    root: str | None = None,
+) -> dict[str, Any]:
     """Resolve workbook and return estimates keyed by fund GUID."""
     path, note = find_nav_review_workbook(valuation_date, root=root)
     if not path:
@@ -195,6 +198,7 @@ def estimates_by_fund_id(
     try:
         by_label = read_pnl_estimates(path)
     except Exception as e:
+        logger.exception("Could not read NAV working paper %s", path)
         return {
             "available": False,
             "error": str(e),
@@ -202,7 +206,7 @@ def estimates_by_fund_id(
             "estimates_by_fund_id": {},
             "estimates_by_label": {},
         }
-    by_fund: Dict[str, Dict[str, Any]] = {}
+    by_fund: dict[str, dict[str, Any]] = {}
     for label, row in by_label.items():
         fid = row.get("fund_id")
         if fid:

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import re
 import math
-from typing import Any, Dict, Iterable, List, Optional
-
+import re
+from collections.abc import Iterable
+from typing import Any
 
 _OCC_OPTION_RE = re.compile(
     r"^([A-Z0-9]{1,6})\s*(\d{2})(\d{2})(\d{2})([CP])(\d{8})$",
@@ -13,7 +13,7 @@ _OCC_OPTION_RE = re.compile(
 )
 
 
-def parse_option_contract(value: Any) -> Optional[Dict[str, Any]]:
+def parse_option_contract(value: Any) -> dict[str, Any] | None:
     """Parse a canonical OCC option key into its exercise terms."""
     text = str(value or "").strip().upper()
     match = _OCC_OPTION_RE.match(text)
@@ -46,7 +46,7 @@ def format_option_contract(value: Any) -> str:
     )
 
 
-def underlying_quote_candidates(root: str) -> List[str]:
+def underlying_quote_candidates(root: str) -> list[str]:
     """Resolve a canonical option root to report-only Bloomberg quote IDs.
 
     AlphaDesk/PSC VIX contracts require the index quote, not an equity quote.
@@ -58,9 +58,9 @@ def underlying_quote_candidates(root: str) -> List[str]:
 
 
 def select_live_underlying_quote(
-    quote: Dict[str, Any],
-    expected_date: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+    quote: dict[str, Any],
+    expected_date: str | None = None,
+) -> dict[str, Any] | None:
     """Select a same-day live underlying quote without using prior close.
 
     Bloomberg's ``PX_OFFICIAL_CLOSE`` can remain yesterday's close until the
@@ -98,17 +98,17 @@ def select_live_underlying_quote(
 
 
 def evaluate_expiring_itm_positions(
-    open_positions: Iterable[Dict[str, Any]],
+    open_positions: Iterable[dict[str, Any]],
     report_date: str,
-    underlying_quotes: Dict[str, Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    underlying_quotes: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Return held options that expire on ``report_date`` and are strictly ITM.
 
     ``underlying_quotes`` is keyed by the option root and contains ``price`` plus
     the Bloomberg ticker used to obtain that price. Both long and short non-zero
     positions are included because either exercise or assignment can occur.
     """
-    risks: List[Dict[str, Any]] = []
+    risks: list[dict[str, Any]] = []
     for position in open_positions:
         security = str(position.get("security") or "").strip().upper()
         contract = parse_option_contract(security)

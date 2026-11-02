@@ -1,7 +1,8 @@
 """Explicit Bloomberg historical adjustment profiles."""
 
-from typing import Any, Dict, Optional, Tuple
+from __future__ import annotations
 
+from typing import Any
 
 ADJUSTMENT_FLAG_FIELDS = (
     "adjustment_follow_dpdf",
@@ -11,7 +12,7 @@ ADJUSTMENT_FLAG_FIELDS = (
 )
 
 
-def normalize_historical_adjustment_profile(value: Any) -> Optional[str]:
+def normalize_historical_adjustment_profile(value: Any) -> str | None:
     """Return a normalized RAW/CAPITAL/FULL profile or raise for invalid input."""
     if value is None or str(value).strip() == "":
         return None
@@ -21,7 +22,7 @@ def normalize_historical_adjustment_profile(value: Any) -> Optional[str]:
     return profile
 
 
-def historical_adjustment_settings(profile: str) -> Dict[str, bool]:
+def historical_adjustment_settings(profile: str) -> dict[str, bool]:
     """Map a normalized profile to Bloomberg HistoricalDataRequest settings."""
     normalized = normalize_historical_adjustment_profile(profile)
     if normalized is None:
@@ -35,8 +36,8 @@ def historical_adjustment_settings(profile: str) -> Dict[str, bool]:
 
 
 def validate_historical_adjustment_contract(
-    data: Dict[str, Any],
-) -> Tuple[Optional[str], Optional[str]]:
+    data: dict[str, Any],
+) -> tuple[str | None, str | None]:
     """Validate the HTTP contract and return its normalized profile and error."""
     explicit_flags = {
         field_name: data[field_name]

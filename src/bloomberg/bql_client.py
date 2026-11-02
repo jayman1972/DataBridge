@@ -2,9 +2,13 @@
 Bloomberg Query Language (BQL) client implementation using PyBQL.
 """
 
-import os
-from typing import List, Dict, Any, Optional
+from __future__ import annotations
+
+import logging
+from typing import Any
+
 import pandas as pd
+
 try:
     import bql
     BQL_AVAILABLE = True
@@ -14,6 +18,8 @@ except ImportError:
 
 from .base_client import BloombergClientBase
 from .field_mapper import get_bql_field_name, is_special_field
+
+logger = logging.getLogger(__name__)
 
 
 class BQLClient(BloombergClientBase):
@@ -36,7 +42,8 @@ class BQLClient(BloombergClientBase):
             self._connected = True
         except Exception as e:
             self._connected = False
-            raise ConnectionError(f"Failed to connect to BQL Service: {e}")
+            logger.exception("Failed to connect to BQL Service")
+            raise ConnectionError(f"Failed to connect to BQL Service: {e}") from e
     
     def is_available(self) -> bool:
         """Check if BQL client is available and connected"""
@@ -52,6 +59,7 @@ class BQLClient(BloombergClientBase):
             self.bq.execute(test_request)
             return True
         except Exception:
+            logger.debug("BQL availability probe failed", exc_info=True)
             return False
     
     def _get_bql_data_item(self, field: str):
@@ -92,14 +100,14 @@ class BQLClient(BloombergClientBase):
     def get_historical_data(
         self,
         ticker: str,
-        fields: List[str],
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        periodicity: Optional[str] = None,
-        overrides: Optional[Dict[str, str]] = None,
-        adjustment_profile: Optional[str] = None,
-        currency: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        fields: list[str],
+        start_date: str | None = None,
+        end_date: str | None = None,
+        periodicity: str | None = None,
+        overrides: dict[str, str] | None = None,
+        adjustment_profile: str | None = None,
+        currency: str | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Fetch historical data using BQL.
         
@@ -141,7 +149,8 @@ class BQLClient(BloombergClientBase):
                 
                 data_items_dict[field] = data_item
             except Exception as e:
-                raise ValueError(f"Error mapping field '{field}' to BQL: {e}")
+                logger.exception("Error mapping BQL field %s", field)
+                raise ValueError(f"Error mapping field '{field}' to BQL: {e}") from e
         
         # Create and execute request
         request = bql.Request(ticker, data_items_dict)
@@ -209,9 +218,9 @@ class BQLClient(BloombergClientBase):
     
     def get_reference_data(
         self,
-        tickers: List[str],
-        fields: List[str]
-    ) -> Dict[str, Dict[str, Any]]:
+        tickers: list[str],
+        fields: list[str]
+    ) -> dict[str, dict[str, Any]]:
         """
         Fetch reference/EOD data using BQL.
         
@@ -236,7 +245,8 @@ class BQLClient(BloombergClientBase):
                 data_item = self._get_bql_data_item(field)
                 data_items_dict[field] = data_item
             except Exception as e:
-                raise ValueError(f"Error mapping field '{field}' to BQL: {e}")
+                logger.exception("Error mapping BQL field %s", field)
+                raise ValueError(f"Error mapping field '{field}' to BQL: {e}") from e
         
         # Create and execute request
         request = bql.Request(tickers, data_items_dict)

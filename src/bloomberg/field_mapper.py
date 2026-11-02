@@ -2,7 +2,7 @@
 Field mapping between Bloomberg Terminal API fields and BQL data items.
 """
 
-from typing import Optional
+from __future__ import annotations
 
 BQL_OWNED_FIELDS = {
     "PCT_MEMB_PX_ABV_UPPER_BOLL_BAND",
@@ -32,7 +32,7 @@ FIELD_MAPPING = {
     "PCT_MEMB_WITH_14D_RSI_LT_30": None,  # Needs special handling
 }
 
-def get_bql_field_name(terminal_field: str) -> Optional[str]:
+def get_bql_field_name(terminal_field: str) -> str | None:
     """
     Convert Bloomberg Terminal API field name to BQL data item name.
     

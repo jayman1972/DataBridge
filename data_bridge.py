@@ -7,26 +7,31 @@ Note: BQL is only available within BQuant IDE, not in external IDEs like Cursor.
 Therefore, this service uses BLPAPI which works in any Python environment.
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import json
-import math
 import logging
-import traceback
-import time
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import math
+import os
 import re
+import secrets
 import socket
 import subprocess
-from datetime import datetime, timedelta, timezone, time as dt_time, date as date_type
+import sys
+import threading
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date as date_type
+from datetime import datetime, timedelta, timezone
+from datetime import time as dt_time
 from pathlib import Path
-from typing import Dict, List, Optional, Any
-from flask import Flask, request, jsonify, Response, send_file
+from typing import Any
+
+import requests
+from flask import Flask, Response, jsonify, request, send_file
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
-import requests
-import secrets
 
 # Try to import zoneinfo for timezone handling (Python 3.9+)
 try:
@@ -47,37 +52,44 @@ except ImportError:
 # Add src directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 
-from bloomberg import get_bloomberg_client, BloombergClientType
+from supabase import Client, create_client
+
+from bloomberg import get_bloomberg_client
 from bloomberg.adjustments import validate_historical_adjustment_contract
 from bloomberg.merger_monitor import refresh_open_merger_actions
+from sggg.close_price_reconcile import (
+    fetch_close_price_reconciliation,
+    resolve_close_price_fund_id,
+)
+from sggg.compliance_check_estimates import (
+    compliance_aum_change_ex_flows,
+    estimates_by_fund_id,
+)
 from sggg.diamond_client import (
     DiamondNavUnavailableError,
     fetch_nav_sheet,
-    get_diamond_client,
     fund_aum_from_summary,
+    get_diamond_client,
     get_nav_sheet_raw_cached,
     nav_sheet_summary_cacheable,
     set_nav_sheet_raw_cached,
     should_skip_diamond_early_for_today,
 )
+from sggg.diamond_nav_store import load_snapshots_bulk, snapshot_usable, upsert_snapshot
 from sggg.nav_sheet_parse import (
     FUND_NATIVE_CURRENCY,
     capital_flow_net_from_summary,
+    enrich_classes_display_labels,
     fetch_psc_portfolio_navs,
     normalize_diamond_sheet_date,
     normalize_valuation_date,
     parse_nav_sheet_summary,
+    pick_class_i_bps,
     prior_business_day_iso,
     prior_business_days_for_lookup,
     prior_open_sheet_is_usable,
-    enrich_classes_display_labels,
-    pick_class_i_bps,
     sggg_opening_aum_from_prior_summary,
 )
-from sggg.compliance_check_estimates import compliance_aum_change_ex_flows, estimates_by_fund_id
-from sggg.diamond_nav_store import load_snapshots_bulk, snapshot_usable, upsert_snapshot
-from sggg.psc_boxed_positions import fetch_boxed_positions_for_funds
-from sggg.close_price_reconcile import fetch_close_price_reconciliation, resolve_close_price_fund_id
 from sggg.operations_reports import (
     OPERATIONS_REPORT_TYPES,
     REPORT_ETFS,
@@ -92,10 +104,12 @@ from sggg.options_closeout import (
     select_live_underlying_quote,
     underlying_quote_candidates,
 )
-from sggg.options_closeout_alert import collect_flagged_groups, should_run_closeout_alert
-from sggg.options_closeout_coverage import load_start_positions, finish_coverage
-
-from supabase import create_client, Client
+from sggg.options_closeout_alert import (
+    collect_flagged_groups,
+    should_run_closeout_alert,
+)
+from sggg.options_closeout_coverage import finish_coverage, load_start_positions
+from sggg.psc_boxed_positions import fetch_boxed_positions_for_funds
 
 # Configuration
 # Load from environment variables (required)
@@ -137,7 +151,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
                             os.environ["SGGG_DIAMOND_FUND_ID"] = value
                         elif key == "SGGG_DIAMOND_FUND_IDS":
                             os.environ["SGGG_DIAMOND_FUND_IDS"] = value
-        except Exception as e:
+        except (OSError, UnicodeError) as e:
             print(f"Error reading config file {config_file}: {e}")
 
 # Load optional local integrations from the same config file.
@@ -161,7 +175,7 @@ for _config_dir in [os.path.dirname(os.path.abspath(__file__)), os.path.normpath
                             "IBKR_SESSION_COOKIE",
                         ) and v:
                             os.environ[k] = v
-        except Exception as e:
+        except (OSError, UnicodeError) as e:
             print(f"Error reading SGGG config from {_cfg}: {e}")
         break
 
@@ -170,6 +184,7 @@ SERVICE_PORT = int(os.getenv("PORT", "5000"))
 # Bump when debugging deploy mismatches (curl /health to confirm running build)
 DATA_BRIDGE_BUILD = "2026-08-15-bloomberg-provider-errors"
 
+_logger = logging.getLogger(__name__)
 _ecal_logger = logging.getLogger("data_bridge.economic_calendar")
 if not _ecal_logger.handlers:
     _ecal_handler = logging.StreamHandler(sys.stderr)
@@ -210,7 +225,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 IBKR_ENABLED = _env_flag("DATA_BRIDGE_ENABLE_IBKR", False)
 IBKR_GATEWAY_URL = os.getenv("IBKR_GATEWAY_URL", "https://localhost:5001").rstrip("/")
-_ibkr_session: Optional[requests.Session] = None
+_ibkr_session: requests.Session | None = None
 if IBKR_ENABLED:
     # Gateway uses a self-signed localhost certificate.
     requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
@@ -276,7 +291,7 @@ CORS(
     },
 )
 
-SGGG_FUND_ID_TO_PSC_PORTFOLIO: Dict[str, str] = {
+SGGG_FUND_ID_TO_PSC_PORTFOLIO: dict[str, str] = {
     # Matches the fund list hardcoded in market-dashboard Fund Admin NAV reports.
     # You can override by sending "portfolio" in the request body.
     "415a3530-3034-4536-4432-303030364337": "EHP Adv Alt",
@@ -287,7 +302,7 @@ SGGG_FUND_ID_TO_PSC_PORTFOLIO: Dict[str, str] = {
 }
 
 # "All funds" for closeout checks should include Alpha even if it's not in the fund-id mapping.
-PSC_ALL_FUNDS_PORTFOLIOS: List[str] = [
+PSC_ALL_FUNDS_PORTFOLIOS: list[str] = [
     "EHP Alpha",
     "EHP Select Alt",
     "EHP Strat Inc Alt",
@@ -296,8 +311,8 @@ PSC_ALL_FUNDS_PORTFOLIOS: List[str] = [
 
 # Cache PSC start-of-day option positions by (asof_date, portfolios_key).
 # This avoids repeatedly hitting PSC for the same snapshot when you rerun the report.
-_PSC_START_POS_CACHE: Dict[str, Dict[str, float]] = {}
-_PSC_START_POS_CACHE_META: Dict[str, dict] = {}
+_PSC_START_POS_CACHE: dict[str, dict[str, float]] = {}
+_PSC_START_POS_CACHE_META: dict[str, dict] = {}
 
 
 def _ymd_to_compact(s: str) -> str:
@@ -312,21 +327,21 @@ def _ymd_to_compact(s: str) -> str:
     return s.replace("-", "")[:8]
 
 
-def _compact_to_ymd(s: str) -> Optional[str]:
+def _compact_to_ymd(s: str) -> str | None:
     s = _ymd_to_compact(s)
     if len(s) != 8:
         return None
     return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
 
 
-def _psc_probe_snapshot_before(cursor, portfolio: str, report_compact: str, lookback_days: int = 14, deadline: Optional[float] = None) -> Optional[str]:
+def _psc_probe_snapshot_before(cursor, portfolio: str, report_compact: str, lookback_days: int = 14, deadline: float | None = None) -> str | None:
     """
     Resolve latest POSN_DATE strictly before report_compact by probing likely dates with equality.
     This avoids expensive MAX()/ORDER BY scans which can time out on some PSC installs.
     """
     try:
-        report_date = datetime(int(report_compact[:4]), int(report_compact[4:6]), int(report_compact[6:8]))
-    except Exception:
+        report_date = date_type(int(report_compact[:4]), int(report_compact[4:6]), int(report_compact[6:8]))
+    except (TypeError, ValueError):
         return None
 
     for back in range(1, max(1, int(lookback_days)) + 1):
@@ -345,7 +360,7 @@ def _psc_probe_snapshot_before(cursor, portfolio: str, report_compact: str, look
     return None
 
 
-def _psc_portfolio_from_request(data: dict) -> Optional[str]:
+def _psc_portfolio_from_request(data: dict) -> str | None:
     portfolio = (data.get("portfolio") or "").strip()
     if portfolio:
         return portfolio
@@ -355,7 +370,7 @@ def _psc_portfolio_from_request(data: dict) -> Optional[str]:
     return None
 
 
-def _like_patterns_from_fund_name(fund_name: Optional[str]) -> List[str]:
+def _like_patterns_from_fund_name(fund_name: str | None) -> list[str]:
     """
     Build a few MySQL LIKE patterns from a fund display name.
     Example: "EHP Tactical Growth Alternative Fund" -> ["%Tactical%Growth%", "%Tactical%", "%Growth%"].
@@ -371,12 +386,12 @@ def _like_patterns_from_fund_name(fund_name: Optional[str]) -> List[str]:
     keep = [w for w in words if w.upper() not in stop and len(w) >= 4]
     if not keep:
         return []
-    patterns: List[str] = []
+    patterns: list[str] = []
     if len(keep) >= 2:
         patterns.append("%" + "%".join(keep[:3]) + "%")
     patterns.extend([f"%{w}%" for w in keep[:3]])
     # Dedup preserving order
-    out: List[str] = []
+    out: list[str] = []
     seen = set()
     for p in patterns:
         if p not in seen:
@@ -438,11 +453,10 @@ def _json_errors_for_economic_calendar(exc: BaseException):
         "uncaught_exception %s: %s",
         type(exc).__name__,
         exc,
-        exc_info=True,
     )
     traceback.print_exc(file=sys.stderr)
     sys.stderr.flush()
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "success": False,
         "service": "DataBridge",
         "build": DATA_BRIDGE_BUILD,
@@ -454,8 +468,8 @@ def _json_errors_for_economic_calendar(exc: BaseException):
         payload["traceback"] = traceback.format_exc()
     try:
         return _json_response(payload, 500)
-    except Exception as enc_err:
-        _ecal_logger.error("failed to json-serialize error payload: %s", enc_err, exc_info=True)
+    except Exception:
+        _ecal_logger.exception("failed to json-serialize error payload")
         minimal = json.dumps(
             {
                 "success": False,
@@ -474,12 +488,13 @@ def _json_errors_for_economic_calendar(exc: BaseException):
 
 
 # Initialize Supabase client
-supabase: Optional[Client] = None
+supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         print(f"[OK] Connected to Supabase: {SUPABASE_URL}")
     except Exception as e:
+        _logger.exception("Could not initialize Supabase client")
         print(f"[FAIL] Failed to connect to Supabase: {e}")
         sys.exit(1)
 else:
@@ -495,17 +510,18 @@ try:
     
     # Test availability
     if bloomberg_client.is_available():
-        print(f"[OK] Bloomberg client is available and connected")
+        print("[OK] Bloomberg client is available and connected")
     else:
-        print(f"[WARN] Bloomberg client initialized but connection test failed")
-        print(f"  Ensure Bloomberg Terminal is running and you are logged in")
+        print("[WARN] Bloomberg client initialized but connection test failed")
+        print("  Ensure Bloomberg Terminal is running and you are logged in")
 except Exception as e:
+    _logger.exception("Could not initialize Bloomberg client")
     print(f"[FAIL] Failed to initialize Bloomberg client: {e}")
-    print(f"\nEnsure:")
-    print(f"1. Bloomberg Terminal is running")
-    print(f"2. You are logged in to Bloomberg Terminal")
-    print(f"3. blpapi package is installed: pip install blpapi")
-    print(f"\nError details:")
+    print("\nEnsure:")
+    print("1. Bloomberg Terminal is running")
+    print("2. You are logged in to Bloomberg Terminal")
+    print("3. blpapi package is installed: pip install blpapi")
+    print("\nError details:")
     print(f"{traceback.format_exc()}")
     sys.exit(1)
 
@@ -557,6 +573,7 @@ def _is_us_market_hours() -> bool:
         now = datetime.now(eastern).time()
         return dt_time(9, 30) <= now <= dt_time(16, 0)
     except Exception:
+        _logger.debug("Could not determine US market hours", exc_info=True)
         return False
 
 
@@ -568,11 +585,11 @@ def _eastern_today_iso() -> str:
         if HAS_PYTZ:
             return datetime.now(pytz.timezone("America/Toronto")).date().isoformat()
     except Exception:
-        pass
+        _logger.debug("Could not determine Toronto date", exc_info=True)
     raise RuntimeError("America/Toronto timezone data is unavailable")
 
 
-def _option_underlying_quotes(open_positions: List[dict]) -> Dict[str, dict]:
+def _option_underlying_quotes(open_positions: list[dict]) -> dict[str, dict]:
     """Fetch one live Bloomberg quote per option root for same-day ITM checks."""
     roots = sorted({
         contract["underlying"]
@@ -594,7 +611,7 @@ def _option_underlying_quotes(open_positions: List[dict]) -> Dict[str, dict]:
         fields=["PX_LAST", "PX_BID", "PX_ASK", "PX_MID", "LAST_UPDATE_DT"],
     )
     expected_date = _eastern_today_iso()
-    quotes: Dict[str, dict] = {}
+    quotes: dict[str, dict] = {}
     for root in roots:
         for ticker in candidates_by_root[root]:
             row = reference_data.get(ticker) or {}
@@ -662,6 +679,7 @@ def bloomberg_quotes():
         print("[bloomberg/quotes] Returning", len(result), "prices (mode:", "mid" if in_market_hours else "official_close", "):", dict(result))
         return jsonify(result), 200
     except Exception as e:
+        _bbg_logger.debug("Bloomberg quote request failed", exc_info=True)
         print("[bloomberg/quotes] Exception:", str(e))
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -680,7 +698,7 @@ def bloomberg_update():
         
         # Default to today if not specified
         if not to_date:
-            to_date = datetime.now().strftime("%Y-%m-%d")
+            to_date = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
         if not from_date:
             # Default to 1983-01-01 if no from_date
             from_date = "1983-01-01"
@@ -705,7 +723,7 @@ def bloomberg_update():
 
         for ticker, field_mappings in ticker_groups.items():
             try:
-                fields = list(set([m["field"] for m in field_mappings]))
+                fields = list({m["field"] for m in field_mappings})
                 print(f"Fetching {ticker} with fields: {fields}")
 
                 # Use the unified client interface
@@ -742,7 +760,8 @@ def bloomberg_update():
                 print(f"  [OK] {ticker}: {len(bloomberg_data)} records")
 
             except Exception as e:
-                error_msg = f"Error fetching {ticker}: {str(e)}"
+                _bbg_logger.debug("Bloomberg update failed for %s", ticker, exc_info=True)
+                error_msg = f"Error fetching {ticker}: {e!s}"
                 print(f"  [FAIL] {error_msg}")
                 errors.append(error_msg)
                 traceback.print_exc()
@@ -753,7 +772,7 @@ def bloomberg_update():
             print(f"Writing {len(records_list)} records to Supabase...")
 
             try:
-                result = supabase.table("market_data").upsert(
+                supabase.table("market_data").upsert(
                     records_list,
                     on_conflict="date"
                 ).execute()
@@ -767,7 +786,8 @@ def bloomberg_update():
                 })
 
             except Exception as e:
-                error_msg = f"Error writing to Supabase: {str(e)}"
+                _logger.debug("Supabase market-data write failed", exc_info=True)
+                error_msg = f"Error writing to Supabase: {e!s}"
                 print(f"[FAIL] {error_msg}")
                 errors.append(error_msg)
                 return jsonify({
@@ -784,7 +804,8 @@ def bloomberg_update():
             })
 
     except Exception as e:
-        error_msg = f"Bloomberg update error: {str(e)}"
+        _logger.debug("Bloomberg update route failed", exc_info=True)
+        error_msg = f"Bloomberg update error: {e!s}"
         print(f"[FAIL] {error_msg}")
         traceback.print_exc()
         return jsonify({
@@ -938,7 +959,7 @@ def instrument_search():
         )
         return jsonify({"matches": matches, "errors": []}), 200
     except Exception as exc:
-        _bbg_logger.error("instrument search failed query=%r err=%s", locals().get("query"), exc, exc_info=True)
+        _bbg_logger.exception("instrument search failed query=%r", locals().get("query"))
         return jsonify({"matches": [], "errors": [str(exc)]}), 500
 
 
@@ -993,6 +1014,7 @@ def historical_debug():
                     "requested_as": normalized,
                 }
             except Exception as e:
+                _bbg_logger.debug("Bloomberg instrument lookup failed for %s", ticker, exc_info=True)
                 results[ticker] = {"error": str(e), "requested_as": normalized}
 
         return jsonify({
@@ -1001,6 +1023,7 @@ def historical_debug():
             "note": "Set env DATA_BRIDGE_DEBUG=1 for verbose BLPAPI logging in Data Bridge console",
         }), 200
     except Exception as e:
+        _bbg_logger.debug("Bloomberg instrument search route failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -1093,9 +1116,9 @@ def historical():
                 except Exception as e:
                     last_error = e
                     print(f"[DataBridge historical] RESPONSE ticker={ticker_to_try!r} exception={e!r}", flush=True)
-                    _bbg_logger.error("historical exception ticker_try=%r err=%s", ticker_to_try, e, exc_info=True)
+                    _bbg_logger.exception("historical exception ticker_try=%r", ticker_to_try)
             if not records and last_error:
-                errors.append(f"{ticker}: {str(last_error)}")
+                errors.append(f"{ticker}: {last_error!s}")
             if not records:
                 print(
                     f"[DataBridge historical] RESPONSE ticker={ticker!r} record_count=0 last_error={last_error!r} (tried variants: {variants})",
@@ -1110,6 +1133,7 @@ def historical():
             historical_data[ticker] = records  # Key by original ticker for caller
         return jsonify({"historical_data": historical_data, "errors": errors}), 200
     except Exception as e:
+        _bbg_logger.debug("Bloomberg historical route failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -1161,7 +1185,7 @@ def reference():
         # Update expects reference_data[ticker] = [row] (array of rows)
         reference_data = {}
         errors = []
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
         for ticker, row in ref_data.items():
             if "error" in row:
                 errors.append(f"{ticker}: {row['error']}")
@@ -1171,7 +1195,7 @@ def reference():
                 reference_data[ticker] = [row_with_date]
         return jsonify({"reference_data": reference_data, "errors": errors}), 200
     except Exception as e:
-        _bbg_logger.error("reference failed: %s", e, exc_info=True)
+        _bbg_logger.exception("reference failed")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -1184,11 +1208,13 @@ def refresh_bloomberg_merger_actions():
         as_of_raw = str(data.get("asOf") or "").strip()
         if as_of_raw:
             try:
-                as_of_date = datetime.strptime(as_of_raw, "%Y-%m-%d").date()
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", as_of_raw):
+                    raise ValueError("asOf must use YYYY-MM-DD")
+                as_of_date = date_type.fromisoformat(as_of_raw)
             except ValueError:
                 return jsonify({"error": "asOf must use YYYY-MM-DD"}), 400
         else:
-            as_of_date = datetime.now().date()
+            as_of_date = datetime.now(timezone.utc).astimezone().date()
 
         try:
             batch_size = int(data.get("batchSize", 50))
@@ -1214,11 +1240,7 @@ def refresh_bloomberg_merger_actions():
         status_code = 200 if result.get("success") else 502
         return jsonify(result), status_code
     except Exception as exc:
-        _bbg_logger.error(
-            "Bloomberg merger Action refresh failed: %s",
-            exc,
-            exc_info=True,
-        )
+        _bbg_logger.exception("Bloomberg merger Action refresh failed")
         return jsonify({"success": False, "error": str(exc)}), 500
 
 
@@ -1259,12 +1281,13 @@ def bds():
                     )
                     bds_data[ticker][field] = members
                 except Exception as exc:
+                    _bbg_logger.debug("Bloomberg BDS lookup failed for %s/%s", ticker, field, exc_info=True)
                     errors.append(f"{ticker}/{field}: {exc}")
                     bds_data[ticker][field] = []
 
         return jsonify({"bds_data": bds_data, "errors": errors}), 200
     except Exception as e:
-        _bbg_logger.error("bds failed: %s", e, exc_info=True)
+        _bbg_logger.exception("bds failed")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -1397,6 +1420,7 @@ def sggg_health():
             "message": "SGGG PSC connection successful (DSN=PSC_VIEWER).",
         }), 200
     except Exception as e:
+        _logger.debug("SGGG PSC connectivity probe failed", exc_info=True)
         return jsonify({
             "status": "error",
             "message": str(e),
@@ -1406,7 +1430,7 @@ def sggg_health():
             try:
                 conn.close()
             except Exception:
-                pass
+                _logger.debug("Could not close SGGG PSC connectivity probe", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1479,16 +1503,16 @@ def sggg_portfolio():
             try:
                 qs = parse_qs((request.query_string or b"").decode("utf-8", errors="ignore"))
                 fund = (qs.get("fund", [""])[0] or "").strip()
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 fund = ""
         if not fund:
-            fund = ((data.get("fund") or data.get("fund_name") or "")).strip()
+            fund = (data.get("fund") or data.get("fund_name") or "").strip()
         if not fund:
             fund = "EHP Select Alt"
         if query_date:
             query_date = query_date.replace("-", "")[:8]
         else:
-            query_date = datetime.now().strftime("%Y%m%d")
+            query_date = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d")
         if not re.fullmatch(r"\d{8}", query_date):
             return jsonify({"error": "Invalid PSC portfolio date (expected YYYYMMDD)"}), 400
         try:
@@ -1681,7 +1705,7 @@ def sggg_portfolio():
                 beta_pct_nav = _psc_pct_nav_fraction(row[i + 1] if len(row) > i + 1 else None)
                 i += 2
 
-                qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, fx_exp_i, nav_i = (
+                qty_i, avg_i, close_i, pprof_i, fx_i, int_i, div_i, val_i, exp_i, dprof_i, fx_exp_i, _nav_i = (
                     i,
                     i + 1,
                     i + 2,
@@ -1748,6 +1772,7 @@ def sggg_portfolio():
             "positions": positions,
         })
     except Exception as e:
+        _logger.debug("SGGG portfolio lookup failed", exc_info=True)
         traceback.print_exc()
         return jsonify({
             "error": str(e),
@@ -1820,15 +1845,16 @@ def sggg_options_tax_reconciliation():
             "COMPANY_SYMBOL, CONTRACT_SIZE, DELTA, ",
         )
         resolved_portfolio = portfolio
-        portfolio_candidates: List[str] = []
+        portfolio_candidates: list[str] = []
 
         _orders_sql_to_use = orders_sql_with_delta
 
-        def _run_orders_query(port: str) -> List[dict]:
+        def _run_orders_query(port: str) -> list[dict]:
             nonlocal _orders_sql_to_use
             try:
                 cursor.execute(_orders_sql_to_use, (start_compact, end_compact, port))
             except Exception:
+                _logger.debug("PSC orders query with DELTA failed; retrying legacy SQL", exc_info=True)
                 # Most likely: DELTA column not present.
                 _orders_sql_to_use = orders_sql_base
                 cursor.execute(_orders_sql_to_use, (start_compact, end_compact, port))
@@ -1836,7 +1862,7 @@ def sggg_options_tax_reconciliation():
             rows = cursor.fetchall()
             return [dict(zip(cols, r)) for r in rows]
 
-        option_trades: List[dict] = []
+        option_trades: list[dict] = []
         if resolved_portfolio:
             option_trades = _run_orders_query(resolved_portfolio)
 
@@ -1893,6 +1919,7 @@ def sggg_options_tax_reconciliation():
             "position_history": _log_serialize(position_history),
         }, 200)
     except Exception as e:
+        _logger.debug("SGGG PSC order lookup failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
     finally:
@@ -1900,7 +1927,7 @@ def sggg_options_tax_reconciliation():
             try:
                 conn.close()
             except Exception:
-                pass
+                _logger.debug("Could not close SGGG PSC orders connection", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1910,18 +1937,18 @@ def _try_import_blpapi():
     try:
         import blpapi  # type: ignore
         return blpapi, None
-    except Exception as e:
+    except (ImportError, OSError) as e:
         return None, str(e)
 
 
 def _emsx_history_get_fills(
     date_iso: str,
-    uuids: Optional[List[int]] = None,
-    team: Optional[str] = None,
+    uuids: list[int] | None = None,
+    team: str | None = None,
     host: str = "localhost",
     port: int = 8194,
     service: str = "//blp/emsx.history",
-) -> List[dict]:
+) -> list[dict]:
     """
     Pull fills via EMSX History Request service (GetFills).
 
@@ -1964,8 +1991,8 @@ def _emsx_history_get_fills(
                 el.appendValue(int(u))
 
         corr = session.sendRequest(request)
-        fills: List[dict] = []
-        filtered_out: List[dict] = []
+        fills: list[dict] = []
+        filtered_out: list[dict] = []
         filtered_out_count = 0
 
         deadline = time.monotonic() + 45
@@ -1992,18 +2019,21 @@ def _emsx_history_get_fills(
                     arr = msg.getElement("Fills")
                     for i in range(arr.numValues()):
                         f = arr.getValueAsElement(i)
-                        def _get(name: str):
+                        def _get(name: str, element=f):
                             try:
-                                return f.getElementAsString(name) if f.hasElement(name) else None
+                                return element.getElementAsString(name) if element.hasElement(name) else None
                             except Exception:
+                                _logger.debug("Could not read EMSX text element %s", name, exc_info=True)
                                 return None
-                        def _get_num(name: str):
+                        def _get_num(name: str, element=f):
                             try:
-                                return float(f.getElementAsFloat(name)) if f.hasElement(name) else None
+                                return float(element.getElementAsFloat(name)) if element.hasElement(name) else None
                             except Exception:
+                                _logger.debug("Could not read EMSX numeric element %s", name, exc_info=True)
                                 try:
-                                    return float(f.getElementAsString(name)) if f.hasElement(name) else None
+                                    return float(element.getElementAsString(name)) if element.hasElement(name) else None
                                 except Exception:
+                                    _logger.debug("Could not read EMSX numeric text element %s", name, exc_info=True)
                                     return None
 
                         security_name = _get("SecurityName") or ""
@@ -2019,7 +2049,7 @@ def _emsx_history_get_fills(
                             # EMSX typically formats options like: "SPY 04/24/26 P705"
                             return bool(re.search(r"\b\d{2}/\d{2}/\d{2}\s+[PC]\d", s or ""))
 
-                        def _format_occ(occ_sym: str) -> Optional[str]:
+                        def _format_occ(occ_sym: str) -> str | None:
                             # OCC: "SPY 260424P00705000" (or "SPY260424P00705000") -> "SPY 04/24/26 P705"
                             m = re.match(r"^([A-Z0-9]{1,6})\s*(\d{2})(\d{2})(\d{2})([CP])(\d{8})$", (occ_sym or "").strip().upper())
                             if not m:
@@ -2094,10 +2124,10 @@ def _emsx_history_get_fills(
         try:
             session.stop()
         except Exception:
-            pass
+            _logger.debug("Could not stop EMSX session", exc_info=True)
 
 
-def _canonical_option_key(sym: str) -> Optional[str]:
+def _canonical_option_key(sym: str) -> str | None:
     """
     Canonical key used to match the same option across data sources.
 
@@ -2126,9 +2156,9 @@ def _canonical_option_key(sym: str) -> Optional[str]:
         und, mm, dd, yy, pc, strike_str = m2.groups()
         try:
             strike = float(strike_str)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return None
-        strike_raw = f"{int(round(strike * 1000.0)):08d}"
+        strike_raw = f"{round(strike * 1000.0):08d}"
         return f"{und}{yy}{mm}{dd}{pc}{strike_raw}"
 
     # Alternate display: "SPY 20260424 P705" or "SPY 2026-04-24 P705"
@@ -2138,15 +2168,15 @@ def _canonical_option_key(sym: str) -> Optional[str]:
         yy = yyyy[2:4]
         try:
             strike = float(strike_str)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return None
-        strike_raw = f"{int(round(strike * 1000.0)):08d}"
+        strike_raw = f"{round(strike * 1000.0):08d}"
         return f"{und}{yy}{mm}{dd}{pc}{strike_raw}"
 
     return None
 
 
-def _normalize_option_desc_key(sym: str) -> Optional[str]:
+def _normalize_option_desc_key(sym: str) -> str | None:
     """
     Normalize PSC/EMSX option description strings for dictionary key matching.
     Example: "XLE 04/24/26 C57 US Equity" -> "XLE 04/24/26 C57"
@@ -2161,7 +2191,7 @@ def _normalize_option_desc_key(sym: str) -> Optional[str]:
     return s or None
 
 
-def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Optional[Dict[str, float]] = None) -> dict:
+def _options_closeout_analyze(trades: list[dict], starting_net_by_security: dict[str, float] | None = None) -> dict:
     """
     Analyze option fills for closeout mismatches / suspicious close-side usage.
 
@@ -2183,7 +2213,7 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
     def _n(v):
         try:
             return float(v)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return None
 
     def _trade_key(t):
@@ -2245,7 +2275,7 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
 
     # Consolidate partial fills into order-level rows (replicates EMSX UI behavior more closely).
     # Key = (SECURITY, ORDER_ID, ORDER_ACTION).
-    order_map: Dict[str, dict] = {}
+    order_map: dict[str, dict] = {}
     for t in trades:
         sec_raw = _s(t.get("SECURITY"))
         sec = _canonical_option_key(sec_raw) or sec_raw
@@ -2299,8 +2329,8 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
         if route_id and not acc.get("ROUTE_ID"):
             acc["ROUTE_ID"] = route_id
 
-    consolidated_orders: List[dict] = []
-    for _, acc in order_map.items():
+    consolidated_orders: list[dict] = []
+    for acc in order_map.values():
         qty_abs = float(acc.get("QTY_ABS") or 0.0)
         notional = float(acc.get("NOTIONAL") or 0.0)
         vwap = (notional / qty_abs) if (qty_abs and notional) else None
@@ -2320,7 +2350,7 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
             "ROUTE_ID": acc.get("ROUTE_ID"),
         })
 
-    grouped: Dict[str, List[dict]] = {}
+    grouped: dict[str, list[dict]] = {}
     for t in consolidated_orders:
         sec = _s(t.get("SECURITY"))
         if not sec:
@@ -2338,8 +2368,8 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
         if sec and abs(start_net) > 1e-9:
             grouped.setdefault(sec, [])
 
-    normalized_trades: List[dict] = []
-    groups_out: List[dict] = []
+    normalized_trades: list[dict] = []
+    groups_out: list[dict] = []
     open_positions = []
     suspicious_actions = []
     by_security = {}
@@ -2468,7 +2498,7 @@ def _options_closeout_analyze(trades: List[dict], starting_net_by_security: Opti
     }
 
 
-_OPTIONS_CLOSEOUT_ALERT_LAST_COMPLETED_DATE: Optional[str] = None
+_OPTIONS_CLOSEOUT_ALERT_LAST_COMPLETED_DATE: str | None = None
 _OPTIONS_CLOSEOUT_ALERT_NEXT_RETRY_AT = 0.0
 _OPTIONS_CLOSEOUT_ALERT_LOCK = threading.Lock()
 
@@ -2478,7 +2508,7 @@ def _eastern_now() -> datetime:
         return datetime.now(ZoneInfo("America/New_York"))
     if HAS_PYTZ:
         return datetime.now(pytz.timezone("America/New_York"))
-    return datetime.now()
+    return datetime.now(timezone.utc).astimezone()
 
 
 def _run_scheduled_options_closeout_alert(report_date: str) -> dict:
@@ -2558,6 +2588,7 @@ def _options_closeout_alert_scheduler_loop() -> None:
                     _OPTIONS_CLOSEOUT_ALERT_LAST_COMPLETED_DATE = report_date
                     _OPTIONS_CLOSEOUT_ALERT_NEXT_RETRY_AT = 0.0
                 except Exception as alert_error:
+                    _logger.debug("Scheduled options closeout alert failed", exc_info=True)
                     _OPTIONS_CLOSEOUT_ALERT_NEXT_RETRY_AT = time.monotonic() + 120
                     print(
                         f"[options-closeout-alert] attempt failed: {alert_error}; "
@@ -2567,6 +2598,7 @@ def _options_closeout_alert_scheduler_loop() -> None:
                 finally:
                     _OPTIONS_CLOSEOUT_ALERT_LOCK.release()
         except Exception as loop_error:
+            _logger.debug("Options closeout scheduler iteration failed", exc_info=True)
             print(f"[options-closeout-alert] scheduler error: {loop_error}", file=sys.stderr)
         time.sleep(15)
 
@@ -2589,7 +2621,7 @@ def emsx_options_closeout_check():
     # Explicitly handle CORS preflight (ngrok/browser can be strict).
     if request.method == "OPTIONS":
         return ("", 204)
-    date_iso = _compact_to_ymd(data.get("date") or "") or datetime.now().strftime("%Y-%m-%d")
+    date_iso = _compact_to_ymd(data.get("date") or "") or datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
     try:
         allow_psc_fallback = bool(data.get("allow_psc_fallback") is True)
         uuids = data.get("uuids")
@@ -2603,7 +2635,7 @@ def emsx_options_closeout_check():
             team = (os.environ.get("EMSX_TEAM", "").strip() or None)
 
         # Optional: start-of-day positions from PSC (yesterday/last snapshot) to correctly interpret intraday exits.
-        starting_net_by_security: Dict[str, float] = {}
+        starting_net_by_security: dict[str, float] = {}
         starting_positions_date = None
         coverage = {"status": "incomplete", "issues": ["PSC starting positions were not requested"],
                     "portfolios": [], "aggregation_scope": "security_net_across_funds"}
@@ -2639,6 +2671,7 @@ def emsx_options_closeout_check():
                         _PSC_START_POS_CACHE[cache_key] = dict(starting_net_by_security)
                         _PSC_START_POS_CACHE_META[cache_key] = {"coverage": coverage}
                 except Exception as psc_error:
+                    _logger.debug("Could not load PSC starting positions", exc_info=True)
                     coverage = {"status": "incomplete", "issues": [f"PSC start positions unavailable: {psc_error}"],
                                 "portfolios": [], "aggregation_scope": "security_net_across_funds"}
                 finally:
@@ -2646,7 +2679,7 @@ def emsx_options_closeout_check():
                         try:
                             conn.close()
                         except Exception:
-                            pass
+                            _logger.debug("Could not close PSC starting-position connection", exc_info=True)
             snapshot_dates = [item["snapshot_date"] for item in coverage.get("portfolios", []) if item.get("snapshot_date")]
             # Keep the browser's legacy label, but expose all individual dates too.
             starting_positions_date = max(snapshot_dates).replace("-", "") if snapshot_dates else None
@@ -2654,7 +2687,7 @@ def emsx_options_closeout_check():
         try:
             trades = _emsx_history_get_fills(date_iso=date_iso, uuids=uuids, team=team)
             analysis = _options_closeout_analyze(_log_serialize(trades), starting_net_by_security=starting_net_by_security)
-            exercise_risks: List[dict] = []
+            exercise_risks: list[dict] = []
             exercise_risk_status = "not_evaluated_report_date_is_not_today"
             try:
                 if date_iso == _eastern_today_iso():
@@ -2681,6 +2714,7 @@ def emsx_options_closeout_check():
                     if missing_roots:
                         exercise_risk_status = f"missing_quotes: {', '.join(missing_roots)}"
             except Exception as quote_error:
+                _logger.debug("Could not fetch exercise-risk quote", exc_info=True)
                 exercise_risk_status = f"quote_error: {quote_error}"
 
             risks_by_security = {risk["security"]: risk for risk in exercise_risks}
@@ -2704,6 +2738,7 @@ def emsx_options_closeout_check():
                 **analysis,
             }, 200)
         except Exception as e:
+            _logger.debug("EMSX closeout analysis failed", exc_info=True)
             if not allow_psc_fallback:
                 return jsonify({
                     "error": "EMSX not available on this host (required for intraday).",
@@ -2722,7 +2757,7 @@ def emsx_options_closeout_check():
             conn = pyodbc.connect("DSN=PSC_VIEWER")
             cursor = conn.cursor()
             resolved_portfolio = portfolio
-            portfolio_candidates: List[str] = []
+            portfolio_candidates: list[str] = []
             if not resolved_portfolio and fund_name:
                 like_patterns = _like_patterns_from_fund_name(fund_name)
                 distinct_sql = (
@@ -2773,6 +2808,7 @@ def emsx_options_closeout_check():
                 **analysis,
             }, 200)
     except Exception as e:
+        _logger.debug("Options closeout route failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -2809,6 +2845,7 @@ def sggg_diamond_health():
         client._ensure_auth()
         return jsonify({"ok": True, "connection": "diamond_api", "base_url": "https://api.sgggfsi.com/api/v1"})
     except Exception as e:
+        _logger.debug("Diamond connectivity probe failed", exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
@@ -2827,7 +2864,7 @@ def sggg_diamond_portfolio():
         fetch_all = request.args.get("all", "").lower() in ("1", "true", "yes") or data.get("all") is True
         valuation_date = request.args.get("date") or request.args.get("valuation_date") or data.get("date") or data.get("valuation_date")
         if not valuation_date:
-            valuation_date = datetime.now().strftime("%Y-%m-%d")
+            valuation_date = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
         else:
             valuation_date = valuation_date.replace("-", "")[:8]
             valuation_date = f"{valuation_date[:4]}-{valuation_date[4:6]}-{valuation_date[6:8]}"
@@ -2840,11 +2877,13 @@ def sggg_diamond_portfolio():
                 try:
                     results[fid] = client.get_portfolio(fund_id=fid, valuation_date=valuation_date)
                 except Exception as e:
+                    _logger.debug("Diamond portfolio fetch failed for %s", fid, exc_info=True)
                     results[fid] = {"error": str(e)}
             return jsonify({"funds": results, "valuation_date": valuation_date})
         result = client.get_portfolio(fund_id=fund_ids[0], valuation_date=valuation_date)
         return jsonify(result)
     except Exception as e:
+        _logger.debug("Diamond portfolio route failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -2875,6 +2914,7 @@ def sggg_diamond_trades():
                         fund_parent_id=fid, start_date=start_date, end_date=end_date
                     )
                 except Exception as e:
+                    _logger.debug("Diamond trades fetch failed for %s", fid, exc_info=True)
                     results[fid] = {"error": str(e)}
             return jsonify({"funds": results})
         result = client.get_portfolio_trades(
@@ -2884,6 +2924,7 @@ def sggg_diamond_trades():
         )
         return jsonify(result)
     except Exception as e:
+        _logger.debug("Diamond trades route failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -2909,7 +2950,7 @@ def sggg_diamond_nav_sheet():
             or data.get("valuation_date")
         )
         if not raw_date:
-            raw_date = datetime.now().strftime("%Y-%m-%d")
+            raw_date = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
         valuation_date = normalize_valuation_date(str(raw_date))
         raw = client.get_nav_sheet(fund_id=fund_id, valuation_date=valuation_date)
         summary = parse_nav_sheet_summary(raw)
@@ -2933,14 +2974,15 @@ def sggg_diamond_nav_sheet():
             }
         )
     except Exception as e:
+        _logger.debug("Diamond NAV route failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
 def _boxed_positions_for_fund_id(
-    boxed_by_fund: Dict[str, List[Dict[str, Any]]],
+    boxed_by_fund: dict[str, list[dict[str, Any]]],
     fund_id: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     fid = (fund_id or "").strip()
     if not fid:
         return []
@@ -3011,6 +3053,7 @@ def sggg_psc_boxed_positions():
             }
         )
     except Exception as e:
+        _logger.debug("SGGG NAV analysis route failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -3071,6 +3114,7 @@ def sggg_close_price_reconciliation():
             response["debug"] = meta.pop("debug")
         return jsonify(response)
     except Exception as e:
+        _logger.debug("SGGG NAV checker route failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -3219,6 +3263,7 @@ def sggg_operations_reports():
             result["etf_securities"] = list(etf_securities)
         return jsonify(result)
     except Exception as e:
+        _logger.debug("Close-price reconciliation route failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
     finally:
@@ -3226,7 +3271,7 @@ def sggg_operations_reports():
             try:
                 conn.close()
             except Exception:
-                pass
+                _logger.debug("Could not close close-price reconciliation connection", exc_info=True)
 
 
 @app.route("/sggg/diamond/nav-availability", methods=["GET", "POST"])
@@ -3247,7 +3292,7 @@ def sggg_diamond_nav_availability():
             or data.get("valuation_date")
         )
         if not raw_date:
-            raw_date = datetime.now().strftime("%Y-%m-%d")
+            raw_date = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
         valuation_date = normalize_valuation_date(str(raw_date))
 
         funds_in = data.get("funds")
@@ -3262,7 +3307,7 @@ def sggg_diamond_nav_availability():
 
         auth_key = client._ensure_auth()
         started = time.time()
-        results: List[Dict[str, Any]] = [None] * len(fund_specs)  # type: ignore[list-item]
+        results: list[dict[str, Any]] = [None] * len(fund_specs)  # type: ignore[list-item]
 
         prior_date = prior_business_day_iso(valuation_date)
         fund_ids_list = [spec["id"] for spec in fund_specs]
@@ -3277,8 +3322,8 @@ def sggg_diamond_nav_availability():
             data.get("force_diamond", "")
         ).strip().lower() in ("1", "true", "yes")
 
-        diamond_short_circuit: Optional[DiamondNavUnavailableError] = None
-        diamond_skip_reason: Optional[str] = None
+        diamond_short_circuit: DiamondNavUnavailableError | None = None
+        diamond_skip_reason: str | None = None
         if not force_diamond:
             early_msg = should_skip_diamond_early_for_today(valuation_date)
             if early_msg:
@@ -3288,7 +3333,7 @@ def sggg_diamond_nav_availability():
                 )
                 diamond_skip_reason = "early_today"
 
-        db_snapshots: Dict[tuple, Dict[str, Any]] = {}
+        db_snapshots: dict[tuple, dict[str, Any]] = {}
         if not force_diamond and supabase:
             prior_lookup_dates = list(
                 dict.fromkeys(
@@ -3302,13 +3347,13 @@ def sggg_diamond_nav_availability():
                 prior_lookup_dates,
             )
 
-        def _base_entry(spec: Dict[str, str], wp: Dict[str, Any], wp_prior: Dict[str, Any], psc_navs: Dict) -> Dict[str, Any]:
+        def _base_entry(spec: dict[str, str], wp: dict[str, Any], wp_prior: dict[str, Any], psc_navs: dict) -> dict[str, Any]:
             fid = spec["id"]
             name = spec.get("name") or fid
             est_row = (wp.get("estimates_by_fund_id") or {}).get(fid) or {}
             est_prior = (wp_prior.get("estimates_by_fund_id") or {}).get(fid) or {}
             native_ccy = FUND_NATIVE_CURRENCY.get(fid, "CAD")
-            entry: Dict[str, Any] = {
+            entry: dict[str, Any] = {
                 "fund_id": fid,
                 "fund_name": name,
                 "status": "unavailable",
@@ -3391,7 +3436,7 @@ def sggg_diamond_nav_availability():
             return entry
 
         # Diamond close sheets first; prior-day sheets only if close is available (saves calls when NAV not out).
-        diamond_close_tasks: List[tuple] = []
+        diamond_close_tasks: list[tuple] = []
         if not diamond_short_circuit:
             for idx, spec in enumerate(fund_specs):
                 diamond_close_tasks.append((idx, spec["id"], valuation_date, "close"))
@@ -3403,15 +3448,15 @@ def sggg_diamond_nav_availability():
         prep_slots = 3 if use_psc else 2
         pool_workers = max(diamond_workers, prep_slots)
 
-        wp: Dict[str, Any] = {}
-        wp_prior: Dict[str, Any] = {}
-        psc_navs: Dict[str, Dict[str, Optional[float]]] = {}
-        diamond_results: Dict[tuple, Dict[str, Any]] = {}
-        diamond_errors: Dict[tuple, Any] = {}
-        diamond_call_secs: List[float] = []
+        wp: dict[str, Any] = {}
+        wp_prior: dict[str, Any] = {}
+        psc_navs: dict[str, dict[str, float | None]] = {}
+        diamond_results: dict[tuple, dict[str, Any]] = {}
+        diamond_errors: dict[tuple, Any] = {}
+        diamond_call_secs: list[float] = []
         diamond_cache_hits = 0
         diamond_db_hits = 0
-        diamond_calls_detail: List[Dict[str, Any]] = []
+        diamond_calls_detail: list[dict[str, Any]] = []
         compliance_sec = 0.0
         compliance_prior_sec = 0.0
         psc_sec = 0.0
@@ -3432,7 +3477,7 @@ def sggg_diamond_nav_availability():
             fid: str,
             vdate: str,
             vdate_norm: str,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
             """Load one GetNAVSheet summary from DB, memory cache, or live API."""
             if not force_diamond:
                 db_summary = db_snapshots.get((fid, vdate_norm))
@@ -3488,6 +3533,7 @@ def sggg_diamond_nav_availability():
                     "status": "not_finalized",
                 }
             except Exception as exc:
+                _logger.debug("Could not obtain Diamond NAV summary", exc_info=True)
                 return {
                     "summary": None,
                     "error": exc,
@@ -3498,11 +3544,11 @@ def sggg_diamond_nav_availability():
                     "status": "error",
                 }
 
-        def _fetch_nav_task(task: tuple) -> Dict[str, Any]:
+        def _fetch_nav_task(task: tuple) -> dict[str, Any]:
             t0 = time.time()
             idx, fid, vdate, role = task
             fund_name = (fund_specs[idx].get("name") or "").strip() if idx < len(fund_specs) else fid
-            log: Dict[str, Any] = {
+            log: dict[str, Any] = {
                 "fund_index": idx,
                 "fund_id": fid,
                 "fund_name": fund_name or fid,
@@ -3520,10 +3566,10 @@ def sggg_diamond_nav_availability():
             if role == "open":
                 lookback = int(os.environ.get("SGGG_NAV_PRIOR_LOOKBACK_DAYS", "12"))
                 candidates = prior_business_days_for_lookup(vdate_norm, max_days=lookback)
-                fetch_attempts: List[Dict[str, Any]] = []
+                fetch_attempts: list[dict[str, Any]] = []
                 last_error: Any = None
-                chosen_summary: Optional[Dict[str, Any]] = None
-                effective_prior: Optional[str] = None
+                chosen_summary: dict[str, Any] | None = None
+                effective_prior: str | None = None
                 for candidate in candidates:
                     log["request_body"] = {"FundID": fid, "ValuationDate": candidate}
                     attempt = _fetch_summary_for_date(fid, candidate, candidate)
@@ -3664,6 +3710,7 @@ def sggg_diamond_nav_availability():
             try:
                 return estimates_by_fund_id(val_d), time.time() - t0
             except Exception as exc:
+                _logger.debug("Could not read compliance estimates", exc_info=True)
                 return (
                     {"available": False, "error": str(exc), "estimates_by_fund_id": {}},
                     time.time() - t0,
@@ -3674,6 +3721,7 @@ def sggg_diamond_nav_availability():
             try:
                 return fetch_psc_portfolio_navs(fund_ids_list, prior_date, valuation_date), time.time() - t0
             except Exception:
+                _logger.debug("Could not fetch PSC portfolio NAVs", exc_info=True)
                 return {}, time.time() - t0
 
         from datetime import date as _date
@@ -3685,7 +3733,7 @@ def sggg_diamond_nav_availability():
             for idx in range(len(fund_specs)):
                 diamond_errors[(idx, "close")] = diamond_short_circuit
 
-        def _apply_diamond_result(result: Dict[str, Any]) -> None:
+        def _apply_diamond_result(result: dict[str, Any]) -> None:
             nonlocal diamond_cache_hits, diamond_db_hits
             key = (result["idx"], result["role"])
             diamond_calls_detail.append(result["log"])
@@ -3703,7 +3751,7 @@ def sggg_diamond_nav_availability():
 
         t_parallel = time.time()
         with ThreadPoolExecutor(max_workers=pool_workers) as executor:
-            prep_futures: Dict[Any, str] = {
+            prep_futures: dict[Any, str] = {
                 executor.submit(_timed_estimates, val_d): "wp",
                 executor.submit(_timed_estimates, prior_d): "wp_prior",
             }
@@ -3726,7 +3774,7 @@ def sggg_diamond_nav_availability():
                     psc_navs, psc_sec = future.result()
 
             # Prior-day sheets: second phase (dynamic submit inside as_completed never ran these).
-            prior_tasks: List[tuple] = []
+            prior_tasks: list[tuple] = []
             if include_prior_diamond and not diamond_short_circuit:
                 for idx, spec in enumerate(fund_specs):
                     if (idx, "close") in diamond_errors:
@@ -3751,16 +3799,16 @@ def sggg_diamond_nav_availability():
             "false",
             "no",
         )
-        boxed_by_fund: Dict[str, List[Dict[str, Any]]] = {}
-        psc_posn_dates_by_fund: Dict[str, str] = {}
+        boxed_by_fund: dict[str, list[dict[str, Any]]] = {}
+        psc_posn_dates_by_fund: dict[str, str] = {}
         psc_boxed_sec = 0.0
-        psc_boxed_error: Optional[str] = None
+        psc_boxed_error: str | None = None
         if include_psc_boxed:
             t_psc_boxed = time.time()
             try:
                 (
                     boxed_by_fund,
-                    positions_by_fund,
+                    _positions_by_fund,
                     psc_boxed_error,
                     psc_posn_dates_by_fund,
                 ) = fetch_boxed_positions_for_funds(
@@ -3770,6 +3818,7 @@ def sggg_diamond_nav_availability():
                     dsn=(os.environ.get("SGGG_PSC_ODBC_DSN") or "PSC_VIEWER").strip() or "PSC_VIEWER",
                 )
             except Exception as exc:
+                _logger.debug("Could not fetch PSC boxed positions", exc_info=True)
                 psc_boxed_error = str(exc)
             psc_boxed_sec = time.time() - t_psc_boxed
 
@@ -3777,7 +3826,7 @@ def sggg_diamond_nav_availability():
 
         for idx, entry in enumerate(entries):
             est_row = entry.pop("_est_row", {})
-            est_prior = entry.pop("_est_prior", {})
+            entry.pop("_est_prior", {})
             estimate_bps_from_compliance = entry.pop("_estimate_bps_from_compliance", False)
             summary_close = diamond_results.get((idx, "close"))
             close_err = diamond_errors.get((idx, "close"))
@@ -3827,7 +3876,7 @@ def sggg_diamond_nav_availability():
             summary_open = diamond_results.get((idx, "open"))
             open_err = diamond_errors.get((idx, "open"))
             prior_norm = normalize_valuation_date(prior_date)
-            opening_nav: Optional[float] = None
+            opening_nav: float | None = None
             if summary_open:
                 effective_prior = (
                     summary_open.get("prior_effective_valuation_date") or prior_norm
@@ -3879,8 +3928,8 @@ def sggg_diamond_nav_availability():
                 entry["aum_parse_version"] = summary_close.get("aum_parse_version")
 
             # SGGG: opening = prior-day EOD only; report-day subs/reds subtracted from raw close − open.
-            diamond_capital_flow: Optional[float] = None
-            report_flow_label: Optional[str] = None
+            diamond_capital_flow: float | None = None
+            report_flow_label: str | None = None
             if summary_close:
                 diamond_capital_flow, report_flow_label = capital_flow_net_from_summary(
                     summary_close,
@@ -3915,7 +3964,7 @@ def sggg_diamond_nav_availability():
                         )
                 entry["sggg_nav_change_source"] = "diamond"
             else:
-                missing: List[str] = []
+                missing: list[str] = []
                 if entry["diamond_opening_aum"] is None:
                     if isinstance(open_err, DiamondNavUnavailableError):
                         missing.append(open_err.user_message)
@@ -3947,11 +3996,9 @@ def sggg_diamond_nav_availability():
                     and entry.get("estimate_nav_change_dollars") is not None
                     and float(prior_eod) != 0
                 ):
-                    entry["estimate_bps"] = int(
-                        round(
+                    entry["estimate_bps"] = round(
                             (float(entry["estimate_nav_change_dollars"]) / float(prior_eod)) * 10_000
                         )
-                    )
             if entry["class_i_bps"] is not None and entry["estimate_bps"] is not None:
                 entry["bps_difference"] = int(entry["class_i_bps"]) - int(entry["estimate_bps"])
             if entry["sggg_nav_change_dollars"] is not None and entry["estimate_nav_change_dollars"] is not None:
@@ -4084,11 +4131,12 @@ def sggg_diamond_nav_availability():
             }
         )
     except Exception as e:
+        _logger.debug("SGGG NAV endpoint failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
-def _refdata_result_summary(ref: Dict[str, Any]) -> tuple[int, int]:
+def _refdata_result_summary(ref: dict[str, Any]) -> tuple[int, int]:
     """Return (num_tickers, num_with_error_key) for a get_reference_data result dict."""
     if not ref:
         return 0, 0
@@ -4096,7 +4144,7 @@ def _refdata_result_summary(ref: Dict[str, Any]) -> tuple[int, int]:
     return len(ref), n_err
 
 
-def _eco_calendar_parse_date(release_dt: Any) -> Optional[date_type]:
+def _eco_calendar_parse_date(release_dt: Any) -> date_type | None:
     """Parse ECO_RELEASE_DT / ECO_FUTURE_RELEASE_DATE refdata values to a date."""
     if not release_dt:
         return None
@@ -4108,10 +4156,10 @@ def _eco_calendar_parse_date(release_dt: Any) -> Optional[date_type]:
         try:
             s = release_dt.strip()
             if len(s) >= 10 and s[4] == "-":
-                return datetime.strptime(s[:10], "%Y-%m-%d").date()
+                return date_type.fromisoformat(s[:10])
             if len(s) >= 8:
-                return datetime.strptime(s[:8], "%Y%m%d").date()
-        except Exception:
+                return date_type(int(s[:4]), int(s[4:6]), int(s[6:8]))
+        except (TypeError, ValueError):
             return None
     return None
 
@@ -4135,6 +4183,7 @@ def economic_calendar():
                     tickers = [row["ticker"] for row in result.data]
                     print(f"Loaded {len(tickers)} tickers from database")
             except Exception as e:
+                _logger.debug("Could not load economic-calendar tickers", exc_info=True)
                 print(f"Could not load tickers from database: {e}")
                 # Fallback: load from file if exists
                 ticker_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "economic_calendar_tickers.txt")
@@ -4154,7 +4203,7 @@ def economic_calendar():
             )
         
         # Date range: today to today + 365 days
-        today = datetime.now().date()
+        today = datetime.now(timezone.utc).astimezone().date()
         end_date = today + timedelta(days=365)
         today_str = today.strftime("%Y%m%d")
         end_date_str = end_date.strftime("%Y%m%d")
@@ -4279,10 +4328,11 @@ def economic_calendar():
                                 "blp_refdata_response_body_log_failed batch=%d err=%s",
                                 batch_num,
                                 log_err,
+                                exc_info=True,
                             )
 
                     # Phase 1: ECO_RELEASE_DT only (no per-ticker Bloomberg round-trips)
-                    batch_states: List[dict] = []
+                    batch_states: list[dict] = []
                     for ticker, data in reference_data.items():
                         if "error" in data:
                             errors.append(f"{ticker}: {data['error']}")
@@ -4294,7 +4344,7 @@ def economic_calendar():
 
                     # Phase 2: one batched refdata call per chunk for missing dates only
                     need_future = [s["ticker"] for s in batch_states if s["release_date"] is None]
-                    future_by_ticker: Dict[str, dict] = {}
+                    future_by_ticker: dict[str, dict] = {}
                     if need_future:
                         for fj in range(0, len(need_future), BATCH_SIZE):
                             chunk = need_future[fj : fj + BATCH_SIZE]
@@ -4338,16 +4388,14 @@ def economic_calendar():
                                         )
                                     except Exception as le:
                                         _ecal_logger.warning(
-                                            "blp_future_response_body_log_failed err=%s", le
+                                            "blp_future_response_body_log_failed err=%s", le, exc_info=True
                                         )
                                 future_by_ticker.update(fr_batch)
                             except Exception as fe:
-                                _ecal_logger.error(
-                                    "blp_future_exception batch=%d chunk=%s: %s",
+                                _ecal_logger.exception(
+                                    "blp_future_exception batch=%d chunk=%s",
                                     batch_num,
                                     fut_bn,
-                                    fe,
-                                    exc_info=True,
                                 )
                                 errors.append(
                                     f"ECO_FUTURE_RELEASE_DATE batch {fj // BATCH_SIZE + 1}: {fe}"
@@ -4374,23 +4422,20 @@ def economic_calendar():
                         # Filter by date range
                         # Include all events from today onwards (even if time has passed today)
                         # Events only roll off after the date has passed (i.e., tomorrow)
-                        if release_date:
-                            if release_date < today or release_date > end_date:
-                                continue  # Skip events outside our date range
+                        if release_date and (release_date < today or release_date > end_date):
+                            continue  # Skip events outside our date range
                             # Note: We keep all events for today, regardless of whether the time has passed
                     
                         # Extract release time
-                        if "ECO_RELEASE_TIME" in data and data["ECO_RELEASE_TIME"]:
+                        if data.get("ECO_RELEASE_TIME"):
                             release_time = str(data["ECO_RELEASE_TIME"])
                     
                         # Future event only when release_date is strictly after today. For today or past, set actual from PX_LAST.
                         is_future_event = False
-                        if is_future_release and release_date and release_date > today:
-                            is_future_event = True
-                        elif release_date and release_date > today:
+                        if is_future_release and release_date and release_date > today or release_date and release_date > today:
                             is_future_event = True
                         # Removed time-of-day check for today: it caused actual to be null when server timezone was before release time.
-                        if False and release_date == today and release_time:
+                        if False:
                                 # For today's events, check if the release time has passed
                                 # Bloomberg ECO_RELEASE_TIME is in Eastern Time (EST/EDT)
                                 # Parse release_time (format: "HH:MM:SS" or "08:30:00")
@@ -4431,15 +4476,15 @@ def economic_calendar():
                                                 is_future_event = True
                                         else:
                                             # Fallback: use local time (assumes system is in Eastern Time)
-                                            now = datetime.now()
+                                            now = datetime.now(timezone.utc).astimezone()
                                             current_hour = now.hour
                                             current_minute = now.minute
                                             if current_hour < release_hour or (current_hour == release_hour and current_minute < release_minute):
                                                 is_future_event = True
-                                except (ValueError, IndexError, Exception) as e:
+                                except Exception as e:
+                                    _ecal_logger.warning("Could not parse Bloomberg release time %r", release_time, exc_info=True)
                                     # If we can't parse the time, assume it's not a future event
                                     print(f"Warning: Could not parse release_time '{release_time}': {e}")
-                                    pass
                     
                         # For future events, actual should be NULL (no actual value yet)
                         # PX_LAST for future events might contain the prior period's value or survey value, not the actual for the future date
@@ -4472,13 +4517,8 @@ def economic_calendar():
                             events.append(event)
             
                 except Exception as e:
-                    error_msg = f"Error processing batch {i//BATCH_SIZE + 1}: {str(e)}"
-                    _ecal_logger.error(
-                        "batch_processing_failed batch=%d: %s",
-                        batch_num,
-                        e,
-                        exc_info=True,
-                    )
+                    error_msg = f"Error processing batch {i//BATCH_SIZE + 1}: {e!s}"
+                    _ecal_logger.exception("batch_processing_failed batch=%d", batch_num)
                     print(f"  [FAIL] {error_msg}", flush=True)
                     errors.append(error_msg)
                     traceback.print_exc(file=sys.stderr)
@@ -4487,7 +4527,7 @@ def economic_calendar():
             try:
                 bb_sess.stop()
             except Exception:
-                pass
+                _ecal_logger.debug("Could not stop Bloomberg economic-calendar session", exc_info=True)
 
         _ecal_logger.info(
             "request_done events=%d errors=%d",
@@ -4521,8 +4561,8 @@ def economic_calendar():
         )
 
     except Exception as e:
-        error_msg = f"Economic calendar error: {str(e)}"
-        _ecal_logger.error("route_outer_exception: %s", e, exc_info=True)
+        error_msg = f"Economic calendar error: {e!s}"
+        _ecal_logger.exception("route_outer_exception")
         print(f"[FAIL] {error_msg}", flush=True)
         traceback.print_exc(file=sys.stderr)
         sys.stderr.flush()
@@ -4554,12 +4594,11 @@ def _parse_date(value):
             return value.date().strftime("%Y-%m-%d")
         if isinstance(value, date_type):
             return value.strftime("%Y-%m-%d")
-        elif isinstance(value, str):
+        elif isinstance(value, str) and len(value) >= 8:
             # Try parsing various formats
-            if len(value) >= 8:
-                return datetime.strptime(value[:8], "%Y%m%d").date().strftime("%Y-%m-%d")
-    except Exception:
-        pass
+            return date_type(int(value[:4]), int(value[4:6]), int(value[6:8])).isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return None
     return None
 
 
@@ -4624,6 +4663,7 @@ def quotes():
             quotes_result[ticker] = {k: v for k, v in quote.items() if v is not None}
         return jsonify({"quotes": quotes_result, "errors": []}), 200
     except Exception as e:
+        _logger.debug("Clarifi quote route failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"quotes": {}, "errors": [str(e)]}), 500
 
@@ -4658,6 +4698,7 @@ def clarifi_process():
             files_processed.append({"file": file_path.name, "inserted": result["inserted"], "errors": result["errors"]})
         return jsonify({"inserted": total_inserted, "errors": all_errors, "files_processed": files_processed}), 200
     except Exception as e:
+        _logger.debug("Clarifi processing route failed", exc_info=True)
         traceback.print_exc()
         return jsonify({"inserted": 0, "errors": [str(e)]}), 500
 
@@ -4671,7 +4712,7 @@ def clarifi_list():
     files = []
     for p in clarifi_path.glob("*.txt"):
         if 'macrodataexport' in p.name.lower() or 'diffusionindexexport' in p.name.lower():
-            files.append({"name": p.name, "size": p.stat().st_size, "modified": datetime.fromtimestamp(p.stat().st_mtime).isoformat()})
+            files.append({"name": p.name, "size": p.stat().st_size, "modified": datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).astimezone().isoformat()})
     return jsonify({"files": files}), 200
 
 
@@ -4706,6 +4747,7 @@ def ehp_process():
                     result[data_key] = f.read()
                 result["files_processed"].append({"file": file_name, "found": True, "size": len(result[data_key])})
             except Exception as e:
+                _logger.debug("Could not read EHP source file %s", file_name, exc_info=True)
                 result["errors"].append(str(e))
                 result["files_processed"].append({"file": file_name, "found": True, "error": str(e)})
         else:
@@ -4716,10 +4758,10 @@ def ehp_process():
 def _ibkr_request(
     method: str,
     path: str,
-    params: Optional[Dict[str, str]] = None,
-    json_body: Optional[Dict[str, Any]] = None,
+    params: dict[str, str] | None = None,
+    json_body: dict[str, Any] | None = None,
     timeout: int = 15,
-) -> tuple[Optional[requests.Response], Optional[Dict[str, Any]]]:
+) -> tuple[requests.Response | None, dict[str, Any] | None]:
     """Call IBKR Gateway with 10 req/s rate limit. Returns (response, None) or (None, error_dict)."""
     if not IBKR_ENABLED or _ibkr_session is None:
         return (None, _ibkr_archived_payload())
@@ -4740,10 +4782,11 @@ def _ibkr_request(
     except requests.exceptions.RequestException as e:
         return (None, {"error": "IBKR Gateway unreachable", "detail": str(e)})
     except Exception as e:
+        _logger.debug("IBKR request failed", exc_info=True)
         return (None, {"error": "IBKR request failed", "detail": str(e)})
 
 
-def _ibkr_archived_payload() -> Dict[str, Any]:
+def _ibkr_archived_payload() -> dict[str, Any]:
     return {
         "error": "IBKR integration is archived",
         "status": "archived",
@@ -4760,7 +4803,7 @@ def _ibkr_response_json(r: requests.Response) -> Any:
     """Parse Gateway response as JSON; on failure return status and raw body for debugging."""
     try:
         return r.json()
-    except Exception:
+    except ValueError:
         return {"_gateway_status": r.status_code, "_gateway_body": (r.text or "(empty)")[:2000]}
 
 
@@ -4842,7 +4885,7 @@ def ibkr_search():
 POLYMARKET_ALERT_WEBHOOK_SECRET = os.environ.get("POLYMARKET_ALERT_WEBHOOK_SECRET", "").strip()
 
 
-def _parse_optional_float(v: Any) -> Optional[float]:
+def _parse_optional_float(v: Any) -> float | None:
     if v is None:
         return None
     try:
@@ -4887,7 +4930,7 @@ def polymarket_alert():
     except (TypeError, ValueError):
         risk_score_f = 0.0
 
-    row: Dict[str, Any] = {
+    row: dict[str, Any] = {
         "dedup_key": dedup_key,
         "wallet_address": wallet_address,
         "market_id": market_id,
@@ -4909,7 +4952,7 @@ def polymarket_alert():
         err_s = str(e).lower()
         if "duplicate" in err_s or "23505" in err_s or "unique" in err_s:
             return jsonify({"ok": True, "duplicate": True}), 200
-        logging.exception("polymarket alert insert failed")
+        _logger.exception("polymarket alert insert failed")
         return jsonify({"error": "insert failed", "detail": str(e)[:500]}), 500
 
     return jsonify({"ok": True}), 200
@@ -4933,7 +4976,7 @@ def _ibkr_tickle_loop() -> None:
         except requests.exceptions.RequestException:
             pass  # Gateway not running or not logged in; ignore
         except Exception:
-            pass
+            _logger.debug("IBKR tickle failed", exc_info=True)
 
 
 def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
@@ -4952,18 +4995,18 @@ def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     finally:
         try:
             s.close()
-        except Exception:
-            pass
+        except OSError:
+            _logger.debug("Could not close port probe socket", exc_info=True)
 
 
-def _listening_pids_windows(port: int) -> List[int]:
+def _listening_pids_windows(port: int) -> list[int]:
     """Return PIDs listening on 127.0.0.1:port (Windows-only, best-effort)."""
     try:
         out = subprocess.check_output(["netstat", "-ano", "-p", "tcp"], text=True, errors="replace")
-    except Exception:
+    except (OSError, subprocess.CalledProcessError):
         return []
 
-    pids: List[int] = []
+    pids: list[int] = []
     needle = f":{int(port)}"
     for line in out.splitlines():
         # Example: TCP  127.0.0.1:5000  0.0.0.0:0  LISTENING  71832
@@ -4976,13 +5019,13 @@ def _listening_pids_windows(port: int) -> List[int]:
             continue
         try:
             pid = int(parts[-1])
-        except Exception:
+        except ValueError:
             continue
         pids.append(pid)
 
     # De-dupe while keeping order.
     seen = set()
-    deduped: List[int] = []
+    deduped: list[int] = []
     for pid in pids:
         if pid in seen:
             continue
@@ -4997,8 +5040,8 @@ if __name__ == "__main__":
             sys.stdout.reconfigure(line_buffering=True)
         if hasattr(sys.stderr, "reconfigure"):
             sys.stderr.reconfigure(line_buffering=True)
-    except Exception:
-        pass
+    except (OSError, ValueError):
+        _logger.debug("Could not configure stderr line buffering", exc_info=True)
 
     # Guard: avoid running multiple listeners on the same port.
     if _port_in_use(SERVICE_PORT, host="127.0.0.1"):
@@ -5043,8 +5086,8 @@ if __name__ == "__main__":
         )
         print("Tip: run with python -u or PYTHONUNBUFFERED=1 so prints appear immediately.")
         print("=" * 60)
-    except:
-        pass
+    except Exception:
+        _logger.debug("Could not print DataBridge startup summary", exc_info=True)
 
     # Keep IBKR Gateway session alive only when the archived integration is explicitly reactivated.
     if IBKR_ENABLED:
@@ -5062,6 +5105,7 @@ if __name__ == "__main__":
     try:
         app.run(host="127.0.0.1", port=SERVICE_PORT, debug=False, use_reloader=False)
     except Exception as e:
+        _logger.debug("Could not start DataBridge service", exc_info=True)
         print(f"Error starting service: {e}")
         traceback.print_exc()
         sys.exit(1)

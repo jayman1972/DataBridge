@@ -5,14 +5,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sggg.nav_sheet_parse import (  # noqa: E402
+from sggg.nav_sheet_parse import (
     _display_class_label,
     _infer_fund_series_prefix,
     enrich_classes_display_labels,
+    previous_business_day_iso,
     prior_business_day_iso,
     prior_business_days_for_lookup,
     prior_open_sheet_is_usable,
-    previous_business_day_iso,
 )
 
 

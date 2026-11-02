@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import re
 from collections import defaultdict
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from sggg.compliance_check_estimates import FUND_NAME_TO_ID
 from sggg.nav_sheet_parse import normalize_valuation_date, prior_business_day_iso
@@ -17,6 +19,7 @@ from sggg.psc_boxed_positions import (
     psc_portfolio_candidates_for_fund,
 )
 
+logger = logging.getLogger(__name__)
 
 # Bond description patterns: "AAL 5 3/4 04/20/29", "AAP 7 08/01/30"
 _BOND_DESC_RE = re.compile(
@@ -82,7 +85,7 @@ def _futures_year_from_digits(year_digits: str) -> int:
     return 2000 + y if y < 70 else 1900 + y
 
 
-def _parse_bloomberg_futures_parts(text: Any) -> Optional[Tuple[str, int, int]]:
+def _parse_bloomberg_futures_parts(text: Any) -> tuple[str, int, int] | None:
     """Parse NQM6 US / ESM5 Index -> (root, year, month)."""
     raw = normalize_bbg_key(text).upper()
     if not raw:
@@ -102,7 +105,7 @@ def _parse_bloomberg_futures_parts(text: Any) -> Optional[Tuple[str, int, int]]:
     return root.upper(), _futures_year_from_digits(year_digits), month
 
 
-def _parse_futures_expiry_from_description(text: Any) -> Optional[Tuple[int, int]]:
+def _parse_futures_expiry_from_description(text: Any) -> tuple[int, int] | None:
     """Parse 'NASDAQ 100 E-MINI Jun26' / 'SPI 200 FUTURES Mar19' -> (year, month)."""
     t = normalize_instrument_description(text)
     if not t:
@@ -117,7 +120,7 @@ def _parse_futures_expiry_from_description(text: Any) -> Optional[Tuple[int, int
     return _futures_year_from_digits(year_digits), month
 
 
-def _futures_product_root_from_text(text: Any) -> Optional[str]:
+def _futures_product_root_from_text(text: Any) -> str | None:
     t = normalize_instrument_description(text)
     if not t:
         return None
@@ -131,7 +134,7 @@ def parse_futures_contract_key(
     text: Any,
     *,
     product_root: Any = None,
-) -> Optional[str]:
+) -> str | None:
     """
     Normalize futures to fut:ROOT|YYYY-MM.
 
@@ -181,7 +184,7 @@ def _futopt_key_from_bbg_parts(
     year_digit: str,
     cp: str,
     strike: str,
-) -> Optional[str]:
+) -> str | None:
     month = _FUTURES_MONTH_CODE.get(month_code.upper())
     if not month:
         return None
@@ -192,7 +195,7 @@ def _futopt_key_from_bbg_parts(
     )
 
 
-def _split_futures_option_bbg_ticker(token: Any) -> Optional[Tuple[str, str]]:
+def _split_futures_option_bbg_ticker(token: Any) -> tuple[str, str] | None:
     """
     Bloomberg futures option tickers append C/P after the futures month code.
 
@@ -209,8 +212,8 @@ def _futopt_key_from_option_ticker_and_strike(
     option_ticker: str,
     strike: str,
     *,
-    cp: Optional[str] = None,
-) -> Optional[str]:
+    cp: str | None = None,
+) -> str | None:
     underlying, series_cp = _split_futures_option_bbg_ticker(option_ticker) or (None, None)
     if not underlying:
         return None
@@ -227,7 +230,7 @@ def _futopt_key_from_option_ticker_and_strike(
     )
 
 
-def parse_futures_option_contract_key(text: Any) -> Optional[str]:
+def parse_futures_option_contract_key(text: Any) -> str | None:
     """
     Normalize futures options across AlphaDesk and Diamond naming.
 
@@ -352,19 +355,17 @@ def is_futures_like_position(
     return False
 
 
-def _diamond_row_close_unavailable(row: Dict[str, Any]) -> bool:
+def _diamond_row_close_unavailable(row: dict[str, Any]) -> bool:
     """True when Diamond did not supply an EOD close (e.g. same-day flat position)."""
     src = _norm(row.get("PriceSource")).lower()
     if src == "not priced":
         return True
-    if row.get("PortfolioPrice") is None:
-        return True
-    return False
+    return row.get("PortfolioPrice") is None
 
 
 def _position_fully_closed(
-    psc: Optional[Dict[str, Any]],
-    dia: Optional[Dict[str, Any]],
+    psc: dict[str, Any] | None,
+    dia: dict[str, Any] | None,
 ) -> bool:
     psc_shares = abs(float(psc.get("shares") or 0)) if psc else 0.0
     dia_shares = abs(float(dia.get("shares") or 0)) if dia else 0.0
@@ -378,12 +379,12 @@ def _position_fully_closed(
 
 
 def _resolve_reconcile_closes(
-    psc: Optional[Dict[str, Any]],
-    dia: Optional[Dict[str, Any]],
+    psc: dict[str, Any] | None,
+    dia: dict[str, Any] | None,
     *,
-    dia_close: Optional[float],
-    psc_close: Optional[float],
-) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+    dia_close: float | None,
+    psc_close: float | None,
+) -> tuple[float | None, float | None, str | None]:
     """
     When a fully closed position has no Diamond close, suppress both closes and mark closed.
     """
@@ -394,7 +395,7 @@ def _resolve_reconcile_closes(
     return dia_close, psc_close, None
 
 
-def normalize_diamond_futures_close(row: Dict[str, Any]) -> Optional[float]:
+def normalize_diamond_futures_close(row: dict[str, Any]) -> float | None:
     """
     Diamond futures PortfolioPrice is contract notional (index quote × multiplier).
 
@@ -417,7 +418,7 @@ def normalize_diamond_futures_close(row: Dict[str, Any]) -> Optional[float]:
     return round(portfolio, 6)
 
 
-def diamond_futures_contract_multiplier(row: Dict[str, Any]) -> float:
+def diamond_futures_contract_multiplier(row: dict[str, Any]) -> float:
     """QuantityMultiplier on Diamond futures rows is the index-point dollar multiplier."""
     qm = _nonzero_amount(row.get("QuantityMultiplier"))
     if qm is not None and qm > 0:
@@ -457,7 +458,7 @@ def _looks_like_option_description(text: Any) -> bool:
     )
 
 
-def _is_diamond_option_trade(trade: Dict[str, Any]) -> bool:
+def _is_diamond_option_trade(trade: dict[str, Any]) -> bool:
     if is_futures_option_like_position(
         security_type=trade.get("SecurityType") or trade.get("AssetType"),
         company_symbol=trade.get("Ticker"),
@@ -478,7 +479,7 @@ def _is_diamond_option_trade(trade: Dict[str, Any]) -> bool:
     if re.match(r"^[A-Z0-9.]+\s+\d+\s+[PC]\d", t):
         return True
     name = _norm(sec_name).upper()
-    return name.startswith("PUT ") or name.startswith("CALL ")
+    return name.startswith(("PUT ", "CALL "))
 
 
 _OPTION_COMPACT_RE = re.compile(
@@ -527,7 +528,7 @@ _FUTURES_DESC_EXPIRY_RE = re.compile(
     re.IGNORECASE,
 )
 # Diamond SecurityName phrases -> Bloomberg futures root (when only descriptive name is present).
-_FUTURES_PRODUCT_ROOT: Dict[str, str] = {
+_FUTURES_PRODUCT_ROOT: dict[str, str] = {
     "CRUDE OIL": "CL",
     "WTI CRUDE": "CL",
     "NASDAQ 100 E-MINI": "NQ",
@@ -538,7 +539,7 @@ _FUTURES_PRODUCT_ROOT: Dict[str, str] = {
     "RUSSELL 2000 E-MINI": "RTY",
 }
 # Diamond option rows often name the ETF, not the root ticker (e.g. iShares Russell 2000 -> IWM).
-_ETF_NAME_TO_OPTION_ROOT: Tuple[Tuple[str, str], ...] = (
+_ETF_NAME_TO_OPTION_ROOT: tuple[tuple[str, str], ...] = (
     ("ISHARES RUSSELL 2000", "IWM"),
     ("RUSSELL 2000 ETF", "IWM"),
     ("SPDR S&P 500", "SPY"),
@@ -575,7 +576,7 @@ def _looks_like_preferred_description(text: Any) -> bool:
     return bool(re.search(r"\bSERIES\s*[A-Z0-9]+\b", t) and re.search(r"\d+(?:\.\d+)?\s*%", t))
 
 
-def parse_preferred_bbg_key(text: Any) -> Optional[str]:
+def parse_preferred_bbg_key(text: Any) -> str | None:
     """
     Canonical preferred key from Bloomberg symbology.
 
@@ -641,7 +642,7 @@ def normalize_line_equity_key(text: Any) -> str:
     return s
 
 
-def _line_key_profile(key: str, bucket: Optional[Dict[str, Any]] = None) -> Optional[str]:
+def _line_key_profile(key: str, bucket: dict[str, Any] | None = None) -> str | None:
     """Classify line: keys for orphan pairing — compact ticker, long name, or preferred description."""
     if not key.startswith("line:"):
         return None
@@ -669,7 +670,7 @@ def _normalize_strike_key(strike: str) -> str:
     except ValueError:
         return strike
     if abs(f - round(f)) < 1e-9:
-        return str(int(round(f)))
+        return str(round(f))
     return f"{f:.6f}".rstrip("0").rstrip(".")
 
 
@@ -720,7 +721,7 @@ def parse_option_contract_key(
     text: Any,
     *,
     underlying_root: Any = None,
-) -> Optional[str]:
+) -> str | None:
     """
     Normalize option lines like SPY 06/18/26 P675 US, DRAM US 05/22/26 P51.5 EQUITY,
     and AlphaDesk long names (Put Roundhill Memory ETF $51.50 22MAY2026) to
@@ -772,9 +773,9 @@ def _option_root_from_bloomberg_ticker(ticker: Any) -> str:
     return ""
 
 
-def build_underlying_ticker_index(records: List[Dict[str, Any]]) -> Dict[str, str]:
+def build_underlying_ticker_index(records: list[dict[str, Any]]) -> dict[str, str]:
     """Map Diamond UnderlyingBBGID / CompositeBBGID to equity root (e.g. HYG) from PricingTicker."""
-    index: Dict[str, str] = {}
+    index: dict[str, str] = {}
     for row in records:
         root = ""
         pt = _norm(row.get("PricingTicker"))
@@ -863,9 +864,8 @@ def is_fund_unit_position(
 ) -> bool:
     """Holdings of another fund share class (e.g. EHF550I vs long fund name in Diamond)."""
     st = _norm(security_type).upper()
-    if st and any(tok in st for tok in ("MUTUAL", "FUND", "UNIT TRUST", "LP UNITS")):
-        if "BOND" not in st:
-            return True
+    if st and any(tok in st for tok in ("MUTUAL", "FUND", "UNIT TRUST", "LP UNITS")) and "BOND" not in st:
+        return True
     sym = _norm(company_symbol).upper()
     if sym and re.match(r"^EHF\d+[A-Z]+$", sym):
         return True
@@ -939,13 +939,13 @@ def portfolio_details_display_ticker(
 
 
 def align_diamond_bond_close(
-    diamond_close: Optional[float],
-    alphadesk_close: Optional[float],
+    diamond_close: float | None,
+    alphadesk_close: float | None,
     *,
     is_bond_like: bool = False,
     is_option_like: bool = False,
     is_futures_option_like: bool = False,
-) -> Optional[float]:
+) -> float | None:
     """Scale Diamond fractional par quotes when AlphaDesk is already in par points."""
     if is_option_like or is_futures_option_like or diamond_close is None:
         return diamond_close
@@ -953,9 +953,8 @@ def align_diamond_bond_close(
         if is_bond_like and 0 < diamond_close < 20:
             return round(diamond_close * 100.0, 6)
         return diamond_close
-    if is_bond_like or (0 < diamond_close < 20 and alphadesk_close > 50):
-        if 0 < diamond_close < 20:
-            return round(diamond_close * 100.0, 6)
+    if (is_bond_like or (0 < diamond_close < 20 and alphadesk_close > 50)) and 0 < diamond_close < 20:
+        return round(diamond_close * 100.0, 6)
     return diamond_close
 
 
@@ -983,7 +982,7 @@ def notional_quantity_multiplier(
     return 1.0
 
 
-def _nonzero_amount(value: Any) -> Optional[float]:
+def _nonzero_amount(value: Any) -> float | None:
     if value is None or value == "":
         return None
     try:
@@ -996,12 +995,12 @@ def _nonzero_amount(value: Any) -> Optional[float]:
 
 
 def apply_diamond_price_discount(
-    normalized_close: Optional[float],
+    normalized_close: float | None,
     *,
     price_discount: Any = None,
     pre_discount_price: Any = None,
     is_bond_like: bool = False,
-) -> Optional[float]:
+) -> float | None:
     """
     Sinking-fund bonds: PortfolioPrice is after the sinking discount; add PriceDiscount
     back for a full-par comparable close (e.g. 71.882 + 26 ≈ 97.88 vs AlphaDesk).
@@ -1037,7 +1036,7 @@ def normalize_diamond_close_price(
     is_option_like: bool = False,
     price_discount: Any = None,
     pre_discount_price: Any = None,
-) -> Optional[float]:
+) -> float | None:
     """
     Diamond reports bond prices as fraction of par (0.99982); AlphaDesk uses 99.982.
     Options and equities are never scaled.
@@ -1090,7 +1089,7 @@ def reconcile_match_key(
     security_type: Any = None,
     underlying_company_symbol: Any = None,
     option_underlying_root: Any = None,
-) -> Optional[str]:
+) -> str | None:
     """
     Shared security key for Diamond vs PSC.
 
@@ -1192,9 +1191,8 @@ def reconcile_match_key(
     sn = _norm(security_name)
     desc = _norm(description)
     for bond_line in (cs, sn):
-        if _is_bond_security_type(st) or _looks_like_bond_description(bond_line):
-            if bond_line and _looks_like_bond_description(bond_line):
-                return f"bond:{normalize_instrument_description(bond_line)}"
+        if (_is_bond_security_type(st) or _looks_like_bond_description(bond_line)) and bond_line and _looks_like_bond_description(bond_line):
+            return f"bond:{normalize_instrument_description(bond_line)}"
     if (_is_bond_security_type(st) or _looks_like_bond_description(desc)) and _looks_like_bond_description(desc):
         return f"bond:{normalize_instrument_description(desc)}"
 
@@ -1215,9 +1213,9 @@ def reconcile_match_key(
 
 def _collect_mtm_lookup_keys(
     reconcile_key: str,
-    psc: Optional[Dict[str, Any]],
-    dia: Optional[Dict[str, Any]],
-) -> List[str]:
+    psc: dict[str, Any] | None,
+    dia: dict[str, Any] | None,
+) -> list[str]:
     """
     Resolve alternate reconcile keys for MTM snapshot/trade lookup.
 
@@ -1225,9 +1223,9 @@ def _collect_mtm_lookup_keys(
     from AlphaDesk) while raw Diamond positions and trades may be indexed under
     CUSIP or line:ticker keys.
     """
-    keys: List[str] = []
+    keys: list[str] = []
 
-    def add(candidate: Optional[str]) -> None:
+    def add(candidate: str | None) -> None:
         if candidate and candidate not in keys:
             keys.append(candidate)
 
@@ -1261,9 +1259,9 @@ def _collect_mtm_lookup_keys(
 
 
 def _lookup_first(
-    index: Dict[str, Any],
-    lookup_keys: List[str],
-) -> Optional[Any]:
+    index: dict[str, Any],
+    lookup_keys: list[str],
+) -> Any | None:
     for candidate in lookup_keys:
         if candidate in index:
             return index[candidate]
@@ -1271,10 +1269,10 @@ def _lookup_first(
 
 
 def _lookup_trades_for_keys(
-    trade_index: Dict[str, List[Dict[str, Any]]],
-    lookup_keys: List[str],
-) -> List[Dict[str, Any]]:
-    merged: List[Dict[str, Any]] = []
+    trade_index: dict[str, list[dict[str, Any]]],
+    lookup_keys: list[str],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
     seen: set = set()
     for candidate in lookup_keys:
         for trade in trade_index.get(candidate, []):
@@ -1295,8 +1293,8 @@ def _lookup_trades_for_keys(
 
 
 def pick_display_ticker(
-    psc: Optional[Dict[str, Any]],
-    dia: Optional[Dict[str, Any]],
+    psc: dict[str, Any] | None,
+    dia: dict[str, Any] | None,
 ) -> str:
     """Portfolio Details card display; prefer AlphaDesk (PSC) fields when present."""
     if psc:
@@ -1332,7 +1330,7 @@ def _signed_qty(quantity: Any, long_short: Any) -> float:
     return q
 
 
-def _parse_psc_reconcile_row(row: tuple) -> Dict[str, Any]:
+def _parse_psc_reconcile_row(row: tuple) -> dict[str, Any]:
     contract_size = None
     if len(row) > 12 and row[12] is not None:
         try:
@@ -1375,7 +1373,7 @@ def fetch_psc_positions_for_reconcile(
     cursor: Any,
     portfolio: str,
     posn_date_compact: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     sql = (
         "SELECT ph.COMPANY_SYMBOL, ph.DESCRIPTION, ph.BBG_TICKER, ph.ISIN, ph.CUSIP, sd.SEDOL, "
         "ph.SECURITY_TYPE, ph.LONG_SHORT, ph.QUANTITY, ph.CLOSE_PRICE, ph.SECURITY, "
@@ -1408,7 +1406,7 @@ def fetch_psc_positions_for_fund(
     cursor: Any,
     fund_id: str,
     posn_date_compact: str,
-) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+) -> tuple[list[dict[str, Any]], str | None]:
     """Try each known PSC portfolio alias until rows are found."""
     for portfolio in psc_portfolio_candidates_for_fund(fund_id):
         rows = fetch_psc_positions_for_reconcile(cursor, portfolio, posn_date_compact)
@@ -1418,7 +1416,7 @@ def fetch_psc_positions_for_fund(
     return [], (candidates[0] if candidates else None)
 
 
-def _compact_int_str(value: Any) -> Optional[str]:
+def _compact_int_str(value: Any) -> str | None:
     if value is None or value == "":
         return None
     try:
@@ -1427,24 +1425,24 @@ def _compact_int_str(value: Any) -> Optional[str]:
         return None
 
 
-def _compact_to_iso(compact: Any) -> Optional[str]:
+def _compact_to_iso(compact: Any) -> str | None:
     s = _compact_int_str(compact)
     if not s or len(s) != 8:
         return None
     return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
 
 
-def _optional_float(value: Any) -> Optional[float]:
+def _optional_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
     try:
         v = float(value)
     except (TypeError, ValueError):
         return None
-    return v if v == v else None
+    return v if not math.isnan(v) else None
 
 
-def _psc_same_ex_date_dividends(row: Dict[str, Any]) -> Optional[float]:
+def _psc_same_ex_date_dividends(row: dict[str, Any]) -> float | None:
     dividends = _optional_float(row.get("dividends"))
     if dividends is None:
         return None
@@ -1455,7 +1453,7 @@ def _psc_same_ex_date_dividends(row: Dict[str, Any]) -> Optional[float]:
     return dividends
 
 
-def _sum_optional_amounts(*values: Any) -> Optional[float]:
+def _sum_optional_amounts(*values: Any) -> float | None:
     nums = [_optional_float(v) for v in values]
     present = [v for v in nums if v is not None]
     if not present:
@@ -1463,7 +1461,7 @@ def _sum_optional_amounts(*values: Any) -> Optional[float]:
     return round(sum(present), 2)
 
 
-def _psc_pnl_to_base(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+def _psc_pnl_to_base(row: dict[str, Any]) -> tuple[float | None, float | None, float | None]:
     """
     AlphaDesk DAY_PROFIT is the daily report P&L line item.
 
@@ -1484,7 +1482,7 @@ def infer_reference_date_from_psc(
     valuation_date_iso: str,
     *,
     dsn: str = "PSC_VIEWER",
-) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None, str | None]:
     """
     Use AlphaDesk's prior position date as Diamond's ReferenceDate.
 
@@ -1520,16 +1518,17 @@ def infer_reference_date_from_psc(
                     return ref_iso, portfolio, None
         return None, candidates[0], None
     except Exception as exc:
+        logger.debug("Could not resolve PSC reference date for %s", fund_id, exc_info=True)
         return None, candidates[0], str(exc)
     finally:
         if conn:
             try:
                 conn.close()
             except Exception:
-                pass
+                logger.debug("Could not close PSC reference-date connection", exc_info=True)
 
 
-def _psc_match_key(row: Dict[str, Any]) -> Optional[str]:
+def _psc_match_key(row: dict[str, Any]) -> str | None:
     return reconcile_match_key(
         company_symbol=row.get("company_symbol"),
         bbg_ticker=row.get("bbg_ticker"),
@@ -1544,7 +1543,7 @@ def _psc_match_key(row: Dict[str, Any]) -> Optional[str]:
     )
 
 
-def _merge_bucket_into(target: Dict[str, Any], source: Dict[str, Any]) -> None:
+def _merge_bucket_into(target: dict[str, Any], source: dict[str, Any]) -> None:
     target["shares"] = float(target.get("shares") or 0) + float(source.get("shares") or 0)
     for pnl_field, present_field in (
         ("alphadesk_pnl", "alphadesk_pnl_present"),
@@ -1572,7 +1571,7 @@ def _canonical_reconcile_key(*keys: str) -> str:
     return keys[0]
 
 
-def _rename_bucket(by_key: Dict[str, Dict[str, Any]], old_key: str, new_key: str) -> None:
+def _rename_bucket(by_key: dict[str, dict[str, Any]], old_key: str, new_key: str) -> None:
     if old_key == new_key:
         return
     if new_key in by_key:
@@ -1584,16 +1583,16 @@ def _rename_bucket(by_key: Dict[str, Dict[str, Any]], old_key: str, new_key: str
 
 
 def merge_positions_by_secondary_ids(
-    psc_by_key: Dict[str, Dict[str, Any]],
-    dia_by_key: Dict[str, Dict[str, Any]],
-) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], int]:
+    psc_by_key: dict[str, dict[str, Any]],
+    dia_by_key: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], int]:
     """
     When primary keys differ but ISIN/CUSIP/SEDOL match, align PSC and Diamond to one key.
     """
-    id_to_psc: Dict[str, set] = {}
-    id_to_dia: Dict[str, set] = {}
+    id_to_psc: dict[str, set] = {}
+    id_to_dia: dict[str, set] = {}
 
-    def _index(side: str, by_key: Dict[str, Dict[str, Any]], dest: Dict[str, set]) -> None:
+    def _index(side: str, by_key: dict[str, dict[str, Any]], dest: dict[str, set]) -> None:
         for key, bucket in by_key.items():
             for field in ("isin", "cusip", "sedol"):
                 val = _norm(bucket.get(field)).upper()
@@ -1625,7 +1624,7 @@ def merge_positions_by_secondary_ids(
     return psc_by_key, dia_by_key, merges
 
 
-def _position_notional(bucket: Dict[str, Any]) -> float:
+def _position_notional(bucket: dict[str, Any]) -> float:
     return abs(
         float(bucket.get("shares") or 0)
         * float(bucket.get("close_price") or 0)
@@ -1634,9 +1633,9 @@ def _position_notional(bucket: Dict[str, Any]) -> float:
 
 
 def merge_fund_unit_holdings_by_navpu(
-    psc_by_key: Dict[str, Dict[str, Any]],
-    dia_by_key: Dict[str, Dict[str, Any]],
-) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], int]:
+    psc_by_key: dict[str, dict[str, Any]],
+    dia_by_key: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], int]:
     """
     Pair fund-in-fund lines when share-class NAVPU and notional are close
     (e.g. EHF550I vs EHP Tactical Growth Alternative Fund Class I).
@@ -1660,7 +1659,7 @@ def merge_fund_unit_holdings_by_navpu(
         if pc is None or float(pc) <= 0:
             continue
         pc_f = float(pc)
-        best_dk: Optional[str] = None
+        best_dk: str | None = None
         best_rel = 999.0
         for dk in dia_only:
             if dk in used_dia:
@@ -1702,8 +1701,8 @@ def merge_fund_unit_holdings_by_navpu(
 
 
 def _closes_match_for_orphan_merge(
-    psc_close: Optional[float],
-    dia_close: Optional[float],
+    psc_close: float | None,
+    dia_close: float | None,
 ) -> bool:
     if psc_close is None or dia_close is None:
         return False
@@ -1716,9 +1715,9 @@ def _closes_match_for_orphan_merge(
 
 def _orphan_pair_allowed(
     pk: str,
-    psc: Dict[str, Any],
+    psc: dict[str, Any],
     dk: str,
-    dia: Dict[str, Any],
+    dia: dict[str, Any],
 ) -> bool:
     if psc.get("is_option_like") or dia.get("is_option_like"):
         return False
@@ -1767,15 +1766,13 @@ def _orphan_pair_allowed(
     d_prof = _line_key_profile(dk, dia)
     if p_prof == "compact" and d_prof == "long":
         return True
-    if p_prof == "long" and d_prof == "compact":
-        return True
-    return False
+    return bool(p_prof == "long" and d_prof == "compact")
 
 
 def merge_orphan_positions_by_close_and_notional(
-    psc_by_key: Dict[str, Dict[str, Any]],
-    dia_by_key: Dict[str, Dict[str, Any]],
-) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], int]:
+    psc_by_key: dict[str, dict[str, Any]],
+    dia_by_key: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], int]:
     """
     Pair unmatched PSC/Diamond rows when closes and notionals align.
 
@@ -1794,7 +1791,7 @@ def merge_orphan_positions_by_close_and_notional(
         pc = psc.get("close_price")
         if pc is None or float(pc) <= 0:
             continue
-        best_dk: Optional[str] = None
+        best_dk: str | None = None
         best_score = 999.0
         for dk in dia_only:
             if dk in used_dia:
@@ -1827,9 +1824,9 @@ def merge_orphan_positions_by_close_and_notional(
     return psc_by_key, dia_by_key, merges
 
 
-def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def aggregate_psc_by_security(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Roll PSC legs up to one row per reconcile_match_key (net shares, one close)."""
-    out: Dict[str, Dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for row in rows:
         if is_cash_position(
             company_symbol=row.get("company_symbol"),
@@ -1977,7 +1974,7 @@ def aggregate_psc_by_security(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str,
     return out
 
 
-def flatten_diamond_portfolio_records(raw: Any) -> List[Dict[str, Any]]:
+def flatten_diamond_portfolio_records(raw: Any) -> list[dict[str, Any]]:
     """Extract flat list of PortfolioRecordDetails dicts from GetPortfolio JSON."""
     if not isinstance(raw, dict):
         return []
@@ -1987,7 +1984,7 @@ def flatten_diamond_portfolio_records(raw: Any) -> List[Dict[str, Any]]:
     details = body.get("PortfolioRecordDetails") or []
     if isinstance(details, dict):
         details = [details]
-    flat: List[Dict[str, Any]] = []
+    flat: list[dict[str, Any]] = []
 
     def _walk(node: Any) -> None:
         if isinstance(node, dict):
@@ -2007,7 +2004,7 @@ def flatten_diamond_portfolio_records(raw: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def _diamond_signed_qty(row: Dict[str, Any]) -> float:
+def _diamond_signed_qty(row: dict[str, Any]) -> float:
     q = row.get("Quantity")
     try:
         qty = float(q) if q is not None else 0.0
@@ -2036,7 +2033,7 @@ def _normalize_quote_date(val: Any, valuation_date_iso: str) -> bool:
     return compact == val_compact
 
 
-def _quote_date_iso(val: Any) -> Optional[str]:
+def _quote_date_iso(val: Any) -> str | None:
     quote = _norm(val)
     if not quote:
         return None
@@ -2049,9 +2046,9 @@ def _quote_date_iso(val: Any) -> Optional[str]:
 
 
 def _diamond_rows_for_valuation_date(
-    records: List[Dict[str, Any]],
+    records: list[dict[str, Any]],
     valuation_date_iso: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Pick the best Diamond row per security for a valuation date.
 
@@ -2062,20 +2059,20 @@ def _diamond_rows_for_valuation_date(
         return []
     val = normalize_valuation_date(valuation_date_iso)
     underlying_index = build_underlying_ticker_index(records)
-    legs: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    legs: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in records:
         key = _diamond_match_key(row, underlying_index=underlying_index)
         if not key:
             continue
         legs[key].append(row)
 
-    selected: List[Dict[str, Any]] = []
+    selected: list[dict[str, Any]] = []
     for rows in legs.values():
         exact = [r for r in rows if _normalize_quote_date(r.get("QuoteDate"), val)]
         if exact:
             selected.extend(exact)
             continue
-        on_or_before: List[tuple[str, Dict[str, Any]]] = []
+        on_or_before: list[tuple[str, dict[str, Any]]] = []
         for row in rows:
             qiso = _quote_date_iso(row.get("QuoteDate"))
             if qiso and qiso <= val:
@@ -2089,10 +2086,10 @@ def _diamond_rows_for_valuation_date(
 
 
 def _diamond_match_key(
-    row: Dict[str, Any],
+    row: dict[str, Any],
     *,
-    underlying_index: Optional[Dict[str, str]] = None,
-) -> Optional[str]:
+    underlying_index: dict[str, str] | None = None,
+) -> str | None:
     sec_name = row.get("SecurityName")
     sec_type = row.get("SecurityType") or row.get("AssetType")
     if is_cash_position(
@@ -2127,11 +2124,11 @@ def _diamond_match_key(
 
 
 def aggregate_diamond_by_security(
-    records: List[Dict[str, Any]],
+    records: list[dict[str, Any]],
     valuation_date_iso: str,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """Roll Diamond holdings to one row per reconcile_match_key."""
-    out: Dict[str, Dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {}
     use_rows = _diamond_rows_for_valuation_date(records, valuation_date_iso)
     underlying_index = build_underlying_ticker_index(records)
     for row in use_rows:
@@ -2323,9 +2320,9 @@ def aggregate_diamond_by_security(
 
 
 def _compute_close_price_difference(
-    psc: Optional[Dict[str, Any]],
-    dia: Optional[Dict[str, Any]],
-) -> Tuple[Optional[float], float]:
+    psc: dict[str, Any] | None,
+    dia: dict[str, Any] | None,
+) -> tuple[float | None, float]:
     """
     Returns (price_difference, shares_for_display).
 
@@ -2353,14 +2350,14 @@ def build_close_price_reconciliation(
     diamond_raw: Any,
     *,
     prior_diamond_raw: Any = None,
-    reference_date_iso: Optional[str] = None,
+    reference_date_iso: str | None = None,
     trades_raw: Any = None,
     dsn: str = "PSC_VIEWER",
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Compare EOD close prices for all matched securities.
     """
-    meta: Dict[str, Any] = {
+    meta: dict[str, Any] = {
         "fund_id": fund_id,
         "valuation_date": normalize_valuation_date(valuation_date_iso),
         "psc_error": None,
@@ -2369,8 +2366,8 @@ def build_close_price_reconciliation(
         "psc_positions": 0,
         "matched_securities": 0,
     }
-    psc_by_key: Dict[str, Dict[str, Any]] = {}
-    psc_prior_by_key: Dict[str, Dict[str, Any]] = {}
+    psc_by_key: dict[str, dict[str, Any]] = {}
+    psc_prior_by_key: dict[str, dict[str, Any]] = {}
     candidates = psc_portfolio_candidates_for_fund(fund_id)
     if not candidates:
         meta["psc_error"] = f"No PSC portfolio mapping for fund {fund_id}"
@@ -2408,17 +2405,18 @@ def build_close_price_reconciliation(
                 finally:
                     conn.close()
             except Exception as exc:
+                logger.debug("Could not load PSC close-price positions for %s", fund_id, exc_info=True)
                 meta["psc_error"] = str(exc)
 
     diamond_records = flatten_diamond_portfolio_records(diamond_raw)
     meta["diamond_positions"] = len(diamond_records)
     diamond_by_key = aggregate_diamond_by_security(diamond_records, valuation_date_iso)
-    prior_diamond_records: List[Dict[str, Any]] = []
-    prior_diamond_by_key: Dict[str, Dict[str, Any]] = {}
-    pos_t_by_key: Dict[str, Dict[str, Any]] = {}
-    pos_prior_by_key: Dict[str, Dict[str, Any]] = {}
-    trade_index: Dict[str, List[Dict[str, Any]]] = {}
-    trade_qty_mismatches: List[Dict[str, Any]] = []
+    prior_diamond_records: list[dict[str, Any]] = []
+    prior_diamond_by_key: dict[str, dict[str, Any]] = {}
+    pos_t_by_key: dict[str, dict[str, Any]] = {}
+    pos_prior_by_key: dict[str, dict[str, Any]] = {}
+    trade_index: dict[str, list[dict[str, Any]]] = {}
+    trade_qty_mismatches: list[dict[str, Any]] = []
     if prior_diamond_raw is not None and reference_date_iso:
         prior_diamond_records = flatten_diamond_portfolio_records(prior_diamond_raw)
         meta["diamond_prior_positions"] = len(prior_diamond_records)
@@ -2465,7 +2463,7 @@ def build_close_price_reconciliation(
     meta["orphan_close_merges"] = orphan_merges
 
     all_keys = sorted(set(psc_by_key.keys()) | set(diamond_by_key.keys()))
-    lines: List[Dict[str, Any]] = []
+    lines: list[dict[str, Any]] = []
     for key in all_keys:
         psc = psc_by_key.get(key)
         dia = diamond_by_key.get(key)
@@ -2543,7 +2541,7 @@ def build_close_price_reconciliation(
         pos_prior = _lookup_first(pos_prior_by_key, mtm_lookup_keys)
         trades_for_symbol = _lookup_trades_for_keys(trade_index, mtm_lookup_keys)
         psc_prior = _lookup_first(psc_prior_by_key, mtm_lookup_keys)
-        diamond_pnl: Optional[float] = None
+        diamond_pnl: float | None = None
         diamond_total_unrealized = (
             float(dia.get("diamond_total_unrealized") or 0)
             if dia and dia.get("diamond_total_unrealized_present")
@@ -2763,12 +2761,10 @@ def _debug_ticker_matches(value: Any, ticker: str) -> bool:
         return True
     if text.startswith(f"{ticker_u} "):
         return True
-    if f" {ticker_u} " in f" {text} ":
-        return True
-    return False
+    return f" {ticker_u} " in f" {text} "
 
 
-def _record_matches_debug_ticker(record: Dict[str, Any], ticker: str) -> bool:
+def _record_matches_debug_ticker(record: dict[str, Any], ticker: str) -> bool:
     ticker_u = ticker.upper()
     root = ticker_u.split(".")[0] if "." in ticker_u else ticker_u
     for field in (
@@ -2795,7 +2791,7 @@ def _record_matches_debug_ticker(record: Dict[str, Any], ticker: str) -> bool:
     return False
 
 
-def _summarize_debug_record(record: Dict[str, Any], fields: Tuple[str, ...]) -> Dict[str, Any]:
+def _summarize_debug_record(record: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
     out = {field: record.get(field) for field in fields if field in record}
     out["_full_record"] = record
     return out
@@ -2804,44 +2800,44 @@ def _summarize_debug_record(record: Dict[str, Any], fields: Tuple[str, ...]) -> 
 def _d(value: Any) -> Decimal:
     """Safe decimal parse — Diamond fields arrive as strings or floats."""
     if value is None or value == "":
-        return Decimal("0")
+        return Decimal(0)
     try:
         return Decimal(str(value))
-    except Exception:
-        return Decimal("0")
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal(0)
 
 
-def _trade_date_iso(trade: Dict[str, Any]) -> str:
+def _trade_date_iso(trade: dict[str, Any]) -> str:
     raw = _norm(trade.get("TradeDate") or trade.get("ValuationDate"))
     return raw[:10] if len(raw) >= 10 else raw
 
 
-def _trade_valuation_date_iso(trade: Dict[str, Any]) -> str:
+def _trade_valuation_date_iso(trade: dict[str, Any]) -> str:
     """NAV booking date for a trade; may lag TradeDate on derivatives."""
     raw = _norm(trade.get("ValuationDate") or trade.get("TradeDate"))
     return raw[:10] if len(raw) >= 10 else raw
 
 
-def _position_base_income(row: Optional[Dict[str, Any]]) -> Decimal:
+def _position_base_income(row: dict[str, Any] | None) -> Decimal:
     if not row:
-        return Decimal("0")
+        return Decimal(0)
     dividend = _d(row.get("BaseDividendIncomeSinceReferenceDate"))
     interest = _d(row.get("BaseInterestIncomeSinceReferenceDate"))
     withholding = _d(row.get("BaseWithholdingTaxSinceReferenceDate"))
     return dividend + interest - withholding
 
 
-def _position_fx_to_base(row: Dict[str, Any]) -> Decimal:
+def _position_fx_to_base(row: dict[str, Any]) -> Decimal:
     local_mv = _d(row.get("LocalMarketValue"))
     base_mv = _d(row.get("BaseMarketValue"))
     if local_mv != 0:
         return base_mv / local_mv
-    return Decimal("1")
+    return Decimal(1)
 
 
 def _mtm_trade_price(
     trade_price: Decimal,
-    position_T: Dict[str, Any],
+    position_T: dict[str, Any],
     *,
     bond_like: bool,
 ) -> Decimal:
@@ -2861,7 +2857,7 @@ def _mtm_trade_price(
 
 
 def _position_price_multiplier_for_mtm(
-    row: Dict[str, Any],
+    row: dict[str, Any],
     *,
     bond_like: bool,
     option_like: bool,
@@ -2874,7 +2870,7 @@ def _position_price_multiplier_for_mtm(
         qm = _nonzero_amount(row.get("QuantityMultiplier"))
         if qm is not None:
             return _d(qm)
-        return Decimal("1000")
+        return Decimal(1000)
     if futures_like:
         return _d(diamond_futures_contract_multiplier(row))
     sec_type = row.get("SecurityType") or row.get("AssetType")
@@ -2884,7 +2880,7 @@ def _position_price_multiplier_for_mtm(
 
 
 def _position_close_for_mtm(
-    row: Dict[str, Any],
+    row: dict[str, Any],
     *,
     bond_like: bool,
     option_like: bool,
@@ -2909,7 +2905,7 @@ def _position_close_for_mtm(
     )
 
 
-def _merge_position_legs(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _merge_position_legs(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not rows:
         return None
     if len(rows) == 1:
@@ -2922,18 +2918,18 @@ def _merge_position_legs(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
 
 
 def _index_diamond_positions_by_match_key(
-    records: List[Dict[str, Any]],
+    records: list[dict[str, Any]],
     valuation_date_iso: str,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     use_rows = _diamond_rows_for_valuation_date(records, valuation_date_iso)
     underlying_index = build_underlying_ticker_index(records)
-    legs: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    legs: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in use_rows:
         key = _diamond_match_key(row, underlying_index=underlying_index)
         if not key:
             continue
         legs[key].append(row)
-    out: Dict[str, Dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for key, rows in legs.items():
         merged = _merge_position_legs(rows)
         if merged is not None:
@@ -2942,10 +2938,10 @@ def _index_diamond_positions_by_match_key(
 
 
 def _trade_match_key(
-    trade: Dict[str, Any],
+    trade: dict[str, Any],
     *,
-    underlying_index: Optional[Dict[str, str]] = None,
-) -> Optional[str]:
+    underlying_index: dict[str, str] | None = None,
+) -> str | None:
     opt_root = ""
     bbg = _norm(trade.get("BBGID"))
     if underlying_index and bbg and bbg in underlying_index:
@@ -2967,7 +2963,7 @@ def _trade_match_key(
     )
 
 
-def _diamond_trade_signed_contract_qty(trade: Dict[str, Any]) -> Decimal:
+def _diamond_trade_signed_contract_qty(trade: dict[str, Any]) -> Decimal:
     """
     Signed trade quantity in the same units as Diamond position Quantity.
 
@@ -3009,16 +3005,16 @@ def _diamond_trade_signed_contract_qty(trade: Dict[str, Any]) -> Decimal:
 
     mult = notional_quantity_multiplier(sec_type, sec_name or ticker)
     if (mult == 100.0 or _is_diamond_option_trade(trade)) and qty != 0:
-        qty = qty / Decimal("100")
+        qty = qty / Decimal(100)
     return qty
 
 
 def build_trade_index_by_match_key(
-    trades: List[Dict[str, Any]],
+    trades: list[dict[str, Any]],
     valuation_date_iso: str,
     *,
-    underlying_index: Optional[Dict[str, str]] = None,
-) -> Dict[str, List[Dict[str, Any]]]:
+    underlying_index: dict[str, str] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     """
     Group trades booked on valuation_date by reconcile match key.
 
@@ -3029,7 +3025,7 @@ def build_trade_index_by_match_key(
     Each entry: qty (signed +buy / -sell), local trade price, fx to base.
     """
     valuation_date = normalize_valuation_date(valuation_date_iso)
-    idx: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    idx: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for trade in trades:
         if str(trade.get("IsReversal") or "").lower() == "true":
             continue
@@ -3048,7 +3044,7 @@ def build_trade_index_by_match_key(
         price = _d(trade.get("LocalAmountPerShare"))
         local_net = _d(trade.get("LocalNetAmount"))
         base_net = _d(trade.get("BaseNetAmount"))
-        fx = Decimal("1")
+        fx = Decimal(1)
         if local_net != 0:
             fx = abs(base_net / local_net)
         idx[key].append(
@@ -3064,11 +3060,11 @@ def build_trade_index_by_match_key(
 
 
 def _mtm_trades_for_daily_pnl(
-    trades_for_symbol: List[Dict[str, Any]],
-    valuation_date_iso: Optional[str],
+    trades_for_symbol: list[dict[str, Any]],
+    valuation_date_iso: str | None,
     *,
     use_psc_prior_carry: bool,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     When carrying PSC prior qty because Diamond's prior snapshot is flat, drop
     trades booked on T but executed before T — they duplicate the overnight position.
@@ -3076,7 +3072,7 @@ def _mtm_trades_for_daily_pnl(
     if not use_psc_prior_carry or not valuation_date_iso:
         return trades_for_symbol
     val = normalize_valuation_date(valuation_date_iso)
-    filtered: List[Dict[str, Any]] = []
+    filtered: list[dict[str, Any]] = []
     for trade in trades_for_symbol:
         booked = trade.get("valuation_date") or val
         executed = trade.get("trade_date") or booked
@@ -3087,18 +3083,18 @@ def _mtm_trades_for_daily_pnl(
 
 
 def compute_daily_pnl(
-    position_T: Optional[Dict[str, Any]],
-    position_prior: Optional[Dict[str, Any]],
-    trades_for_symbol: List[Dict[str, Any]],
+    position_T: dict[str, Any] | None,
+    position_prior: dict[str, Any] | None,
+    trades_for_symbol: list[dict[str, Any]],
     *,
     bond_like: bool = False,
     option_like: bool = False,
     futures_like: bool = False,
     futures_option_like: bool = False,
     income_from_t_snapshot_only: bool = True,
-    valuation_date_iso: Optional[str] = None,
-    psc_prior: Optional[Dict[str, Any]] = None,
-) -> Optional[float]:
+    valuation_date_iso: str | None = None,
+    psc_prior: dict[str, Any] | None = None,
+) -> float | None:
     """
     True daily MTM in base ccy from two Diamond snapshots plus same-day trades.
 
@@ -3120,12 +3116,12 @@ def compute_daily_pnl(
         futures_like=futures_like,
     )
     diamond_qty_prior = (
-        _d(_diamond_signed_qty(position_prior)) if position_prior is not None else Decimal("0")
+        _d(_diamond_signed_qty(position_prior)) if position_prior is not None else Decimal(0)
     )
     psc_prior_shares = (
         _d(psc_prior.get("shares"))
         if psc_prior and psc_prior.get("close_price") is not None
-        else Decimal("0")
+        else Decimal(0)
     )
     use_psc_prior_carry = (
         psc_prior is not None
@@ -3146,7 +3142,7 @@ def compute_daily_pnl(
         qty_prior = diamond_qty_prior
     else:
         price_prior = price_T
-        qty_prior = Decimal("0")
+        qty_prior = Decimal(0)
 
     fx_T = _position_fx_to_base(position_T)
     if use_psc_prior_carry and psc_prior.get("fx_settle_to_base"):
@@ -3169,7 +3165,7 @@ def compute_daily_pnl(
         valuation_date_iso,
         use_psc_prior_carry=use_psc_prior_carry,
     )
-    mtm_trades = Decimal("0")
+    mtm_trades = Decimal(0)
     for trade in trades_mtm:
         trade_fx = trade.get("fx") or fx_T
         trade_price = _mtm_trade_price(_d(trade["price"]), position_T, bond_like=bond_like)
@@ -3184,24 +3180,24 @@ def compute_daily_pnl(
 
 
 def audit_trade_quantity_continuity(
-    position_T: Optional[Dict[str, Any]],
-    position_prior: Optional[Dict[str, Any]],
-    trades_for_symbol: List[Dict[str, Any]],
+    position_T: dict[str, Any] | None,
+    position_prior: dict[str, Any] | None,
+    trades_for_symbol: list[dict[str, Any]],
     *,
     match_key: str,
     ticker: str,
-    valuation_date_iso: Optional[str] = None,
-    psc_prior: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
+    valuation_date_iso: str | None = None,
+    psc_prior: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Log when qty_T != qty_prior + sum(trade qty) — catches timezone / booking issues."""
     if not trades_for_symbol:
         return None
-    qty_T = _d(_diamond_signed_qty(position_T)) if position_T else Decimal("0")
-    diamond_qty_prior = _d(_diamond_signed_qty(position_prior)) if position_prior else Decimal("0")
+    qty_T = _d(_diamond_signed_qty(position_T)) if position_T else Decimal(0)
+    diamond_qty_prior = _d(_diamond_signed_qty(position_prior)) if position_prior else Decimal(0)
     psc_prior_shares = (
         _d(psc_prior.get("shares"))
         if psc_prior and psc_prior.get("close_price") is not None
-        else Decimal("0")
+        else Decimal(0)
     )
     use_psc_prior_carry = (
         psc_prior is not None
@@ -3230,7 +3226,7 @@ def audit_trade_quantity_continuity(
     }
 
 
-def flatten_diamond_trade_records(raw: Any) -> List[Dict[str, Any]]:
+def flatten_diamond_trade_records(raw: Any) -> list[dict[str, Any]]:
     """Extract flat PortfolioTrade dicts from GetPortfolioTrades JSON."""
     if not isinstance(raw, dict):
         return []
@@ -3254,7 +3250,7 @@ def flatten_diamond_trade_records(raw: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def _portfolio_header_dates(raw: Any) -> Dict[str, Any]:
+def _portfolio_header_dates(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
     body = raw.get("GetPortfolioResponse") or raw
@@ -3274,10 +3270,10 @@ def build_close_price_debug_payload(
     *,
     diamond_raw: Any,
     prior_diamond_raw: Any,
-    reference_date_iso: Optional[str],
+    reference_date_iso: str | None,
     trades_raw: Any = None,
-    trades_error: Optional[str] = None,
-) -> Dict[str, Any]:
+    trades_error: str | None = None,
+) -> dict[str, Any]:
     """TEMP: NAV checker debug bundle for a single ticker (JSON Diamond records, not XML)."""
     ticker = (debug_ticker or "").strip().upper()
     valuation_date_norm = normalize_valuation_date(valuation_date_iso)
@@ -3328,8 +3324,8 @@ def fetch_close_price_reconciliation(
     valuation_date_iso: str,
     diamond_client: Any,
     *,
-    debug_ticker: Optional[str] = None,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[str]]:
+    debug_ticker: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
     """Load Diamond portfolio and PSC, return reconciliation lines."""
     valuation_date_norm = normalize_valuation_date(valuation_date_iso)
     reference_date, reference_portfolio, reference_error = infer_reference_date_from_psc(
@@ -3348,6 +3344,7 @@ def fetch_close_price_reconciliation(
             exclude_not_priced_positions=False,
         )
     except Exception as exc:
+        logger.warning("Could not load Diamond portfolio for %s", fund_id, exc_info=True)
         return [], {"fund_id": fund_id, "valuation_date": valuation_date_norm}, str(exc)
     prior_raw = None
     prior_error = None
@@ -3361,6 +3358,7 @@ def fetch_close_price_reconciliation(
                 exclude_not_priced_positions=False,
             )
         except Exception as exc:
+            logger.debug("Could not load prior Diamond portfolio for %s", fund_id, exc_info=True)
             prior_error = str(exc)
         try:
             trades_raw = diamond_client.get_portfolio_trades(
@@ -3370,6 +3368,7 @@ def fetch_close_price_reconciliation(
                 date_type="ValuationDate",
             )
         except Exception as exc:
+            logger.debug("Could not load Diamond trades for %s", fund_id, exc_info=True)
             trades_error = str(exc)
     lines, meta = build_close_price_reconciliation(
         fund_id,

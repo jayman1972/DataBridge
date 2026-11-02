@@ -3,9 +3,11 @@ Factory for creating Bloomberg clients.
 Supports both BLPAPI and BQL clients with configuration-based selection.
 """
 
+from __future__ import annotations
+
 import os
 from enum import Enum
-from typing import Optional
+
 from .base_client import BloombergClientBase
 from .blpapi_client import BLPAPIClient
 
@@ -26,7 +28,7 @@ class BloombergClientType(str, Enum):
 
 
 def get_bloomberg_client(
-    client_type: Optional[str] = None,
+    client_type: str | None = None,
     **kwargs
 ) -> BloombergClientBase:
     """

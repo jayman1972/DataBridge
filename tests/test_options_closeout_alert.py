@@ -1,19 +1,24 @@
 import unittest
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from sggg.options_closeout_alert import collect_flagged_groups, should_run_closeout_alert
+from sggg.options_closeout_alert import (
+    collect_flagged_groups,
+    should_run_closeout_alert,
+)
 
 
 class OptionsCloseoutAlertTest(unittest.TestCase):
     def test_runs_at_345_eastern_once_on_weekdays(self):
-        now = datetime(2026, 8, 6, 15, 45)
+        now = datetime(2026, 8, 6, 15, 45, tzinfo=ZoneInfo("America/New_York"))
         self.assertTrue(should_run_closeout_alert(now, None))
         self.assertFalse(should_run_closeout_alert(now, "2026-08-06"))
 
     def test_does_not_run_before_window_after_close_or_weekends(self):
-        self.assertFalse(should_run_closeout_alert(datetime(2026, 8, 6, 15, 44), None))
-        self.assertFalse(should_run_closeout_alert(datetime(2026, 8, 6, 16, 0), None))
-        self.assertFalse(should_run_closeout_alert(datetime(2026, 8, 8, 15, 45), None))
+        eastern = ZoneInfo("America/New_York")
+        self.assertFalse(should_run_closeout_alert(datetime(2026, 8, 6, 15, 44, tzinfo=eastern), None))
+        self.assertFalse(should_run_closeout_alert(datetime(2026, 8, 6, 16, 0, tzinfo=eastern), None))
+        self.assertFalse(should_run_closeout_alert(datetime(2026, 8, 8, 15, 45, tzinfo=eastern), None))
 
     def test_collects_trade_and_expiry_reasons(self):
         report = {

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Tuple
+import logging
+from datetime import date, datetime, timezone
+from typing import Any
 
 from sggg.nav_sheet_parse import fund_aum_from_summary, normalize_valuation_date
 
+logger = logging.getLogger(__name__)
 
-def _parse_sheet_date(raw: Any) -> Optional[str]:
+
+def _parse_sheet_date(raw: Any) -> str | None:
     if raw is None:
         return None
     if isinstance(raw, date):
@@ -20,7 +23,7 @@ def _parse_sheet_date(raw: Any) -> Optional[str]:
 _AUM_PARSE_VERSION = 8
 
 
-def snapshot_usable(summary: Dict[str, Any]) -> bool:
+def snapshot_usable(summary: dict[str, Any]) -> bool:
     """True when stored row is enough to skip a live GetNAVSheet call."""
     if int(summary.get("aum_parse_version") or 0) < _AUM_PARSE_VERSION:
         return False
@@ -31,13 +34,13 @@ def snapshot_usable(summary: Dict[str, Any]) -> bool:
 
 def load_snapshots_bulk(
     supabase: Any,
-    fund_ids: List[str],
-    valuation_dates: List[str],
-) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    fund_ids: list[str],
+    valuation_dates: list[str],
+) -> dict[tuple[str, str], dict[str, Any]]:
     """
     Load cached summaries keyed by (fund_id, valuation_date yyyy-mm-dd).
     """
-    out: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    out: dict[tuple[str, str], dict[str, Any]] = {}
     if not supabase or not fund_ids or not valuation_dates:
         return out
     dates_norm = sorted({normalize_valuation_date(d) for d in valuation_dates})
@@ -58,6 +61,7 @@ def load_snapshots_bulk(
             if snapshot_usable(summary):
                 out[(fid, vdate)] = summary
     except Exception:
+        logger.debug("Could not load cached Diamond NAV snapshots", exc_info=True)
         return out
     return out
 
@@ -66,7 +70,7 @@ def upsert_snapshot(
     supabase: Any,
     fund_id: str,
     valuation_date: str,
-    summary: Dict[str, Any],
+    summary: dict[str, Any],
 ) -> None:
     if not supabase or not snapshot_usable(summary):
         return
@@ -81,7 +85,7 @@ def upsert_snapshot(
         "aum_currency": summary.get("native_currency"),
         "classes": summary.get("classes") or [],
         "summary": summary,
-        "fetched_at": datetime.utcnow().isoformat() + "Z",
+        "fetched_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     try:
         supabase.table("fund_admin_diamond_nav_snapshots").upsert(
@@ -89,4 +93,4 @@ def upsert_snapshot(
             on_conflict="fund_id,valuation_date",
         ).execute()
     except Exception:
-        pass
+        logger.warning("Could not cache Diamond NAV snapshot for %s on %s", fund_id, vdate, exc_info=True)

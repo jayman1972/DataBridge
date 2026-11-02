@@ -1,5 +1,8 @@
 """Smoke test for Diamond NAV-not-finalized error parsing."""
-from sggg.nav_sheet_parse import nav_unavailable_user_message, parse_diamond_nav_unavailable
+from sggg.nav_sheet_parse import (
+    nav_unavailable_user_message,
+    parse_diamond_nav_unavailable,
+)
 
 err = RuntimeError(
     'Diamond request failed: GetNAVSheet/ HTTP 400: {"Message":"The requested Valuation Period '

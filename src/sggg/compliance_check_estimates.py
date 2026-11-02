@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from sggg.nav_sheet_parse import FUND_NATIVE_CURRENCY, _return_value_to_bps
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_ROOT = (
     r"P:\03. Reporting\100. Compliance Check - portfolios (Alt Funds)"
@@ -16,7 +19,7 @@ DEFAULT_ROOT = (
 )
 
 # Full fund names on Steps tab (column W) -> Diamond fund parent GUID
-FUND_NAME_TO_ID: Dict[str, str] = {
+FUND_NAME_TO_ID: dict[str, str] = {
     "EHP ALPHA STRATEGIES ALTERNATIVE FUND": "415a3530-3034-4536-4432-303030364337",
     "EHP SELECT ALTERNATIVE FUND": "41323030-3031-4144-3637-303030364338",
     "EHP TACTICAL GROWTH ALTERNATIVE FUND": "41010000-7F7A-0A65-D559-45484608DB40",
@@ -34,7 +37,7 @@ def _norm_name(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().upper())
 
 
-def _parse_money(raw: Any) -> Optional[float]:
+def _parse_money(raw: Any) -> float | None:
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
@@ -53,7 +56,7 @@ def _parse_money(raw: Any) -> Optional[float]:
     return -v if neg else v
 
 
-def _parse_workbook_date(path: Path) -> Optional[date]:
+def _parse_workbook_date(path: Path) -> date | None:
     m = _COMPLIANCE_DATE_RE.search(path.stem)
     if not m:
         return None
@@ -70,7 +73,7 @@ def _file_variant(path: Path) -> str:
     return "eod"
 
 
-def _read_steps_grid_xls(workbook_path: Path, cell_range: str = "W2:AB10") -> List[List[Any]]:
+def _read_steps_grid_xls(workbook_path: Path, cell_range: str = "W2:AB10") -> list[list[Any]]:
     try:
         import xlrd
     except ImportError as e:
@@ -112,9 +115,9 @@ def _read_steps_grid_xls(workbook_path: Path, cell_range: str = "W2:AB10") -> Li
     ]
 
 
-def _read_steps_grid_xlsx(workbook_path: Path, cell_range: str = "W2:AB10") -> List[List[Any]]:
+def _read_steps_grid_xlsx(workbook_path: Path, cell_range: str = "W2:AB10") -> list[list[Any]]:
     try:
-        import openpyxl  # noqa: F401
+        import openpyxl
 
         wb = openpyxl.load_workbook(workbook_path, read_only=True, data_only=True)
         try:
@@ -144,7 +147,7 @@ def _read_steps_grid_xlsx(workbook_path: Path, cell_range: str = "W2:AB10") -> L
         return read_sheet_range(workbook_path, "Steps", cell_range)
 
 
-def _read_steps_grid(workbook_path: Path, cell_range: str = "W2:AK10") -> List[List[Any]]:
+def _read_steps_grid(workbook_path: Path, cell_range: str = "W2:AK10") -> list[list[Any]]:
     suffix = workbook_path.suffix.lower()
     if suffix == ".xls":
         return _read_steps_grid_xls(workbook_path, cell_range)
@@ -157,8 +160,8 @@ def _read_steps_grid(workbook_path: Path, cell_range: str = "W2:AK10") -> List[L
 
 def find_compliance_workbook(
     valuation_date: date,
-    root: Optional[str] = None,
-) -> Tuple[Optional[Path], Optional[str]]:
+    root: str | None = None,
+) -> tuple[Path | None, str | None]:
     """
     Find the compliance check file for valuation_date: latest mtime among files
     whose filename date equals valuation_date. No cross-date fallback.
@@ -176,7 +179,7 @@ def find_compliance_workbook(
     # Date in filename — glob only that day (faster than rglob + parse every file).
     date_token = valuation_date.strftime("%Y.%m.%d")
     pattern = f"EHP Alt Funds - compliance check - {date_token}*"
-    matches: List[Tuple[float, Path]] = []
+    matches: list[tuple[float, Path]] = []
     seen: set[str] = set()
     for path in base.glob(f"**/{pattern}"):
         if path.name.startswith("~$"):
@@ -204,7 +207,7 @@ def find_compliance_workbook(
     if len(matches) > 1:
         # Surface the chosen file's mtime so reviewers can see *which* save
         # was picked when both a midday and an EOD revision exist.
-        chosen_mtime_iso = datetime.fromtimestamp(matches[0][0]).isoformat(
+        chosen_mtime_iso = datetime.fromtimestamp(matches[0][0], tz=timezone.utc).astimezone().isoformat(
             timespec="seconds"
         )
         note = (
@@ -214,7 +217,7 @@ def find_compliance_workbook(
     return chosen, note
 
 
-def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
+def read_steps_estimates(workbook_path: Path) -> dict[str, dict[str, Any]]:
     """
     Parse Steps tab: W = fund, X = Current AUM, Z = Prior EOD AUM, AB = ROR, AF = Net Subs (reds).
     """
@@ -223,7 +226,7 @@ def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
         return {}
 
     # W2:AB10 -> row 0 is excel row 2; data funds start row 1 (excel 3)
-    sheet_as_of: Optional[str] = None
+    sheet_as_of: str | None = None
     if grid and grid[0]:
         raw_date = grid[0][0]
         if raw_date is not None:
@@ -234,7 +237,7 @@ def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
             else:
                 sheet_as_of = str(raw_date).strip()[:10] or None
 
-    out: Dict[str, Dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for row in grid[1:]:
         cells = list(row) + [None] * (10 - len(row))
         fund_raw = cells[0]
@@ -253,7 +256,7 @@ def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
         estimate_bps = _return_value_to_bps(ror_raw, prior_eod_aum)
         ror_display = str(ror_raw).strip() if ror_raw is not None else None
 
-        entry: Dict[str, Any] = {
+        entry: dict[str, Any] = {
             "fund_label": fund_label,
             "estimate_bps": estimate_bps,
             "ror_display": ror_display,
@@ -273,10 +276,10 @@ def read_steps_estimates(workbook_path: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def compliance_aum_change_ex_flows(
-    prior_eod_aum: Optional[float],
-    current_aum: Optional[float],
-    net_subs_reds: Optional[float],
-) -> Optional[float]:
+    prior_eod_aum: float | None,
+    current_aum: float | None,
+    net_subs_reds: float | None,
+) -> float | None:
     """
     Dollar change aligned with Steps column AB: (X - Z) minus AF net subs/reds.
     Redemptions are negative in AF; subtracting AF removes flow from the raw AUM delta.
@@ -291,8 +294,8 @@ def compliance_aum_change_ex_flows(
 
 def estimates_by_fund_id(
     valuation_date: date,
-    root: Optional[str] = None,
-) -> Dict[str, Any]:
+    root: str | None = None,
+) -> dict[str, Any]:
     """Resolve workbook and return estimates keyed by fund GUID."""
     path, note = find_compliance_workbook(valuation_date, root=root)
     if not path:
@@ -305,7 +308,7 @@ def estimates_by_fund_id(
         }
     try:
         mtime = path.stat().st_mtime
-        saved_at = datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+        saved_at = datetime.fromtimestamp(mtime, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
     except OSError:
         saved_at = None
 
@@ -314,6 +317,7 @@ def estimates_by_fund_id(
         by_fund = parsed.get("by_fund_id") or {}
         meta = parsed.get("meta") or {}
     except Exception as e:
+        logger.exception("Could not read compliance workbook %s", path)
         return {
             "available": False,
             "error": str(e),
@@ -323,7 +327,7 @@ def estimates_by_fund_id(
             "saved_at": saved_at,
         }
 
-    estimates: Dict[str, Dict[str, Any]] = {}
+    estimates: dict[str, dict[str, Any]] = {}
     for fid, row in by_fund.items():
         estimates[fid] = {
             **row,

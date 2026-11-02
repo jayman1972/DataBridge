@@ -3,12 +3,17 @@ Bloomberg Terminal API (blpapi) client implementation.
 This is the existing implementation wrapped in the new interface.
 """
 
-import os
+from __future__ import annotations
+
+import logging
 import math
 import numbers
+import os
 import re
-from datetime import date, datetime, time as dt_time
-from typing import List, Dict, Any, Optional
+from datetime import date, datetime, timezone
+from datetime import time as dt_time
+from typing import Any
+
 try:
     import blpapi
     BLPAPI_AVAILABLE = True
@@ -16,14 +21,16 @@ except ImportError:
     BLPAPI_AVAILABLE = False
     blpapi = None
 
-from .base_client import BloombergClientBase
 from .adjustments import (
     historical_adjustment_settings,
     normalize_historical_adjustment_profile,
 )
+from .base_client import BloombergClientBase
+
+logger = logging.getLogger(__name__)
 
 
-def _blp_datetime_class() -> Optional[type]:
+def _blp_datetime_class() -> type | None:
     """Bloomberg Terminal may ship blpapi without a top-level ``Datetime`` attribute (PyPI layout differs)."""
     if not BLPAPI_AVAILABLE:
         return None
@@ -35,6 +42,7 @@ def _blp_datetime_class() -> Optional[type]:
 
         return _D
     except Exception:
+        logger.debug("Bloomberg Datetime type unavailable", exc_info=True)
         return None
 
 
@@ -65,6 +73,7 @@ def _coerce_blp_datetime(val: Any) -> Any:
             return py_dt.date()
         return py_dt
     except Exception:
+        logger.debug("Could not coerce Bloomberg datetime value", exc_info=True)
         return str(val)
 
 
@@ -124,16 +133,17 @@ class BLPAPIClient(BloombergClientBase):
         # refdata requests are being rejected (for example LIMIT /
         # WORKFLOW_REVIEW_NEEDED).  Keep the most recent provider-level error
         # so /health can distinguish socket connectivity from usable data.
-        self.last_request_error: Optional[str] = None
-        self.last_request_error_at: Optional[str] = None
+        self.last_request_error: str | None = None
+        self.last_request_error_at: str | None = None
 
     @staticmethod
-    def _element_string(element: Any, name: str) -> Optional[str]:
+    def _element_string(element: Any, name: str) -> str | None:
         try:
             if element is not None and element.hasElement(name):
                 value = element.getElementAsString(name)
                 return str(value).strip() or None
         except Exception:
+            logger.debug("Could not read Bloomberg error element %s", name, exc_info=True)
             return None
         return None
 
@@ -148,6 +158,7 @@ class BLPAPIClient(BloombergClientBase):
         try:
             has_error = message.hasElement("responseError")
         except Exception:
+            logger.debug("Could not inspect Bloomberg response error", exc_info=True)
             has_error = False
         if not has_error:
             return
@@ -160,19 +171,20 @@ class BLPAPIClient(BloombergClientBase):
         try:
             code = str(error.getElementAsInteger("code")) if error.hasElement("code") else None
         except Exception:
+            logger.debug("Could not read Bloomberg response error code", exc_info=True)
             code = None
 
         classification = " / ".join(part for part in (category, subcategory) if part)
         details = provider_message or "Bloomberg rejected the request"
         suffix_parts = [part for part in (f"code {code}" if code else None, source) if part]
         suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
-        rendered = f"Bloomberg request blocked"
+        rendered = "Bloomberg request blocked"
         if classification:
             rendered += f": {classification}"
         rendered += f" - {details}{suffix}"
         self.last_request_error = rendered
-        self.last_request_error_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        raise Exception(rendered)
+        self.last_request_error_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        raise RuntimeError(rendered)
 
     def _clear_request_error(self) -> None:
         self.last_request_error = None
@@ -190,6 +202,7 @@ class BLPAPIClient(BloombergClientBase):
                 return True
             return False
         except Exception:
+            logger.debug("Bloomberg availability probe failed", exc_info=True)
             return False
     
     def _create_session(self):
@@ -213,8 +226,8 @@ class BLPAPIClient(BloombergClientBase):
         self,
         query: str,
         max_results: int = 20,
-        yellow_key: Optional[str] = "Equity",
-    ) -> List[Dict[str, Any]]:
+        yellow_key: str | None = "Equity",
+    ) -> list[dict[str, Any]]:
         """Search Bloomberg instruments, including inactive listings when entitled.
 
         Bloomberg's instrument lookup service returns canonical Bloomberg
@@ -231,12 +244,12 @@ class BLPAPIClient(BloombergClientBase):
         session_options.setAutoRestartOnDisconnection(True)
         session = blpapi.Session(session_options)
         if not session.start():
-            raise Exception("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
+            raise RuntimeError("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
 
         instruments_service = "//blp/instruments"
         try:
             if not session.openService(instruments_service):
-                raise Exception("Bloomberg instrument lookup service is unavailable")
+                raise RuntimeError("Bloomberg instrument lookup service is unavailable")
             service = session.getService(instruments_service)
             lookup_request = service.createRequest("instrumentListRequest")
             lookup_request.set("query", normalized_query)
@@ -247,7 +260,7 @@ class BLPAPIClient(BloombergClientBase):
                     lookup_request.set("yellowKeyFilter", "YK_FILTER_EQTY")
 
             session.sendRequest(lookup_request)
-            results: List[Dict[str, Any]] = []
+            results: list[dict[str, Any]] = []
             while True:
                 event = session.nextEvent(500)
                 if event.eventType() in (blpapi.Event.RESPONSE, blpapi.Event.PARTIAL_RESPONSE):
@@ -276,14 +289,14 @@ class BLPAPIClient(BloombergClientBase):
     def get_historical_data(
         self,
         ticker: str,
-        fields: List[str],
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        periodicity: Optional[str] = None,
-        overrides: Optional[Dict[str, str]] = None,
-        adjustment_profile: Optional[str] = None,
-        currency: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        fields: list[str],
+        start_date: str | None = None,
+        end_date: str | None = None,
+        periodicity: str | None = None,
+        overrides: dict[str, str] | None = None,
+        adjustment_profile: str | None = None,
+        currency: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Fetch historical data using blpapi.
 
         HistoricalDataRequest returns securityData as a single HistoricalDataTable
@@ -304,7 +317,7 @@ class BLPAPIClient(BloombergClientBase):
 
         session = self._create_session()
         if not session:
-            raise Exception("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
+            raise RuntimeError("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
         
         try:
             ref_data_service = session.getService(self.service)
@@ -359,7 +372,7 @@ class BLPAPIClient(BloombergClientBase):
                             # Check for security error (can exist even with fieldData)
                             if securityData.hasElement("securityError"):
                                 err = securityData.getElement("securityError")
-                                raise Exception(
+                                raise RuntimeError(
                                     f"Security error: {err.getElementAsString('category')} - "
                                     f"{err.getElementAsString('message')}"
                                 )
@@ -375,7 +388,7 @@ class BLPAPIClient(BloombergClientBase):
                                         date_obj = dataPoint.getElementAsDatetime("date")
                                         date_str = date_obj.strftime("%Y-%m-%d") if hasattr(date_obj, "strftime") else str(date_obj)
 
-                                        record: Dict[str, Any] = {"date": date_str}
+                                        record: dict[str, Any] = {"date": date_str}
 
                                         # Map PX_* to *_price for edge function compatibility
                                         if dataPoint.hasElement("PX_OPEN"):
@@ -399,22 +412,22 @@ class BLPAPIClient(BloombergClientBase):
                                                 try:
                                                     record[requested_field] = dataPoint.getElementAsFloat(requested_field)
                                                 except Exception:
+                                                    logger.debug("Could not read Bloomberg numeric field %s", requested_field, exc_info=True)
                                                     try:
                                                         record[requested_field] = dataPoint.getElementAsString(requested_field)
                                                     except Exception:
+                                                        logger.debug("Could not read Bloomberg text field %s", requested_field, exc_info=True)
                                                         if _debug:
                                                             print(f"[BLPAPI] Could not extract field {requested_field}")
 
-                                        if "close_price" in record or len(record) > 1:
-                                            records.append(record)
-                                        elif dataPoint.hasElement("date") and any(
+                                        if "close_price" in record or len(record) > 1 or dataPoint.hasElement("date") and any(
                                             dataPoint.hasElement(f) for f in fields
                                         ):
                                             records.append(record)
                                 elif _debug:
-                                    print(f"[BLPAPI] No fieldData values - response empty")
+                                    print("[BLPAPI] No fieldData values - response empty")
                             elif _debug:
-                                print(f"[BLPAPI] No fieldData element")
+                                print("[BLPAPI] No fieldData element")
 
                             # Log field exceptions (can exist alongside fieldData)
                             if securityData.hasElement("fieldExceptions"):
@@ -439,11 +452,11 @@ class BLPAPIClient(BloombergClientBase):
     
     def get_reference_data(
         self,
-        tickers: List[str],
-        fields: List[str],
-        overrides: Optional[Dict[str, str]] = None,
+        tickers: list[str],
+        fields: list[str],
+        overrides: dict[str, str] | None = None,
         session: Any = None,
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         """Fetch reference/EOD data using blpapi (BDP).
 
         Pass ``session`` from ``open_refdata_session()`` to reuse one connection
@@ -456,7 +469,7 @@ class BLPAPIClient(BloombergClientBase):
         own_session = session is None
         sess = session if session is not None else self._create_session()
         if not sess:
-            raise Exception("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
+            raise RuntimeError("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
 
         try:
             ref_data_service = sess.getService(self.service)
@@ -533,14 +546,15 @@ class BLPAPIClient(BloombergClientBase):
             if own_session:
                 sess.stop()
 
-    def _extract_bulk_field_strings(self, bulk_element: Any) -> List[str]:
+    def _extract_bulk_field_strings(self, bulk_element: Any) -> list[str]:
         """Parse a BDS bulk field (e.g. INDX_MEMBERS) into member ticker strings."""
-        out: List[str] = []
+        out: list[str] = []
         if bulk_element is None or bulk_element.isNull():
             return out
         try:
             n = bulk_element.numValues()
         except Exception:
+            logger.debug("Could not read Bloomberg bulk row count", exc_info=True)
             n = 0
         if n <= 0:
             return out
@@ -548,9 +562,11 @@ class BLPAPIClient(BloombergClientBase):
             try:
                 row = bulk_element.getValue(i)
             except Exception:
+                logger.debug("Could not read Bloomberg bulk value %s", i, exc_info=True)
                 try:
                     row = bulk_element.getValueAsElement(i)
                 except Exception:
+                    logger.debug("Could not read Bloomberg bulk element %s", i, exc_info=True)
                     continue
             if row is None:
                 continue
@@ -567,13 +583,13 @@ class BLPAPIClient(BloombergClientBase):
                             break
                     continue
                 except Exception:
-                    pass
+                    logger.debug("Could not read Bloomberg bulk table row %s", i, exc_info=True)
             val = _coerce_blp_reference_value(row)
             if isinstance(val, str) and val.strip():
                 out.append(val.strip())
         # Dedupe preserving order
         seen: set[str] = set()
-        deduped: List[str] = []
+        deduped: list[str] = []
         for s in out:
             if s not in seen:
                 seen.add(s)
@@ -728,8 +744,8 @@ class BLPAPIClient(BloombergClientBase):
         self,
         ticker: str,
         field: str,
-        overrides: Optional[Dict[str, str]] = None,
-    ) -> List[str]:
+        overrides: dict[str, str] | None = None,
+    ) -> list[str]:
         """Fetch bulk reference data (BDS) for one security/field, e.g. INDX_MEMBERS."""
         _debug = os.environ.get("DATA_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
         if _debug:
@@ -737,7 +753,7 @@ class BLPAPIClient(BloombergClientBase):
 
         session = self._create_session()
         if not session:
-            raise Exception("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
+            raise RuntimeError("Failed to start Bloomberg session. Is Bloomberg Terminal running and logged in?")
 
         try:
             ref_data_service = session.getService(self.service)
@@ -759,7 +775,7 @@ class BLPAPIClient(BloombergClientBase):
                     ov.setElement("value", val)
 
             session.sendRequest(blp_request)
-            members: List[str] = []
+            members: list[str] = []
 
             while True:
                 event = session.nextEvent(500)
@@ -772,7 +788,7 @@ class BLPAPIClient(BloombergClientBase):
                             security_data = security_data_array.getValueAsElement(idx)
                             if security_data.hasElement("securityError"):
                                 err = security_data.getElement("securityError")
-                                raise Exception(
+                                raise RuntimeError(
                                     f"{err.getElementAsString('category')} - "
                                     f"{err.getElementAsString('message')}"
                                 )
@@ -786,7 +802,7 @@ class BLPAPIClient(BloombergClientBase):
                                     fe = field_exceptions.getValue(j)
                                     if fe.getElementAsString("fieldId") == field:
                                         err_info = fe.getElement("errorInfo")
-                                        raise Exception(err_info.getElementAsString("message"))
+                                        raise RuntimeError(err_info.getElementAsString("message"))
                 if event.eventType() == blpapi.Event.RESPONSE:
                     break
 

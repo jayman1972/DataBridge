@@ -1,5 +1,8 @@
 import unittest
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+from sggg import operations_reports
 from sggg.operations_reports import (
     REPORT_COUNTRY_BREAKDOWN,
     REPORT_ETFS,
@@ -46,7 +49,7 @@ class OperationsReportsParseTest(unittest.TestCase):
 
     def test_etfs_sql_uses_exact_in_list(self):
         sql = _etfs_sql(2)
-        self.assertIn("SECURITY in (?,?)", sql.replace(" ", ""))
+        self.assertIn("SECURITYin(?,?)", sql.replace(" ", ""))
         self.assertNotIn("LIKE", sql)
 
     def test_period_report_filename(self):
@@ -78,25 +81,27 @@ class OperationsReportsIncrementalTest(unittest.TestCase):
         self.assertEqual(_compact_add_days("20260331", 1), "20260401")
 
     def test_resolve_no_existing_file(self):
-        plan = resolve_incremental_query_range(
-            report_type=REPORT_COUNTRY_BREAKDOWN,
-            requested_start_compact="20180818",
-            end_compact="20260630",
-            incremental=True,
-            force_full_rebuild=False,
-        )
+        with TemporaryDirectory() as tmp, patch.object(operations_reports, "DEFAULT_OUTPUT_DIR", tmp):
+            plan = resolve_incremental_query_range(
+                report_type=REPORT_COUNTRY_BREAKDOWN,
+                requested_start_compact="20180818",
+                end_compact="20260630",
+                incremental=True,
+                force_full_rebuild=False,
+            )
         self.assertEqual(plan["query_start_compact"], "20180818")
         self.assertFalse(plan["incremental"])
 
     def test_resolve_etf_list_change_forces_full(self):
-        plan = resolve_incremental_query_range(
-            report_type=REPORT_ETFS,
-            requested_start_compact="20180818",
-            end_compact="20260630",
-            incremental=True,
-            force_full_rebuild=False,
-            etf_securities=["SPY.US"],
-        )
+        with TemporaryDirectory() as tmp, patch.object(operations_reports, "DEFAULT_OUTPUT_DIR", tmp):
+            plan = resolve_incremental_query_range(
+                report_type=REPORT_ETFS,
+                requested_start_compact="20180818",
+                end_compact="20260630",
+                incremental=True,
+                force_full_rebuild=False,
+                etf_securities=["SPY.US"],
+            )
         self.assertEqual(plan["reason"], "no_existing_file")
 
     def test_gross_pnl_sql_uses_mysql_aliases_not_sql_server_brackets(self):

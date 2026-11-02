@@ -1,15 +1,15 @@
 """Exercise the report's quote-fetch path without starting DataBridge."""
 
+from __future__ import annotations
+
 import ast
 import copy
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, List
-import unittest
 from unittest.mock import Mock
 
 from sggg.options_closeout import evaluate_expiring_itm_positions
-
 
 REPORT_DATE = "2026-10-21"
 
@@ -32,12 +32,13 @@ def load_report_quote_fetcher(client):
     )
     module = ast.Module(body=[*imports, function], type_ignores=[])
     namespace = {
-        "Dict": Dict,
-        "List": List,
+        "Dict": dict,
+        "List": list,
         "bloomberg_client": client,
         "_eastern_today_iso": lambda: REPORT_DATE,
     }
-    exec(compile(module, str(source_path), "exec"), namespace)
+    # Execute only the quote helper AST; importing DataBridge would start live integrations.
+    exec(compile(module, str(source_path), "exec"), namespace)  # noqa: S102
     return namespace["_option_underlying_quotes"]
 
 

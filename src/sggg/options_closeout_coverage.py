@@ -1,9 +1,12 @@
 """PSC coverage contract for closeout controls; no network or startup side effects."""
 
-from datetime import date
+import logging
 import math
 import time
-from typing import Callable
+from collections.abc import Callable
+from datetime import date
+
+logger = logging.getLogger(__name__)
 
 
 def load_start_positions(cursor, portfolios: list[str], report_date: str,
@@ -60,6 +63,7 @@ def load_start_positions(cursor, portfolios: list[str], report_date: str,
                 by_portfolio = per_security.setdefault(security, {})
                 by_portfolio[portfolio] = by_portfolio.get(portfolio, 0.0) + quantity
         except Exception as error:
+            logger.debug("Could not load PSC starting positions for %s", portfolio, exc_info=True)
             item["status"] = "incomplete"
             coverage["issues"].append(f"{portfolio}: {error}")
     for security, holdings in per_security.items():

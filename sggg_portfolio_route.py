@@ -13,12 +13,15 @@ Option B - Copy the sggg_portfolio function and this route into your main app:
 Requires: OpenVPN connected, pyodbc, ODBC DSN=PSC_VIEWER.
 """
 
+import logging
 import os
 import traceback
-from datetime import datetime
-from flask import Blueprint, request, jsonify
+from datetime import datetime, timezone
+
+from flask import Blueprint, jsonify, request
 
 sggg_bp = Blueprint("sggg", __name__)
+logger = logging.getLogger(__name__)
 
 
 @sggg_bp.route("/sggg/portfolio", methods=["GET", "POST"])
@@ -33,7 +36,7 @@ def sggg_portfolio():
         if query_date:
             query_date = str(query_date).replace("-", "").replace("/", "")[:8]
         else:
-            query_date = datetime.now().strftime("%Y%m%d")
+            query_date = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d")
 
         try:
             import pyodbc
@@ -136,6 +139,7 @@ def sggg_portfolio():
             "positions": positions,
         })
     except Exception as e:
+        logger.exception("Could not fetch SGGG portfolio")
         traceback.print_exc()
         return jsonify({
             "error": str(e),

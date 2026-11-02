@@ -5,8 +5,10 @@ Used by /clarifi/process and /ehp/process endpoints.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -124,8 +126,9 @@ def process_clarifi_file(file_path: Path, supabase_client) -> dict[str, Any]:
     try:
         rows = []
         if 'oildemand' in file_name_lower:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+            received_at = datetime.now(timezone.utc).isoformat()
+            file_text = file_path.read_text(encoding='utf-8')
+            lines = file_text.splitlines()
             if len(lines) < 7:
                 result["errors"].append("OilDemand.csv file too short")
                 return result
@@ -147,7 +150,7 @@ def process_clarifi_file(file_path: Path, supabase_client) -> dict[str, Any]:
                         current_value += char
                 values.append(current_value.strip().replace('"', ''))
                 if len(values) != len(headers):
-                    continue
+                    raise ValueError("Oil Demand contains a malformed observation")
                 row = {}
                 for j, header in enumerate(headers):
                     value = values[j]
@@ -166,6 +169,28 @@ def process_clarifi_file(file_path: Path, supabase_client) -> dict[str, Any]:
             rows = parse_delimited_file(file_path, delimiter)
         if not rows:
             result["errors"].append("No data rows found")
+            return result
+        if 'oildemand' in file_name_lower:
+            records = []
+            dates = set()
+            for row in rows:
+                date = normalize_date(str(row.get("date") or row.get("dates") or ""))
+                value = row.get("px_last")
+                if not date or date in dates or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ValueError("Oil Demand contains invalid or duplicate observations")
+                dates.add(date)
+                records.append({"date": date, "oil_supply_demand_index": value})
+            response = supabase_client.rpc("ingest_oil_demand_delivery", {
+                "p_records": records,
+                "p_source_file": str(file_path),
+                "p_file_text": file_text,
+                "p_received_at": received_at,
+            }).execute()
+            delivery = response.data
+            if not isinstance(delivery, dict) or "versions" not in delivery:
+                raise ValueError("Oil Demand delivery was not acknowledged")
+            result["inserted"] = delivery.get("raw_changed", 0)
+            result["oil_delivery"] = delivery
             return result
         existing_dates_map = {}
         for db_column in column_mappings.values():

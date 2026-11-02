@@ -1,5 +1,13 @@
 # HAL maintenance caller (Jason-W11)
 
+Oil deliveries processed by DataBridge use `ingest_oil_demand_delivery`: the complete
+CSV is archived, today's observation is preliminary, and prior observations are
+closing revisions. Existing dates are not skipped. Actual import time determines
+same-close eligibility; late imports are never backdated to the usual delivery time.
+RPC failure fails the import without falling back to unversioned market-data writes.
+Replaying the same file on the same delivery date is idempotent. No caller or
+`C:\Tasks` schedule changes are required.
+
 After the existing attachment automation saves and verifies Greg's `OilDemand.csv`, call:
 
 ```powershell

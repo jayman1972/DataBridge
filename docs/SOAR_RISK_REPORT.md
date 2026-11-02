@@ -55,6 +55,10 @@ Diamond can return a later valuation period than the requested Friday or
 delay finalizing it. An unfinalized Friday is treated as a holiday only when
 Bloomberg's nearby TSX closes confirm the Canadian market was shut that day;
 otherwise the worker retries. The report uses Friday's exact NAV strike or
-the latest exact strike earlier that week when Friday had no strike. It never
-mixes NAV from one date with positions, trades, and risk data from another.
-Month-end delays should be monitored in the bridge log.
+the latest exact strike earlier that week when Friday had no strike. When a
+Saturday or Sunday is the calendar month-end, Diamond may label a portfolio
+requested for Friday with that weekend month-end date. The report accepts that
+label only for the immediately preceding Friday and only when every nonzero
+position is priced on the Friday NAV date. A Thursday request, another future
+portfolio date, or stale position prices still fails. Month-end delays should
+be monitored in the bridge log.

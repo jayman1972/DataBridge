@@ -290,10 +290,24 @@ def _psc_weekly_trades(connection: Any, as_of: date) -> list[dict[str, Any]]:
     return trades
 
 
+def _portfolio_date_matches_report(report_date: date, portfolio_date: date) -> bool:
+    """Allow Diamond's calendar month-end label for a Friday-priced portfolio."""
+    if portfolio_date == report_date:
+        return True
+    return (
+        report_date.weekday() == 4
+        and portfolio_date.weekday() in (5, 6)
+        and (portfolio_date - report_date).days in (1, 2)
+        and (portfolio_date + timedelta(days=1)).day == 1
+    )
+
+
 def _diamond_holdings(client: Any, as_of: date, nav: float) -> list[dict[str, Any]]:
     response = client.get_portfolio(SOAR_PARENT_ID, as_of.isoformat())
     body = response.get("GetPortfolioResponse") if isinstance(response, dict) else None
-    if not isinstance(body, dict) or parse_iso_date(body.get("ValuationDate")) != as_of:
+    if not isinstance(body, dict) or not _portfolio_date_matches_report(
+        as_of, parse_iso_date(body.get("ValuationDate"))
+    ):
         raise ValueError("Diamond portfolio date does not match the report date")
     holdings = []
     for row in body.get("PortfolioRecordDetails") or []:

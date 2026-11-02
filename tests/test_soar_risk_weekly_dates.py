@@ -13,12 +13,62 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sggg.diamond_client import DiamondNavUnavailableError
 from sggg.soar_risk_data import (
     DiamondValuationDateMismatch,
+    _diamond_holdings,
     _valuation_dates_after_handoff,
     weekly_position_date,
 )
 
 
 class SoarWeeklyDateTests(unittest.TestCase):
+    def test_weekend_month_end_portfolio_uses_friday_prices(self) -> None:
+        for friday, month_end in (
+            (date(2026, 10, 30), date(2026, 10, 31)),
+            (date(2026, 5, 29), date(2026, 5, 31)),
+        ):
+            with self.subTest(month_end=month_end):
+                client = Mock()
+                client.get_portfolio.return_value = {
+                    "GetPortfolioResponse": {
+                        "ValuationDate": month_end.isoformat(),
+                        "PortfolioRecordDetails": [{
+                            "BaseMarketValue": 100.0,
+                            "PricingTicker": "SPY US",
+                            "QuoteDate": friday.isoformat(),
+                            "SecurityName": "SPY",
+                            "Quantity": 1,
+                        }],
+                    }
+                }
+                holdings = _diamond_holdings(client, friday, 1_000.0)
+                self.assertEqual(holdings[0]["symbol"], "SPY.US")
+                self.assertEqual(holdings[0]["weight"], 0.1)
+                client.get_portfolio.assert_called_once_with(
+                    "41010000-7f79-9c86-0bd2-45484608d9e1", friday.isoformat()
+                )
+
+    def test_weekend_month_end_does_not_allow_stale_prices_or_other_report_dates(self) -> None:
+        client = Mock()
+        client.get_portfolio.return_value = {
+            "GetPortfolioResponse": {
+                "ValuationDate": "2026-10-31",
+                "PortfolioRecordDetails": [{
+                    "BaseMarketValue": 100.0,
+                    "PricingTicker": "SPY US",
+                    "QuoteDate": "2026-10-29",
+                    "SecurityName": "SPY",
+                    "Quantity": 1,
+                }],
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "date does not match"):
+            _diamond_holdings(client, date(2026, 10, 29), 1_000.0)
+        with self.assertRaisesRegex(ValueError, "Stale Diamond price"):
+            _diamond_holdings(client, date(2026, 10, 30), 1_000.0)
+
+        client.get_portfolio.return_value["GetPortfolioResponse"]["ValuationDate"] = "2026-11-07"
+        with self.assertRaisesRegex(ValueError, "date does not match"):
+            _diamond_holdings(client, date(2026, 11, 6), 1_000.0)
+
     def test_normal_friday_wins_over_midweek_month_end(self) -> None:
         friday = date(2026, 10, 2)
         with patch("sggg.soar_risk_data._class_b_nav", return_value=({}, {})) as nav:

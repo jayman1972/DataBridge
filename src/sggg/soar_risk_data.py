@@ -261,17 +261,19 @@ def is_fx_trade(symbol: str, description: str = "", bbg_ticker: str = "") -> boo
 def _psc_weekly_trades(connection: Any, as_of: date) -> list[dict[str, Any]]:
     query = """
         SELECT TRADE_DATE_INT, SECURITY, DESCRIPTION, `ORDER`, FILLED_QTTY,
-               PRICE, BBG_TICKER
+               PRICE, BBG_TICKER, STRATEGY
         FROM psc_filled_orders
-        WHERE TRADE_DATE_INT BETWEEN ? AND ? AND ACCOUNT_NAME = ?
+        WHERE TRADE_DATE_INT BETWEEN ? AND ? AND ACCOUNT_NAME = ? AND STRATEGY = ?
         ORDER BY TRADE_DATE_INT, SECURITY_SN
     """
     rows = connection.cursor().execute(
         query, int(week_start(as_of).strftime("%Y%m%d")),
-        int(as_of.strftime("%Y%m%d")), "BNS-SOAR LS",
+        int(as_of.strftime("%Y%m%d")), "BNS-SOAR LS", "SOAR",
     ).fetchall()
     trades = []
-    for raw_day, symbol, description, side, shares, price, ticker in rows:
+    for raw_day, symbol, description, side, shares, price, ticker, strategy in rows:
+        if str(strategy or "").strip() != "SOAR":
+            continue
         symbol_text = str(symbol or "").strip()
         if is_fx_trade(symbol_text, str(description or ""), str(ticker or "")):
             continue
@@ -286,7 +288,7 @@ def _psc_weekly_trades(connection: Any, as_of: date) -> list[dict[str, Any]]:
             }
         )
     if len(trades) > 22:
-        raise ValueError("More than 22 non-FX trades; the reference page would overflow")
+        raise ValueError("More than 22 non-FX SOAR trades; the reference page would overflow")
     return trades
 
 
@@ -598,7 +600,7 @@ def collect_soar_risk_report(
         "sources": {
             "nav": "Diamond GetNAVSheet parent SOAR / Class B 950B",
             "positions": "Diamond GetPortfolio",
-            "trades": "PSC BNS-SOAR LS filled orders, non-FX",
+            "trades": "PSC BNS-SOAR LS filled orders, SOAR strategy only, non-FX",
             "var": "PSC daily P&L / (prior NAV + transfers), trailing 365 days",
             "model": "Legacy TXT through 2026-10-16; user bridge through 2026-10-23; production reference portfolio thereafter",
         },

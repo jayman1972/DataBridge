@@ -30,8 +30,9 @@ does not execute the Excel workbook. Its sources and calculation rules are:
 
 - Fund NAV, Class B (950B) NAV per unit, period performance, and ETF positions:
   Diamond SOAR parent `41010000-7f79-9c86-0bd2-45484608d9e1`.
-- Weekly filled trades: PSC account `BNS-SOAR LS`. Cash and CAD/USD spot and
-  forward entries are excluded from the table.
+- Weekly filled trades: PSC account `BNS-SOAR LS`, booked to strategy `SOAR`
+  only. Other strategies (including Risk Arbitrage), blank strategy labels,
+  cash and CAD/USD spot and forward entries are excluded from the table.
 - Realized daily return and one-day 95% historical VaR: PSC daily P&L divided
   by prior NAV plus transfers, using the empirical fifth percentile of a full
   trailing year with at least 240 daily observations. The old manually entered

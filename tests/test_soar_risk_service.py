@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import pyodbc
 from flask import Flask
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -59,6 +60,23 @@ class SoarRiskServiceTests(unittest.TestCase):
             )
             generate.assert_not_called()
         self.assertEqual(response.status_code, 422)
+
+    def test_route_explains_alphadesk_connection_failure(self) -> None:
+        with (
+            patch("sggg.soar_risk_service.get_diamond_client", return_value=object()),
+            patch("sggg.soar_risk_service.weekly_position_date", return_value=REPORT_DATE),
+            patch("sggg.soar_risk_service.pyodbc.connect", side_effect=pyodbc.Error("private host timed out")),
+            self.assertLogs(level="ERROR"),
+        ):
+            response = self.client.post(
+                "/sggg/risk-reports/soar",
+                headers={"Authorization": "Bearer test-key"},
+                json={"as_of": REPORT_DATE.isoformat()},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("AlphaDesk (PSC)", response.json["error"])
+        self.assertIn("check the PSC connection in DataBridge", response.json["error"])
+        self.assertNotIn("private host", response.json["error"])
 
     def test_holiday_week_uses_actual_position_date_for_pdf_and_save(self) -> None:
         report = {

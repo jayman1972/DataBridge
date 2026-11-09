@@ -123,6 +123,14 @@ def register_soar_risk_routes(
             return jsonify({"error": str(exc)}), 422
         except FileExistsError as exc:
             return jsonify({"error": str(exc)}), 409
+        except pyodbc.Error:
+            app.logger.exception("SOAR risk report could not load AlphaDesk data for %s", as_of)
+            return jsonify({
+                "error": (
+                    "Could not load SOAR trades and daily P&L from AlphaDesk (PSC). "
+                    "Try again in a minute. If it still fails, check the PSC connection in DataBridge."
+                ),
+            }), 503
         except Exception as exc:
             app.logger.exception("SOAR risk report failed")
             return jsonify({"error": f"SOAR risk report failed: {type(exc).__name__}"}), 500

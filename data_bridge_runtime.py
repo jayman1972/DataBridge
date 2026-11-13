@@ -13,10 +13,12 @@ from bloomberg.etf_constituents import (
     normalize_etf_tickers,
 )
 from sggg.fund_capital import register_fund_capital_routes
+from sggg.non_option_tax import register_non_option_tax_routes
 from sggg.production_routes import register_sggg_production_routes
 from sggg.soar_risk_service import register_soar_risk_routes, start_soar_risk_scheduler
 
-data_bridge.DATA_BRIDGE_BUILD = "2026-11-13-futures-option-bloomberg-scope"
+data_bridge.DATA_BRIDGE_BUILD = "2026-11-13-non-option-tax"
+register_non_option_tax_routes(data_bridge.app, bridge=data_bridge)
 register_fund_capital_routes(data_bridge.app, service_key=data_bridge.SUPABASE_KEY)
 register_sggg_production_routes(
     data_bridge.app,

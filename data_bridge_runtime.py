@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from flask import jsonify, request
 
@@ -16,7 +16,7 @@ from sggg.fund_capital import register_fund_capital_routes
 from sggg.production_routes import register_sggg_production_routes
 from sggg.soar_risk_service import register_soar_risk_routes, start_soar_risk_scheduler
 
-data_bridge.DATA_BRIDGE_BUILD = "2026-10-29-reviewed-trade-csv-save"
+data_bridge.DATA_BRIDGE_BUILD = "2026-11-13-futures-option-bloomberg-scope"
 register_fund_capital_routes(data_bridge.app, service_key=data_bridge.SUPABASE_KEY)
 register_sggg_production_routes(
     data_bridge.app,
@@ -53,7 +53,7 @@ def bloomberg_etf_constituents():
         as_of_date = (
             date.fromisoformat(as_of_raw)
             if as_of_raw
-            else datetime.now(timezone.utc).date()
+            else datetime.now(UTC).date()
         )
     except (TypeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400

@@ -22,8 +22,8 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime, timedelta
 from datetime import date as date_type
-from datetime import datetime, timedelta, timezone
 from datetime import time as dt_time
 from pathlib import Path
 from typing import Any
@@ -698,7 +698,7 @@ def bloomberg_update():
         
         # Default to today if not specified
         if not to_date:
-            to_date = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+            to_date = datetime.now(UTC).astimezone().strftime("%Y-%m-%d")
         if not from_date:
             # Default to 1983-01-01 if no from_date
             from_date = "1983-01-01"
@@ -1185,7 +1185,7 @@ def reference():
         # Update expects reference_data[ticker] = [row] (array of rows)
         reference_data = {}
         errors = []
-        today = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+        today = datetime.now(UTC).astimezone().strftime("%Y-%m-%d")
         for ticker, row in ref_data.items():
             if "error" in row:
                 errors.append(f"{ticker}: {row['error']}")
@@ -1214,7 +1214,7 @@ def refresh_bloomberg_merger_actions():
             except ValueError:
                 return jsonify({"error": "asOf must use YYYY-MM-DD"}), 400
         else:
-            as_of_date = datetime.now(timezone.utc).astimezone().date()
+            as_of_date = datetime.now(UTC).astimezone().date()
 
         try:
             batch_size = int(data.get("batchSize", 50))
@@ -1345,7 +1345,7 @@ def corporate_actions():
     if not fields:
         return jsonify({"error": "at least one field is required"}), 400
 
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
     start_date_raw = str(data.get("start_date") or (today - timedelta(days=45)))
     end_date_raw = str(data.get("end_date") or (today + timedelta(days=45)))
     try:
@@ -1512,7 +1512,7 @@ def sggg_portfolio():
         if query_date:
             query_date = query_date.replace("-", "")[:8]
         else:
-            query_date = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d")
+            query_date = datetime.now(UTC).astimezone().strftime("%Y%m%d")
         if not re.fullmatch(r"\d{8}", query_date):
             return jsonify({"error": "Invalid PSC portfolio date (expected YYYYMMDD)"}), 400
         try:
@@ -1800,6 +1800,8 @@ def sggg_options_tax_reconciliation():
     Returns:
       { portfolio, start_date, end_date, option_trades: [...], position_history: [...] }
     """
+    from sggg.options_tax_scope import OPTION_TRADE_SCOPE
+
     data = request.get_json(silent=True) or {}
     fund_name = (data.get("fund_name") or "").strip() or None
     portfolio = _psc_portfolio_from_request(data)
@@ -1836,7 +1838,7 @@ def sggg_options_tax_reconciliation():
             "FROM psc_filled_orders "
             "WHERE TRADE_DATE_INT BETWEEN ? AND ? "
             "AND PORTFOLIO = ? "
-            "AND SECURITY_TYPE = 'EquityOption' "
+            f"AND {OPTION_TRADE_SCOPE} "
             "ORDER BY ORDER_ID, TRADE_DATE_INT, SECURITY, PORTFOLIO, STRATEGY"
         )
         # If PSC has an option delta column, include it. Some environments don't, so we fall back gracefully.
@@ -1873,7 +1875,7 @@ def sggg_options_tax_reconciliation():
                 "SELECT DISTINCT PORTFOLIO "
                 "FROM psc_filled_orders "
                 "WHERE TRADE_DATE_INT BETWEEN ? AND ? "
-                "AND SECURITY_TYPE = 'EquityOption' "
+                f"AND {OPTION_TRADE_SCOPE} "
                 "AND PORTFOLIO LIKE ? "
                 "ORDER BY PORTFOLIO "
                 "LIMIT 10"
@@ -2508,7 +2510,7 @@ def _eastern_now() -> datetime:
         return datetime.now(ZoneInfo("America/New_York"))
     if HAS_PYTZ:
         return datetime.now(pytz.timezone("America/New_York"))
-    return datetime.now(timezone.utc).astimezone()
+    return datetime.now(UTC).astimezone()
 
 
 def _run_scheduled_options_closeout_alert(report_date: str) -> dict:
@@ -2543,7 +2545,7 @@ def _run_scheduled_options_closeout_alert(report_date: str) -> dict:
         },
         json={
             "report_date": report_date,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             "flagged_groups": flagged_groups,
             "report_url": "https://market-macro-studio.lovable.app/sggg/options-closeout-check",
         },
@@ -2621,7 +2623,7 @@ def emsx_options_closeout_check():
     # Explicitly handle CORS preflight (ngrok/browser can be strict).
     if request.method == "OPTIONS":
         return ("", 204)
-    date_iso = _compact_to_ymd(data.get("date") or "") or datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+    date_iso = _compact_to_ymd(data.get("date") or "") or datetime.now(UTC).astimezone().strftime("%Y-%m-%d")
     try:
         allow_psc_fallback = bool(data.get("allow_psc_fallback") is True)
         uuids = data.get("uuids")
@@ -2864,7 +2866,7 @@ def sggg_diamond_portfolio():
         fetch_all = request.args.get("all", "").lower() in ("1", "true", "yes") or data.get("all") is True
         valuation_date = request.args.get("date") or request.args.get("valuation_date") or data.get("date") or data.get("valuation_date")
         if not valuation_date:
-            valuation_date = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+            valuation_date = datetime.now(UTC).astimezone().strftime("%Y-%m-%d")
         else:
             valuation_date = valuation_date.replace("-", "")[:8]
             valuation_date = f"{valuation_date[:4]}-{valuation_date[4:6]}-{valuation_date[6:8]}"
@@ -2950,7 +2952,7 @@ def sggg_diamond_nav_sheet():
             or data.get("valuation_date")
         )
         if not raw_date:
-            raw_date = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+            raw_date = datetime.now(UTC).astimezone().strftime("%Y-%m-%d")
         valuation_date = normalize_valuation_date(str(raw_date))
         raw = client.get_nav_sheet(fund_id=fund_id, valuation_date=valuation_date)
         summary = parse_nav_sheet_summary(raw)
@@ -3292,7 +3294,7 @@ def sggg_diamond_nav_availability():
             or data.get("valuation_date")
         )
         if not raw_date:
-            raw_date = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+            raw_date = datetime.now(UTC).astimezone().strftime("%Y-%m-%d")
         valuation_date = normalize_valuation_date(str(raw_date))
 
         funds_in = data.get("funds")
@@ -4203,7 +4205,7 @@ def economic_calendar():
             )
         
         # Date range: today to today + 365 days
-        today = datetime.now(timezone.utc).astimezone().date()
+        today = datetime.now(UTC).astimezone().date()
         end_date = today + timedelta(days=365)
         today_str = today.strftime("%Y%m%d")
         end_date_str = end_date.strftime("%Y%m%d")
@@ -4476,7 +4478,7 @@ def economic_calendar():
                                                 is_future_event = True
                                         else:
                                             # Fallback: use local time (assumes system is in Eastern Time)
-                                            now = datetime.now(timezone.utc).astimezone()
+                                            now = datetime.now(UTC).astimezone()
                                             current_hour = now.hour
                                             current_minute = now.minute
                                             if current_hour < release_hour or (current_hour == release_hour and current_minute < release_minute):
@@ -4712,7 +4714,7 @@ def clarifi_list():
     files = []
     for p in clarifi_path.glob("*.txt"):
         if 'macrodataexport' in p.name.lower() or 'diffusionindexexport' in p.name.lower():
-            files.append({"name": p.name, "size": p.stat().st_size, "modified": datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).astimezone().isoformat()})
+            files.append({"name": p.name, "size": p.stat().st_size, "modified": datetime.fromtimestamp(p.stat().st_mtime, tz=UTC).astimezone().isoformat()})
     return jsonify({"files": files}), 200
 
 

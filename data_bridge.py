@@ -98,6 +98,7 @@ from sggg.operations_reports import (
     run_operations_report,
 )
 from sggg.options_closeout import (
+    canonical_futures_option_key,
     evaluate_expiring_itm_positions,
     format_option_contract,
     parse_option_contract,
@@ -2043,6 +2044,11 @@ def _emsx_history_get_fills(
                         yellow_key = _get("YellowKey") or ""
                         asset_class = _get("AssetClass") or ""
                         sec_type = _get("Type") or ""  # often maps to the EMSX "Sec Type" column
+                        ticker = (_get("Ticker") or "").strip()
+                        bloomberg_ticker = ticker
+                        if ticker and yellow_key and not re.search(r"\b(?:Equity|Index|Comdty)$", ticker, re.IGNORECASE):
+                            bloomberg_ticker = f"{ticker} {yellow_key}"
+                        ticker_key = _canonical_option_key(bloomberg_ticker)
                         # Keep EMSX-provided side verbatim; for options it may already be "Sell to Open"/etc.
                         side_raw = (_get("Side") or "").strip()
                         side = side_raw.upper()
@@ -2064,11 +2070,12 @@ def _emsx_history_get_fills(
 
                         # Determine if this fill is for an option.
                         # Be strict and structural: keep only rows that are definitively options, either:
+                        # - a parsed Bloomberg option ticker (futures options can have blank name/OCC fields),
                         # - OCC-style symbology (in OCCSymbol OR sometimes SecurityName), or
                         # - EMSX formatted option SecurityName (MM/DD/YY Pxxx / Cxxx).
                         # This avoids false positives where EMSX metadata labels equity/future rows oddly.
                         occ_candidate = (occ or "").strip() or security_name.strip()
-                        is_option = bool(_format_occ(occ_candidate)) or _looks_like_option_name(security_name)
+                        is_option = ticker_key is not None or bool(_format_occ(occ_candidate)) or _looks_like_option_name(security_name)
                         if not is_option:
                             filtered_out_count += 1
                             if len(filtered_out) < 25:
@@ -2084,10 +2091,11 @@ def _emsx_history_get_fills(
                             continue
 
                         # Sometimes OCCSymbol isn't populated, but SecurityName is an OCC-style string. Try both.
-                        display = security_name.strip() if _looks_like_option_name(security_name) else (_format_occ(occ_candidate) or security_name.strip() or occ.strip())
-                        # Use a stable key for grouping: canonicalize so it matches PSC symbols too.
+                        display = security_name.strip() if _looks_like_option_name(security_name) else (_format_occ(occ_candidate) or security_name.strip() or occ.strip() or ticker_key)
+                        # Match PSC's BBG_TICKER first; descriptions/OCC are fallbacks only.
                         security_key = (
-                            _canonical_option_key(occ.strip())
+                            ticker_key
+                            or _canonical_option_key(occ.strip())
                             or _canonical_option_key(occ_candidate)
                             or occ.strip()
                             or (occ_candidate.strip() if _format_occ(occ_candidate) else display)
@@ -2140,6 +2148,9 @@ def _canonical_option_key(sym: str) -> str | None:
     s = (sym or "").strip().upper()
     if not s:
         return None
+    futures_key = canonical_futures_option_key(s)
+    if futures_key:
+        return futures_key
     # PSC sometimes appends market/asset suffixes. Strip common noise.
     s = re.sub(r"\bEQUITY\b", "", s)
     s = re.sub(r"\bUS\b", "", s)
@@ -2645,7 +2656,7 @@ def emsx_options_closeout_check():
             portfolio = _psc_portfolio_from_request(data)
             portfolios = [portfolio] if portfolio else list(PSC_ALL_FUNDS_PORTFOLIOS)
             minimum_snapshot_date = data.get("required_start_positions_date") or None
-            cache_key = f"v3|{date_iso}|{minimum_snapshot_date or ''}|{','.join(portfolios)}"
+            cache_key = f"v4-bbg|{date_iso}|{minimum_snapshot_date or ''}|{','.join(portfolios)}"
             # Scheduled controls probe each portfolio on every check; interactive
             # reruns may reuse a complete same-day PSC snapshot and its coverage.
             cached = _PSC_START_POS_CACHE_META.get(cache_key) or {}

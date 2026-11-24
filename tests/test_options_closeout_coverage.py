@@ -12,6 +12,7 @@ from typing import Optional
 from unittest.mock import MagicMock, patch
 
 from sggg.options_closeout import (
+    canonical_futures_option_key,
     format_option_contract,
     parse_option_contract,
     select_live_underlying_quote,
@@ -29,6 +30,7 @@ def legacy_helpers():
             n.decorator_list = []
     module = ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names], type_ignores=[])
     namespace = {"re": re, "time": time, "List": list, "Dict": dict, "Optional": Optional,
+                 "canonical_futures_option_key": canonical_futures_option_key,
                  "format_option_contract": format_option_contract, "datetime": datetime,
                  "_logger": logging.getLogger("data_bridge.test")}
     # Execute only selected AST definitions; importing DataBridge would start live integrations.
@@ -121,7 +123,7 @@ class CloseoutCoverageTest(unittest.TestCase):
 
     def test_unidentified_long_and_short_holdings_are_flagged_without_fills(self):
         analyze = self.helpers["_options_closeout_analyze"]
-        for net in (3, -4):
+        for net in (1, 3, -4):
             with self.subTest(net=net):
                 security = "NSD100 EMIN WK4 O NOV26P 25500"
                 analysis = analyze([], {security: net})

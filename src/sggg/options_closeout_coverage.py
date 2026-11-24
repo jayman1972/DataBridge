@@ -44,14 +44,15 @@ def load_start_positions(cursor, portfolios: list[str], report_date: str,
                 coverage["issues"].append(f"{portfolio}: PSC snapshot predates required prior US session {minimum_snapshot_date}")
             if time.monotonic() >= deadline:
                 raise TimeoutError("PSC closeout coverage query budget exhausted")
-            cursor.execute("SELECT DESCRIPTION, LONG_SHORT, QUANTITY FROM psc_position_history "
+            cursor.execute("SELECT DESCRIPTION, LONG_SHORT, QUANTITY, BBG_TICKER FROM psc_position_history "
                            "WHERE PORTFOLIO = ? AND POSN_DATE = ? "
                            "AND SECURITY_TYPE IN ('EquityOption','Equity Option')", (portfolio, snapshot))
             rows = cursor.fetchall()
             item["option_lines"] = len(rows)
             for row in rows:
                 raw = str(row[0] or "").strip()
-                security = canonicalize(raw)
+                bloomberg_ticker = str(row[3] or "").strip() if len(row) > 3 else ""
+                security = canonicalize(bloomberg_ticker) or canonicalize(raw)
                 if not security:
                     security = normalize(raw) or raw.upper()
                     coverage["issues"].append(f"{portfolio}: option contract could not be parsed: {raw}")
@@ -90,8 +91,9 @@ def finish_coverage(coverage: dict, analysis: dict, parse_contract: Callable,
             if not security or not math.isfinite(net) or abs(net) <= 1e-9:
                 continue
             side = "Long" if net > 0 else "Short"
+            holding = "contract remains" if abs(net) == 1 else "contracts remain"
             reason = (
-                f"Unidentified option: {side.lower()} {abs(net):g} contracts remain "
+                f"Unidentified option: {side.lower()} {abs(net):g} {holding} "
                 f"(net {net:g}). Verify whether this position should be flat; "
                 "expiry and exercise/assignment risk could not be determined."
             )

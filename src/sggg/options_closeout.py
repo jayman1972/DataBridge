@@ -5,12 +5,27 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable
+from decimal import Decimal
 from typing import Any
 
 _OCC_OPTION_RE = re.compile(
     r"^([A-Z0-9]{1,6})\s*(\d{2})(\d{2})(\d{2})([CP])(\d{8})$",
     re.IGNORECASE,
 )
+
+
+def canonical_futures_option_key(value: Any) -> str | None:
+    """Identify a Bloomberg futures option without inferring its technical expiry."""
+    text = re.sub(r"\s+", " ", str(value or "").strip().upper())
+    match = re.fullmatch(
+        r"(?P<root>[A-Z0-9]+[FGHJKMNQUVXZ]\d{1,2})(?P<pc>[CP])(?P<week>\d?) "
+        r"(?P<prefix>[CP]?)(?P<strike>\d+(?:\.\d+)?) (?P<key>INDEX|COMDTY)",
+        text,
+    )
+    if not match or (match["prefix"] and match["prefix"] != match["pc"]):
+        return None
+    strike = format(Decimal(match["strike"]).normalize(), "f")
+    return f"{match['root']}{match['pc']}{match['week']} {strike} {match['key']}"
 
 
 def parse_option_contract(value: Any) -> dict[str, Any] | None:

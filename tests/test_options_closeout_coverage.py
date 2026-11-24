@@ -119,6 +119,59 @@ class CloseoutCoverageTest(unittest.TestCase):
         self.assertEqual(report["groups"][0]["trades_count"], 0)
         self.assertEqual(report["groups"][0]["net_end"], 2)
 
+    def test_unidentified_long_and_short_holdings_are_flagged_without_fills(self):
+        analyze = self.helpers["_options_closeout_analyze"]
+        for net in (3, -4):
+            with self.subTest(net=net):
+                security = "NSD100 EMIN WK4 O NOV26P 25500"
+                analysis = analyze([], {security: net})
+                coverage = {"status": "complete", "issues": [], "portfolios": []}
+                result = finish_coverage(coverage, analysis, parse_option_contract, "complete")
+                group = analysis["groups"][0]
+                self.assertEqual(group["net_end"], net)
+                self.assertEqual(group["trades_count"], 0)
+                self.assertEqual(group["flags_count"], 1)
+                self.assertIn(f"net {net}", group["position_warnings"][0])
+                self.assertIn("should be flat", group["position_warnings"][0])
+                self.assertNotIn("auto_exercise_risk", group)
+                self.assertEqual(result["status"], "incomplete")
+                finish_coverage(result, analysis, parse_option_contract, "complete")
+                self.assertEqual(group["flags_count"], 1)
+                self.assertEqual(len(group["position_warnings"]), 1)
+
+    def test_unidentified_final_balance_includes_today_fills(self):
+        security = "EMINI SP M WEEK O NOV26C 7195"
+        for closed, remaining in ((7, 3), (10, 0)):
+            with self.subTest(closed=closed):
+                analysis = self.helpers["_options_closeout_analyze"]([
+                    {"SECURITY": security, "ORDER_ID": "1", "ORDER_ACTION": "S", "ACT_QTTY": closed},
+                ], {security: 10})
+                finish_coverage({"issues": []}, analysis, parse_option_contract, "complete")
+                group = analysis["groups"][0]
+                self.assertEqual(group["net_end"], remaining)
+                self.assertEqual(group["flags_count"], int(remaining != 0))
+                self.assertEqual(len(group.get("position_warnings", [])), int(remaining != 0))
+
+    def test_known_open_contract_does_not_get_unidentified_warning(self):
+        analysis = self.helpers["_options_closeout_analyze"]([], {"SPY261014C00100000": 3})
+        finish_coverage({"issues": []}, analysis, parse_option_contract, "complete")
+        self.assertEqual(analysis["groups"][0]["flags_count"], 0)
+        self.assertNotIn("position_warnings", analysis["groups"][0])
+
+    def test_actual_endpoint_returns_unidentified_holding_flag_and_keeps_coverage_warning(self):
+        ns = self.endpoint_namespace()
+        security = "EMINI NA100 MON WKNOV26P 26500"
+        cursor = Cursor({"Growth": [(security, "S", -5)]})
+        connection = SimpleNamespace(cursor=lambda: cursor, close=lambda: None)
+        ns["_pyodbc_or_503"] = lambda: (SimpleNamespace(connect=lambda *a, **kw: connection), None)
+        result, status = ns["emsx_options_closeout_check"]()
+        self.assertEqual(status, 200)
+        self.assertEqual(result["coverage"]["status"], "incomplete")
+        self.assertEqual(result["groups"][0]["flags_count"], 1)
+        self.assertEqual(result["groups"][0]["net_end"], -5)
+        self.assertIn("short 5 contracts", result["groups"][0]["position_warnings"][0])
+        self.assertEqual(result["exercise_risks"], [])
+
     def test_actual_analyzer_preserves_ibit_and_qqq_zero_end_action_flags(self):
         analyze = self.helpers["_options_closeout_analyze"]
         fills = [

@@ -40,6 +40,16 @@ class OptionsCloseoutAlertTest(unittest.TestCase):
         self.assertEqual(len(flagged), 1)
         self.assertEqual(flagged[0]["reasons"], ["Wrong close action", "Expires today ITM"])
 
+    def test_includes_unidentified_holding_reason_without_fabricating_trade_flags(self):
+        reason = "Unidentified option: short 5 contracts remain (net -5). Verify whether this position should be flat."
+        report = {"trades": [], "groups": [{
+            "security": "EMINI NA100 MON WKNOV26P 26500", "net_end": -5,
+            "flags_count": 1, "position_warnings": [reason, reason],
+        }]}
+        flagged = collect_flagged_groups(report)
+        self.assertEqual(flagged[0]["net_end"], -5)
+        self.assertEqual(flagged[0]["reasons"], [reason])
+
 
 if __name__ == "__main__":
     unittest.main()

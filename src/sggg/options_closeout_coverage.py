@@ -77,10 +77,35 @@ def load_start_positions(cursor, portfolios: list[str], report_date: str,
 
 def finish_coverage(coverage: dict, analysis: dict, parse_contract: Callable,
                     exercise_status: str) -> dict:
+    """Finish coverage and flag unidentified holdings on the returned report groups."""
     result = {**coverage, "issues": list(coverage.get("issues") or [])}
     for position in analysis.get("open_positions") or []:
-        if not parse_contract(position.get("security")):
-            result["issues"].append(f"Open option contract could not be parsed: {position.get('security')}")
+        security = position.get("security")
+        if not parse_contract(security):
+            result["issues"].append(f"Open option contract could not be parsed: {security}")
+            try:
+                net = float(position.get("net_contracts") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not security or not math.isfinite(net) or abs(net) <= 1e-9:
+                continue
+            side = "Long" if net > 0 else "Short"
+            reason = (
+                f"Unidentified option: {side.lower()} {abs(net):g} contracts remain "
+                f"(net {net:g}). Verify whether this position should be flat; "
+                "expiry and exercise/assignment risk could not be determined."
+            )
+            groups = analysis.setdefault("groups", [])
+            group = next((item for item in groups if item.get("security") == security), None)
+            if group is None:
+                group = {"group_id": security, "security": security,
+                         "security_display": security, "net_end": net, "is_open": True,
+                         "flags_count": 0, "trades_count": position.get("trades_count", 0)}
+                groups.append(group)
+            warnings = group.setdefault("position_warnings", [])
+            if reason not in warnings:
+                warnings.append(reason)
+                group["flags_count"] = int(group.get("flags_count") or 0) + 1
     if exercise_status != "complete":
         result["issues"].append(f"Exercise coverage: {exercise_status}")
     result["issues"] = list(dict.fromkeys(result["issues"]))

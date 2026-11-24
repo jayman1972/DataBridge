@@ -36,6 +36,7 @@ def collect_flagged_groups(report: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         security = str(group.get("security") or "").strip()
         reasons = list(reasons_by_security.get(security) or [])
+        reasons.extend(group.get("position_warnings") or [])
         exercise_reason = str(
             (group.get("auto_exercise_risk") or {}).get("flag_reason") or ""
         ).strip()

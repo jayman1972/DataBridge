@@ -2389,6 +2389,7 @@ def _options_closeout_analyze(trades: list[dict], starting_net_by_security: dict
 
     for sec, ts in grouped.items():
         ts_sorted = sorted(ts, key=_trade_key)
+        is_futures_option = canonical_futures_option_key(sec) is not None
         net = float((starting_net_by_security or {}).get(sec, 0.0) or 0.0)
         first_time = None
         last_time = None
@@ -2402,6 +2403,11 @@ def _options_closeout_analyze(trades: list[dict], starting_net_by_security: dict
         for t in ts_sorted:
             oa_raw = _s(t.get("ORDER_ACTION") or t.get("ORDER") or "")
             oa = _norm_action(oa_raw)
+            if is_futures_option:
+                if oa.upper().startswith("BUY"):
+                    oa = "Buy"
+                elif oa.upper().startswith("SELL"):
+                    oa = "Sell"
             qty = _n(t.get("ACT_QTTY")) or _n(t.get("FILLED_QTTY")) or 0.0
             qty_abs = abs(qty)
             if qty_abs == 0:
@@ -2421,7 +2427,7 @@ def _options_closeout_analyze(trades: list[dict], starting_net_by_security: dict
 
             # Flag suspicious "open vs close" usage based on existing position.
             # What you want to catch: using an OPEN instruction when you intended to CLOSE.
-            if net_before > 0 and oa.upper() == "SELL TO OPEN":
+            if not is_futures_option and net_before > 0 and oa.upper() == "SELL TO OPEN":
                 flag_reason = "Position is long; this should typically be Sell to Close (not Sell to Open)"
                 suspicious_actions.append({
                     "security": sec,
@@ -2431,7 +2437,7 @@ def _options_closeout_analyze(trades: list[dict], starting_net_by_security: dict
                     "net_before": net_before,
                     "reason": flag_reason,
                 })
-            if net_before < 0 and oa.upper() == "BUY TO OPEN":
+            if not is_futures_option and net_before < 0 and oa.upper() == "BUY TO OPEN":
                 flag_reason = "Position is short; this should typically be Buy to Close (not Buy to Open)"
                 suspicious_actions.append({
                     "security": sec,
@@ -2455,6 +2461,7 @@ def _options_closeout_analyze(trades: list[dict], starting_net_by_security: dict
                 "security_display": _s(t.get("SECURITY_DISPLAY")) or sec,
                 "trade_time": trade_time or None,
                 "order_action": oa or None,
+                "is_futures_option": is_futures_option,
                 "qty": qty,
                 "price": price,
                 "broker": broker or None,

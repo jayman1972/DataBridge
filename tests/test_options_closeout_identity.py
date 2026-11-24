@@ -32,6 +32,54 @@ def emsx_fills(rows):
 
 
 class BloombergCloseoutIdentityTest(unittest.TestCase):
+    def test_futures_option_round_trip_uses_buy_sell_without_open_close_flags(self):
+        rows = [
+            {"SECURITY": "4OX6C 27550 INDEX", "ORDER_ID": "1", "ORDER_ACTION": "S", "ACT_QTTY": 100, "TRADE_DATE_TIME": "01"},
+            {"SECURITY": "4OX6C 27550 INDEX", "ORDER_ID": "2", "ORDER_ACTION": "B", "ACT_QTTY": 80, "TRADE_DATE_TIME": "02"},
+            {"SECURITY": "4OX6C 27550 INDEX", "ORDER_ID": "3", "ORDER_ACTION": "B", "ACT_QTTY": 20, "TRADE_DATE_TIME": "03"},
+        ]
+        result = legacy_helpers()["_options_closeout_analyze"](rows)
+        self.assertEqual([t["order_action"] for t in result["trades"]], ["Sell", "Buy", "Buy"])
+        self.assertEqual([t["net_after"] for t in result["trades"]], [-100, -20, 0])
+        self.assertTrue(all(t["is_futures_option"] for t in result["trades"]))
+        self.assertTrue(all(t["flag_reason"] is None for t in result["trades"]))
+        self.assertEqual(result["groups"][0]["flags_count"], 0)
+        self.assertEqual(result["suspicious_actions"], [])
+
+    def test_futures_option_ignores_open_close_instructions_in_both_directions(self):
+        for opening, action, label in ((5, "SS", "Sell"), (-5, "B", "Buy"), (-5, "BC", "Buy"), (5, "S", "Sell")):
+            with self.subTest(action=action):
+                security = "CLU6C 85 COMDTY"
+                result = legacy_helpers()["_options_closeout_analyze"]([
+                    {"SECURITY": security, "ORDER_ID": "1", "ORDER_ACTION": action, "ACT_QTTY": 5},
+                ], {security: opening})
+                self.assertEqual(result["trades"][0]["order_action"], label)
+                self.assertEqual(result["groups"][0]["net_end"], 0)
+                self.assertEqual(result["groups"][0]["flags_count"], 0)
+
+    def test_non_zero_unresolved_futures_option_still_has_holding_warning(self):
+        security = "4OX6C 27550 INDEX"
+        analysis = legacy_helpers()["_options_closeout_analyze"]([
+            {"SECURITY": security, "ORDER_ID": "1", "ORDER_ACTION": "B", "ACT_QTTY": 80},
+        ], {security: -100})
+        coverage = finish_coverage({"issues": []}, analysis, parse_option_contract, "complete")
+        self.assertEqual(analysis["groups"][0]["net_end"], -20)
+        self.assertEqual(analysis["groups"][0]["flags_count"], 1)
+        self.assertEqual(len(analysis["groups"][0]["position_warnings"]), 1)
+        self.assertIsNone(analysis["trades"][0]["flag_reason"])
+        self.assertEqual(coverage["status"], "incomplete")
+
+    def test_equity_option_open_close_flags_are_preserved(self):
+        security = "SPY261124C00725000"
+        analysis = legacy_helpers()["_options_closeout_analyze"]([
+            {"SECURITY": security, "ORDER_ID": "1", "ORDER_ACTION": "B", "ACT_QTTY": 5},
+        ], {security: -5})
+        self.assertEqual(analysis["groups"][0]["net_end"], 0)
+        self.assertEqual(analysis["groups"][0]["flags_count"], 1)
+        self.assertEqual(analysis["trades"][0]["order_action"], "Buy to Open")
+        self.assertFalse(analysis["trades"][0]["is_futures_option"])
+        self.assertIn("Buy to Close", analysis["trades"][0]["flag_reason"])
+
     def test_normalizes_futures_option_ticker_without_guessing_expiry(self):
         key = canonical_futures_option_key("  4Ox6P    25500.000 Index ")
         self.assertEqual(key, "4OX6P 25500 INDEX")

@@ -56,6 +56,7 @@ from supabase import Client, create_client
 
 from bloomberg import get_bloomberg_client
 from bloomberg.adjustments import validate_historical_adjustment_contract
+from bloomberg.intraday import register_intraday_routes
 from bloomberg.merger_monitor import refresh_open_merger_actions
 from sggg.close_price_reconcile import (
     fetch_close_price_reconciliation,
@@ -525,6 +526,9 @@ except Exception as e:
     print("\nError details:")
     print(f"{traceback.format_exc()}")
     sys.exit(1)
+
+
+register_intraday_routes(app, client=bloomberg_client, service_key=SUPABASE_KEY)
 
 
 @app.route("/health", methods=["GET"])

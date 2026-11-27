@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import secrets
@@ -12,6 +13,12 @@ import requests
 from flask import Flask, jsonify, request
 
 from .alphadesk_security_coverage import fetch_alphadesk_security_coverage
+from .scotia_borrow import (
+    DeliveryReviewRequired,
+    deliver_scotia_locates,
+    load_scotia_rows,
+    locate_csv,
+)
 from .trade_file_export import DEFAULT_TRADE_EXPORT_DIR, save_alphadesk_trade_file
 
 _LOGGER = logging.getLogger("data_bridge.sggg.production")
@@ -86,6 +93,45 @@ def register_sggg_production_routes(
 ) -> None:
     """Register narrowly scoped AlphaDesk production integration routes."""
 
+    @app.route("/sggg/scotia-borrow-requests", methods=["POST"])
+    def scotia_borrow_requests():
+        user_id, auth_error, auth_status = _authenticated_admin_user_id(
+            supabase_client, supabase_url, service_key
+        )
+        if auth_error:
+            return jsonify({"error": auth_error}), auth_status
+        if request.content_length and request.content_length > 32 * 1024:
+            return jsonify({"error": "Borrow request exceeds 32 KB."}), 413
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"error": "A JSON request body is required."}), 400
+        try:
+            rows = load_scotia_rows(
+                supabase_client, data.get("draft_ids"), data.get("trade_date")
+            )
+            expected = data.get("payload_sha256")
+            actual = hashlib.sha256(locate_csv(rows)).hexdigest()
+            if not isinstance(expected, str) or not secrets.compare_digest(
+                actual, expected
+            ):
+                raise ValueError(
+                    "The selected Scotia draft rows changed. Refresh the draft list and review them before sending."
+                )
+            result = deliver_scotia_locates(rows, data["trade_date"], user_id)
+            return jsonify(result), 200
+        except (ValueError, TypeError) as exc:
+            return jsonify({"error": str(exc)}), 422
+        except DeliveryReviewRequired as exc:
+            return jsonify({"error": str(exc)}), 409
+        except Exception:
+            # Never expose the credentials from the legacy connection script.
+            _LOGGER.exception("Scotia borrow request could not be delivered")
+            return jsonify(
+                {
+                    "error": "Scotia delivery is unavailable. Check the bridge connection, shared drive and Scotia SFTP settings, then retry. No delivery was confirmed."
+                }
+            ), 503
+
     @app.route("/sggg/alphadesk-trade-file", methods=["POST"])
     def alphadesk_trade_file():
         user_id, auth_error, auth_status = _authenticated_admin_user_id(
@@ -113,13 +159,17 @@ def register_sggg_production_routes(
                 400,
             )
         try:
-            verify_recorded_trade_file(supabase_client, user_id, filename, payload_sha256)
+            verify_recorded_trade_file(
+                supabase_client, user_id, filename, payload_sha256
+            )
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 422
         except Exception:
             _LOGGER.exception("Trade export ownership verification failed")
             return jsonify(
-                {"error": "The saved export record could not be verified. Retry saving."}
+                {
+                    "error": "The saved export record could not be verified. Retry saving."
+                }
             ), 503
         target_dir = Path(
             os.environ.get("SGGG_TRADE_EXPORT_DIR", str(DEFAULT_TRADE_EXPORT_DIR))
